@@ -5,6 +5,7 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 
 ## v0.2.2
 
+- New app logo (window, taskbar, installer, and shortcuts).
 - Mention sound alerts (opt-in): enable "Play a sound on mention" in Highlights settings.
   Each term chip (including your account names) has a bell button to mute just that term,
   and streamer mode silences all pings by default (changeable in Streamer Mode settings).
