@@ -54,6 +54,9 @@ jobs:
           $v = $m.Matches[0].Groups[1].Value
           gh release view "v$v" --repo $env:GITHUB_REPOSITORY *> $null
           $exists = if ($LASTEXITCODE -eq 0) { 'true' } else { 'false' }
+          # The runner's pwsh wrapper exits the step with $LASTEXITCODE — gh's
+          # expected "not found" exit 1 must not fail the step.
+          $global:LASTEXITCODE = 0
           echo "version=$v" >> $env:GITHUB_OUTPUT
           echo "pre=$(if ($v.Contains('-')) { 'true' } else { 'false' })" >> $env:GITHUB_OUTPUT
           echo "exists=$exists" >> $env:GITHUB_OUTPUT
