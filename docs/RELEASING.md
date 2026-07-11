@@ -7,8 +7,11 @@ version has been downloaded; it also applies pending updates on the next launch)
 ## Cutting a release
 
 1. Bump `version` in the workspace `Cargo.toml` and add a `## vX.Y.Z` section to
-   `CHANGELOG.md` (it becomes the GitHub release notes), then commit.
-2. Tag and push:
+   `CHANGELOG.md` (it becomes the GitHub release notes), then commit and push.
+2. **Wait for CI on that commit to go green** — it's the quality gate, and its
+   run is what warms the build cache the release run restores (tag-ref runs can
+   only restore caches created on `main`).
+3. Tag the CI-green commit and push the tag:
 
    ```sh
    git tag v0.2.0
@@ -34,6 +37,16 @@ Tag with a pre-release suffix — e.g. `git tag v0.3.0-beta.1` — and the workf
 a GitHub **pre-release**. Only users who enabled About → "Get beta updates" receive it;
 everyone else skips it, and beta users move to the next stable automatically once it's published
 (semver: `0.3.0-beta.1 < 0.3.0`).
+
+**The beta → stable cycle:** develop on `main`, tag `v0.3.0-beta.1`, let beta users test. Fixes
+go on `main` and get tagged `v0.3.0-beta.2`, etc. — beta users auto-update to each. When solid,
+tag `v0.3.0` (usually on the same commit as the last good beta); everyone converges on it.
+Not every release needs a beta — small fixes can tag stable directly.
+
+**Changelog during betas:** keep ONE `## v0.3.0` section and keep appending beta-cycle fixes to
+it — no per-beta sections. A beta tag inherits its stable section as release notes (the
+workflow strips the `-beta.N` suffix as a fallback when no exact section exists), and the final
+stable release publishes the completed section.
 
 Releases ship unsigned (SmartScreen shows "unknown publisher"; users click
 More info → Run anyway). If code signing is added later, it slots into the workflow at two
