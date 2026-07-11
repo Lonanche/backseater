@@ -6,8 +6,8 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that tag
 ## v0.2.2
 
 - Mention sound alerts (opt-in): enable "Play a sound on mention" in Highlights settings.
-  Each term chip (including your account names) has a 🔔 to mute just that term, and
-  streamer mode silences all pings by default (changeable in Streamer Mode settings).
+  Each term chip (including your account names) has a bell button to mute just that term,
+  and streamer mode silences all pings by default (changeable in Streamer Mode settings).
 - New About settings category: app version, the beta-updates opt-in, GitHub /
   release-notes links, and an "Open install folder" button.
 - After an update applies, a one-time banner announces the new version with a

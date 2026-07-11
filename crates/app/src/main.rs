@@ -2360,9 +2360,9 @@ impl BackseaterApp {
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(SharedString::from(
-                                    "Off by default. When on, each term's 🔔 mutes just that \
-                                     term; streamer mode mutes all sounds unless changed in \
-                                     Streamer Mode settings.",
+                                    "Off by default. When on, a term's bell button mutes just \
+                                     that term; streamer mode mutes all sounds unless changed \
+                                     in Streamer Mode settings.",
                                 )),
                         ),
                 )
