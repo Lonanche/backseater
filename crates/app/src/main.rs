@@ -2231,8 +2231,10 @@ impl BackseaterApp {
     /// aren't listed here.
     /// Renders one Highlights term list (Mentions or Ignore): the current terms
     /// as removable chips plus an input + Add button.
-    /// A mention chip's 🔔/🔕 sound toggle (only mention terms get one; ignore
-    /// terms have no sound). Muting is app-wide by normalized term.
+    /// A mention chip's bell/bell-off sound toggle (only mention terms get one;
+    /// ignore terms have no sound). Muting is app-wide by normalized term.
+    /// Vector icons, not 🔔/🔕 emoji — small emoji bells render ambiguously
+    /// (the plain bell read as "crossed"), so the two states looked alike.
     fn term_bell(&self, id_stem: &str, term: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
         let muted = self
             .settings
@@ -2242,10 +2244,22 @@ impl BackseaterApp {
         div()
             .id(SharedString::from(format!("bell-{id_stem}-{term}")))
             .px_1()
+            .py_0p5()
+            .rounded_md()
             .cursor_pointer()
-            .text_color(cx.theme().muted_foreground)
-            .when(muted, |s| s.opacity(0.6))
-            .child(SharedString::from(if muted { "🔕" } else { "🔔" }))
+            .hover(|s| s.bg(cx.theme().muted))
+            .when(muted, |s| s.opacity(0.55))
+            .child(
+                gpui::svg()
+                    .path(if muted {
+                        "icons/bell-off.svg"
+                    } else {
+                        "icons/bell.svg"
+                    })
+                    .size(px(14.))
+                    .flex_none()
+                    .text_color(cx.theme().muted_foreground),
+            )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_mention_mute(&toggle, cx);
             }))

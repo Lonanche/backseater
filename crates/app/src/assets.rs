@@ -41,6 +41,14 @@ const YOUTUBE_ICON: (&str, &[u8]) = (
     include_bytes!("../assets/youtube/youtube.png"),
 );
 
+/// The muted-mention bell (lucide `bell-off`, same ISC icon set the kit
+/// bundles — the kit only ships `bell.svg`). Served next to the kit's icons so
+/// the two bell states come from matching vector art, not ambiguous emoji.
+const BELL_OFF_ICON: (&str, &[u8]) = (
+    "icons/bell-off.svg",
+    include_bytes!("../assets/icons/bell-off.svg"),
+);
+
 const KICK_BADGES: &[(&str, &[u8])] = kick_badges![
     "bot",
     "broadcaster",
@@ -69,6 +77,9 @@ impl AssetSource for Assets {
         }
         if path == YOUTUBE_ICON.0 {
             return Ok(Some(Cow::Borrowed(YOUTUBE_ICON.1)));
+        }
+        if path == BELL_OFF_ICON.0 {
+            return Ok(Some(Cow::Borrowed(BELL_OFF_ICON.1)));
         }
         if let Some((_, bytes)) = KICK_BADGES.iter().find(|(p, _)| *p == path) {
             return Ok(Some(Cow::Borrowed(bytes)));
