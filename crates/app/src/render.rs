@@ -1437,29 +1437,39 @@ pub fn render_message(
         body.into_any_element()
     };
 
-    // Hover actions (📌 pin for moderators, ↩ reply) pinned to the row's right
-    // edge, hidden until the row is hovered (group-hover fades them in).
-    // `flex_none` keeps them from being squeezed; the group id ties the hover to
-    // this row only. Kept in the layout always (just transparent) so their
-    // appearance doesn't reflow the row.
+    // Hover actions (📌 pin for moderators, ↩ reply) overlaid on the row's
+    // top-right corner, hidden until the row is hovered (group-hover reveals
+    // them). An absolute overlay instead of a flex sibling so the message text
+    // uses the full row width; the opaque chip background covers whatever text
+    // sits under it while hovered. `visibility: hidden` (not opacity 0) matters:
+    // gpui skips a hidden element's mouse listeners, so the unhovered overlay
+    // can't intercept clicks or selection drags on the text beneath it.
     // The row's hover group is named by the base id itself (group names only
     // have to be distinct from other group names, and nothing else groups on
     // message ids) — like the ids above, a refcount bump instead of a per-frame
     // `format!`.
     let group_id = ids.base.clone();
     let body = if reply_click.is_some() || pin_click.is_some() {
-        let mut actions = h_flex().flex_none().items_start();
+        let mut actions = h_flex()
+            .invisible()
+            .group_hover(group_id.clone(), |s| s.visible())
+            .absolute()
+            .top_0()
+            .right_0()
+            .bg(rgb(palette().panel_bg))
+            .rounded_md()
+            .shadow_sm();
         if let Some(cb) = pin_click {
-            actions = actions.child(hover_action(ids.pin(), "📌 pin", &group_id, scale, cb));
+            actions = actions.child(hover_action(ids.pin(), "📌 pin", scale, cb));
         }
         if let Some(cb) = reply_click {
-            actions = actions.child(hover_action(ids.reply(), "↩ reply", &group_id, scale, cb));
+            actions = actions.child(hover_action(ids.reply(), "↩ reply", scale, cb));
         }
-        h_flex()
+        div()
+            .relative()
             .w_full()
             .min_w_0()
-            .items_start()
-            .child(div().flex_1().min_w_0().child(body))
+            .child(body)
             .child(actions)
             .into_any_element()
     } else {
@@ -1499,27 +1509,23 @@ pub fn render_message(
         .child(body)
 }
 
-/// One hover-revealed action chip at a row's right edge ("↩ reply", "📌 pin"):
-/// transparent until the row (its `group_id`) is hovered, highlighted on its own
-/// hover, firing `cb` on mouse-down (with propagation stopped so the same
-/// mouse-down doesn't refocus the log and steal focus back from the input).
+/// One action chip in a row's hover overlay ("↩ reply", "📌 pin"): highlighted
+/// on its own hover, firing `cb` on mouse-down (with propagation stopped so the
+/// same mouse-down doesn't refocus the log and steal focus back from the input).
+/// The show/hide-on-row-hover lives on the overlay container, not the chip.
 fn hover_action(
     id: impl Into<gpui::ElementId>,
     label: &'static str,
-    group_id: &SharedString,
     scale: Scale,
     cb: RowAction,
 ) -> gpui::AnyElement {
     div()
         .id(id)
         .flex_none()
-        .ml_1()
         .px_1()
         .cursor_pointer()
         .text_size(px(scale.small))
         .text_color(rgb(palette().timestamp))
-        .opacity(0.)
-        .group_hover(group_id.clone(), |s| s.opacity(1.))
         .hover(|s| s.text_color(rgb(palette().default_name)))
         .child(SharedString::from(label))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
