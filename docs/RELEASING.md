@@ -14,7 +14,9 @@ on the next launch).
 2. Add (or extend) the `## v0.2.3` section in `CHANGELOG.md` — it becomes the release notes.
 3. Commit and push.
 
-CI gates the release on clippy + tests: a red build publishes nothing — fix and push again.
+CI gates the release on clippy + tests, **and on the changelog**: a version with no matching
+`CHANGELOG.md` section fails the run instead of releasing (forgetting step 2 can't ship a
+release with empty notes). A red build publishes nothing — fix and push again.
 On green, the release appears at `https://github.com/Lonanche/backseater/releases` containing:
 
 - `Backseater-win-Setup.exe` — the installer (this is what users download)

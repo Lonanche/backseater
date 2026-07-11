@@ -73,7 +73,10 @@ jobs:
           $v = '${{ steps.version.outputs.version }}'
           $notes = Find-Notes "v$v"
           if (-not $notes) { $notes = Find-Notes ("v" + ($v -replace '-.*$')) }
-          if (-not $notes) { $notes = "_No changelog entry for this release._" }
+          if (-not $notes) {
+            Write-Error "CHANGELOG.md has no section for v$v (or its stable base version) — add one, then push again to release."
+            exit 1
+          }
           Set-Content notes.md $notes -Encoding utf8
 
       # Assets and the icon are embedded in the exe, so the install payload is
