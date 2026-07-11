@@ -46,6 +46,47 @@ const EMOTE_LIFETIME: std::time::Duration = std::time::Duration::from_secs(600);
 /// `IMAGE_POOL_CLEANUP_INTERVAL` (1 min).
 const EMOTE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How long the status bar's viewer count takes to count from the old number to
+/// a freshly pushed one, and how often it repaints while doing so (~20fps on its
+/// own per-view coalesced timer — plenty for a rolling number; the animated
+/// emotes run on their separate shared 20ms grid in `animated_img`).
+const VIEWER_ANIM_DURATION: std::time::Duration = std::time::Duration::from_millis(900);
+const VIEWER_ANIM_TICK: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// One platform's in-flight viewer-count animation: the shown value eases from
+/// `from` toward `to` over [`VIEWER_ANIM_DURATION`]. Retargeting mid-flight
+/// restarts from the currently *shown* value, so a burst of updates stays smooth.
+struct ViewerAnim {
+    from: u64,
+    to: u64,
+    started: std::time::Instant,
+}
+
+impl ViewerAnim {
+    fn value_at(&self, now: std::time::Instant) -> u64 {
+        let t = now.duration_since(self.started).as_secs_f32()
+            / VIEWER_ANIM_DURATION.as_secs_f32();
+        eased_count(self.from, self.to, t)
+    }
+
+    fn done(&self, now: std::time::Instant) -> bool {
+        // `from == to` is a first/settled count that never moves — without this,
+        // its 900ms window would schedule repaint ticks for a static number.
+        self.from == self.to || now.duration_since(self.started) >= VIEWER_ANIM_DURATION
+    }
+}
+
+/// The count shown at progress `t` (0..=1) between `from` and `to`, ease-out
+/// (fast start, settling into the final digits — the Twitch-style roll).
+fn eased_count(from: u64, to: u64, t: f32) -> u64 {
+    if t >= 1.0 {
+        return to;
+    }
+    let t = t.max(0.0);
+    let eased = (1.0 - (1.0 - t) * (1.0 - t)) as f64;
+    (from as f64 + (to as f64 - from as f64) * eased).round() as u64
+}
+
 /// Default size of the usercard child window (header + mod actions + recent
 /// messages fit without scrolling); the OS resizes it freely from there.
 const USERCARD_WINDOW_SIZE: gpui::Size<Pixels> = gpui::Size {
@@ -412,6 +453,13 @@ pub(crate) struct ChatView {
     /// message id)` — dismissing hides *that one pin* for this session; the next
     /// pinned message shows again.
     dismissed_pins: std::collections::HashSet<(bks_core::Platform, String)>,
+    /// Per-platform status-bar viewer-count animation: when a fresh count lands,
+    /// the shown number counts up/down to it (Twitch-style) instead of snapping.
+    /// Presentation-only, so it lives on the view (popouts animate their own).
+    viewer_anims: HashMap<bks_core::Platform, ViewerAnim>,
+    /// A viewer-anim repaint tick is already scheduled (one timer per view at a
+    /// time, like the animated-emote wakeup coalescing).
+    viewer_anim_tick_pending: bool,
     /// The open chatter usercard's data, if any. Opened by clicking a name in
     /// chat (see [`open_usercard`]); shown in its own OS window.
     usercard: Option<usercard::UserCard>,
@@ -652,6 +700,8 @@ impl ChatView {
             _mention_sub,
             ignore,
             dismissed_pins: std::collections::HashSet::new(),
+            viewer_anims: HashMap::new(),
+            viewer_anim_tick_pending: false,
             usercard: None,
             usercard_window: None,
             viewer_list: None,
@@ -737,6 +787,14 @@ impl ChatView {
             // Re-measure so a changed row's new height is picked up (rare event).
             ChannelEvent::Changed => {
                 self.list_state.reset(self.channel.read(cx).len());
+            }
+            // A viewer count moved: only the status bar (chrome outside the
+            // cached log) reads it — repaint without touching the log's
+            // measurements or its cached paint. This fires every ~30s per live
+            // platform, so it must stay this cheap.
+            ChannelEvent::ViewersChanged => {
+                cx.notify();
+                return;
             }
         }
         // An emote (re)load may have changed the picker's source. The picker is
@@ -867,6 +925,12 @@ impl ChatView {
     /// `None` until the first poll for that platform lands.
     pub(crate) fn live_status(&self, platform: bks_core::Platform, cx: &App) -> Option<LiveInfo> {
         self.channel.read(cx).live_status.get(&platform).cloned()
+    }
+
+    /// The latest concurrent viewer count for `platform` (status bar + tooltip),
+    /// `None` until a count lands or while offline.
+    pub(crate) fn viewer_count(&self, platform: bks_core::Platform, cx: &App) -> Option<u64> {
+        self.channel.read(cx).viewer_counts.get(&platform).copied()
     }
 
     /// Dirties the cached log child view so its rows re-render. Required after
@@ -1129,6 +1193,164 @@ impl ChatView {
     /// attempt fails with the API error as a notice, like the usercard actions.
     fn can_pin(&self, platform: bks_core::Platform, cx: &App) -> bool {
         self.channel.read(cx).can_moderate(platform)
+    }
+
+    /// The live-status bar above the log: one segment per platform of this tab
+    /// that is currently live — platform icon, channel name, a live dot, and the
+    /// latest concurrent viewer count ("LIVE" until a count lands), plus a Total
+    /// segment when 2+ platforms have counts. `None` (no bar at all) when nothing
+    /// is live — the common case, which allocates nothing (like the pin banners'
+    /// empty case). A fresh count doesn't snap: the shown number counts up/down
+    /// to it ([`ViewerAnim`]), repainting on a coalesced [`VIEWER_ANIM_TICK`]
+    /// timer until it settles.
+    fn render_status_bar(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if !crate::settings::show_status_bar() {
+            // Drop the animations too, so re-enabling later doesn't roll up
+            // from a long-stale number.
+            self.viewer_anims.clear();
+            return None;
+        }
+        let now = std::time::Instant::now();
+        // Copy the per-platform facts out first — the model borrow must end
+        // before the anim map below is touched.
+        let model = self.channel.read(cx);
+        let facts = [
+            bks_core::Platform::Twitch,
+            bks_core::Platform::Kick,
+            bks_core::Platform::YouTube,
+        ]
+        .map(|platform| {
+            (
+                platform,
+                model.live_status.get(&platform).is_some_and(|s| s.live),
+                model.viewer_counts.get(&platform).copied(),
+            )
+        });
+
+        // `Vec::new` doesn't allocate — nothing does until a live platform
+        // actually pushes a segment.
+        let mut segments: Vec<(bks_core::Platform, SharedString, Option<u64>)> = Vec::new();
+        for (platform, live, target) in facts {
+            let name = match platform {
+                bks_core::Platform::Kick => self.config.kick_channel.trim(),
+                bks_core::Platform::YouTube => self.config.youtube_channel.trim(),
+                _ => self.config.twitch_channel.trim(),
+            };
+            if name.is_empty() || !live {
+                // Not shown: drop any animation so a later count starts fresh
+                // instead of rolling up from the stale value.
+                self.viewer_anims.remove(&platform);
+                continue;
+            }
+            let displayed = match target {
+                // Live but no count yet: a bare "LIVE" segment.
+                None => {
+                    self.viewer_anims.remove(&platform);
+                    None
+                }
+                Some(target) => Some(match self.viewer_anims.get_mut(&platform) {
+                    Some(anim) => {
+                        if anim.to != target {
+                            // Retarget from the value currently on screen.
+                            *anim = ViewerAnim {
+                                from: anim.value_at(now),
+                                to: target,
+                                started: now,
+                            };
+                        }
+                        anim.value_at(now)
+                    }
+                    // First count for this platform: show it as-is (nothing to
+                    // roll from; from == to reads as already done).
+                    None => {
+                        self.viewer_anims.insert(
+                            platform,
+                            ViewerAnim {
+                                from: target,
+                                to: target,
+                                started: now,
+                            },
+                        );
+                        target
+                    }
+                }),
+            };
+            segments.push((platform, SharedString::from(name.to_string()), displayed));
+        }
+        if self.viewer_anims.values().any(|a| !a.done(now)) {
+            self.schedule_viewer_anim_tick(cx);
+        }
+        if segments.is_empty() {
+            return None;
+        }
+        // With two or more counted platforms, a combined total closes the bar.
+        // Summing the *displayed* (animating) values keeps it rolling in sync.
+        let counted = segments.iter().filter(|(_, _, c)| c.is_some()).count();
+        let total =
+            (counted >= 2).then(|| segments.iter().filter_map(|(_, _, c)| *c).sum::<u64>());
+        Some(
+            h_flex()
+                .w_full()
+                .px_2()
+                .py_1()
+                .gap_4()
+                .flex_wrap()
+                .items_center()
+                .bg(cx.theme().secondary)
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .text_size(px(self.font_size * 0.9))
+                .children(segments.into_iter().map(|(platform, channel, viewers)| {
+                    let readout = match viewers {
+                        Some(n) => format!("{} viewers", format_count(n)),
+                        None => "LIVE".to_string(),
+                    };
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .child(crate::tip_platform_icon(platform))
+                        .child(div().font_weight(FontWeight::BOLD).child(channel))
+                        .child(
+                            div()
+                                .text_color(gpui::rgb(render::live_text()))
+                                .child(SharedString::from("●")),
+                        )
+                        .child(SharedString::from(readout))
+                }))
+                .children(total.map(|total| {
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::BOLD)
+                                .child(SharedString::from("Total")),
+                        )
+                        .child(SharedString::from(format!(
+                            "{} viewers",
+                            format_count(total)
+                        )))
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// Schedules one repaint tick for the viewer-count animation — coalesced: at
+    /// most one pending timer per view, re-armed by the next render while any
+    /// animation is still running.
+    fn schedule_viewer_anim_tick(&mut self, cx: &mut Context<Self>) {
+        if self.viewer_anim_tick_pending {
+            return;
+        }
+        self.viewer_anim_tick_pending = true;
+        cx.spawn(async move |view, cx| {
+            cx.background_executor().timer(VIEWER_ANIM_TICK).await;
+            let _ = view.update(cx, |view, cx| {
+                view.viewer_anim_tick_pending = false;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The pinned-message banners (Twitch, then Kick) shown above the log — one
@@ -3268,7 +3490,9 @@ impl Render for ChatView {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            // Active pinned messages (per platform) sit above the log.
+            // Live viewer-count status bar, then any active pinned messages
+            // (per platform), sit above the log.
+            .children(self.render_status_bar(cx))
             .children(self.render_pin_banners(cx))
             .child(layout_grid)
             // The emote picker, when open, sits between the feed and the input bar.
@@ -3370,6 +3594,20 @@ impl Render for ChatView {
             )
             .children(emote_popup_overlay)
     }
+}
+
+/// Formats a count with thousands separators ("1234567" → "1,234,567"), for the
+/// status bar's and tooltip's viewer readouts.
+pub(crate) fn format_count(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Byte offset where the word ending at `cursor` starts: just past the last
@@ -3633,5 +3871,49 @@ mod tests {
         insert(&mut rows, 2, false);
         insert(&mut rows, 3, false);
         assert_eq!(timestamps(&rows), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn eased_count_interpolates_both_directions() {
+        assert_eq!(eased_count(100, 200, 0.0), 100);
+        assert_eq!(eased_count(100, 200, 1.0), 200);
+        assert_eq!(eased_count(200, 100, 1.0), 100);
+        let mid_up = eased_count(100, 200, 0.5);
+        assert!(mid_up > 100 && mid_up < 200);
+        let mid_down = eased_count(200, 100, 0.5);
+        assert!(mid_down > 100 && mid_down < 200);
+        // Out-of-range progress clamps to the endpoints.
+        assert_eq!(eased_count(100, 200, 1.5), 200);
+        assert_eq!(eased_count(100, 200, -0.5), 100);
+        // A same-value "animation" holds steady.
+        assert_eq!(eased_count(42, 42, 0.3), 42);
+    }
+
+    #[test]
+    fn settled_viewer_anim_is_done_immediately() {
+        let now = std::time::Instant::now();
+        // A first/settled count (from == to) must not hold repaint ticks open.
+        let settled = ViewerAnim {
+            from: 42,
+            to: 42,
+            started: now,
+        };
+        assert!(settled.done(now));
+        let rolling = ViewerAnim {
+            from: 100,
+            to: 200,
+            started: now,
+        };
+        assert!(!rolling.done(now));
+        assert!(rolling.done(now + VIEWER_ANIM_DURATION));
+    }
+
+    #[test]
+    fn format_count_groups_thousands() {
+        assert_eq!(format_count(0), "0");
+        assert_eq!(format_count(999), "999");
+        assert_eq!(format_count(1000), "1,000");
+        assert_eq!(format_count(12345), "12,345");
+        assert_eq!(format_count(1234567), "1,234,567");
     }
 }

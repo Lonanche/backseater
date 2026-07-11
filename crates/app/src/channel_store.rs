@@ -99,6 +99,11 @@ pub enum ChannelEvent {
     /// A non-structural change (a row's content updated in place, e.g. an AutoMod
     /// row resolved, or side-table state changed) — views just repaint.
     Changed,
+    /// A viewer count changed. Split from [`Changed`](Self::Changed) because it
+    /// fires steadily (every ~30s per live platform) and only the status bar /
+    /// tooltip read it — views answer with a bare repaint, NOT the log re-measure
+    /// `Changed` triggers.
+    ViewersChanged,
 }
 
 /// One channel's shared model: the message buffer + connection + per-channel state.
@@ -142,6 +147,9 @@ pub struct ChannelModel {
     pub pins: HashMap<Platform, ActivePin>,
     /// Latest live status per platform (for the tab strip's hover tooltip).
     pub live_status: HashMap<Platform, LiveInfo>,
+    /// Latest concurrent viewer count per platform (for the status bar), fed by
+    /// the periodic `ChatEvent::Viewers` updates; absent = unknown or offline.
+    pub viewer_counts: HashMap<Platform, u64>,
     /// Picker emote sets per platform (channel 7TV + native).
     pub emotes_twitch: Vec<bks_core::Emote>,
     pub emotes_kick: Vec<bks_core::Emote>,
@@ -550,6 +558,11 @@ impl ChannelModel {
                         link,
                     },
                 );
+                // A stale viewer count makes no sense once offline (the polls
+                // also emit `Viewers(None)`, but push-based transitions don't).
+                if !live {
+                    self.viewer_counts.remove(&platform);
+                }
                 if flag_changed {
                     self.row_push_back(
                         Row::Live {
@@ -561,6 +574,26 @@ impl ChannelModel {
                     );
                 } else {
                     cx.emit(ChannelEvent::Changed);
+                }
+            }
+            ChatEvent::Viewers { platform, count } => {
+                // Deduped: Twitch's Hermes push re-sends an unchanged number
+                // every ~30s, which must not fan out repaints. A count for a
+                // platform known to be offline is a late frame racing the
+                // offline transition — dropped so it can't resurrect a stale
+                // entry the offline `Live` just cleared.
+                let changed = match count {
+                    Some(n) => {
+                        let live = self
+                            .live_status
+                            .get(&platform)
+                            .is_none_or(|s| s.live);
+                        live && self.viewer_counts.insert(platform, n) != Some(n)
+                    }
+                    None => self.viewer_counts.remove(&platform).is_some(),
+                };
+                if changed {
+                    cx.emit(ChannelEvent::ViewersChanged);
                 }
             }
             ChatEvent::Emotes { platform, emotes } => {
@@ -672,6 +705,7 @@ fn build_model(
             cosmetics: HashMap::new(),
             pins: HashMap::new(),
             live_status: HashMap::new(),
+            viewer_counts: HashMap::new(),
             emotes_twitch: Vec::new(),
             emotes_kick: Vec::new(),
             emotes_youtube: Vec::new(),

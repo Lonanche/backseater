@@ -72,8 +72,10 @@ pub fn connect(
 
     // Twitch live status is polled (via IVR, anonymous): an immediate first check,
     // then every LIVE_POLL_SECS, emitting a `Live` event on a transition. Kick does
-    // NOT poll — its `StreamerIsLive`/`StopStreamBroadcast` arrive on the Pusher
-    // `channel.{id}` subscription the connector already holds (real-time, no poll).
+    // NOT poll its live *status* — its `StreamerIsLive`/`StopStreamBroadcast` arrive
+    // on the Pusher `channel.{id}` subscription the connector already holds
+    // (real-time, no poll) — but its viewer *count* has no push event, so that one
+    // number is polled from the lightweight livestream endpoint.
     if !twitch.is_empty() {
         runtime().spawn(poll_twitch_live(twitch.clone(), tx.clone()));
     }
@@ -81,6 +83,7 @@ pub fn connect(
     // Kick: emotes arrive inline, so messages forward unchanged. We also record
     // each chatter's id with the controller so Kick moderation can target them.
     if !kick.is_empty() {
+        runtime().spawn(poll_kick_viewers(kick.clone(), tx.clone()));
         runtime().spawn(run_kick(
             Arc::new(KickSource::new()),
             kick,
@@ -100,6 +103,9 @@ pub fn connect(
 
 /// How often to re-check a channel's live status (Chatterino's 30s).
 const LIVE_POLL_SECS: u64 = 30;
+/// The Kick viewer-count poll's slower cadence while the channel is offline —
+/// going live is push-based (Pusher), so only the first *count* waits this long.
+const KICK_OFFLINE_POLL_SECS: u64 = 120;
 
 /// One live-status observation, compared across polls so a `Live` event is only
 /// emitted on a change: (live, title, game, started_at, last_stream).
@@ -120,11 +126,45 @@ async fn poll_twitch_live(channel: String, tx: Sink) {
     // (`Some(None)` = fetched, channel has no VODs) and is cleared while live so
     // the fresh VOD is picked up after the stream ends.
     let last_cache: Arc<tokio::sync::Mutex<Option<Option<LastStream>>>> = Arc::default();
+    // The viewer count is pushed by Hermes, but only every ~30s — seed it once
+    // per live stretch from GQL so the bar doesn't sit at a bare "LIVE" until
+    // the first push (which then takes over).
+    let seeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seed_tx = tx.clone();
     poll_live(tx, bks_core::Platform::Twitch, move || {
         let channel = channel.clone();
         let last_cache = last_cache.clone();
+        let seeded = seeded.clone();
+        let seed_tx = seed_tx.clone();
         async move {
             let s = bks_twitch::fetch_live_status(&channel).await?;
+            use std::sync::atomic::Ordering;
+            if s.live {
+                // Only a real number both marks the seed done and is emitted:
+                // GQL lags IVR at go-live (and a hidden count is None forever),
+                // and forwarding that None would delete a count Hermes already
+                // pushed. A miss just retries on the next poll.
+                if !seeded.load(Ordering::Relaxed) {
+                    match bks_twitch::fetch_viewer_count(&channel).await {
+                        Ok(Some(count)) => {
+                            seeded.store(true, Ordering::Relaxed);
+                            let _ = seed_tx
+                                .send(ChatEvent::Viewers {
+                                    platform: bks_core::Platform::Twitch,
+                                    count: Some(count),
+                                })
+                                .await;
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            tracing::debug!("twitch viewer-count seed failed for {channel}: {err:#}");
+                        }
+                    }
+                }
+            } else {
+                // Re-seed the next live stretch.
+                seeded.store(false, Ordering::Relaxed);
+            }
             let last_stream = if s.live {
                 *last_cache.lock().await = None;
                 None
@@ -160,7 +200,9 @@ async fn poll_twitch_live(channel: String, tx: Sink) {
 /// forwards a `Live` event whenever the live flag changes from the previous
 /// observation. A failed check is logged and skipped (the previous state is kept),
 /// so a transient network blip doesn't spuriously toggle the status. Ends when the
-/// UI drops the receiver.
+/// UI drops the receiver. (Twitch's viewer *count* doesn't ride this poll: it's
+/// pushed by the Hermes `video-playback-by-id` topic — see `twitch::pubsub` —
+/// which is fresher than anything IVR/GQL serve.)
 async fn poll_live<F, Fut>(tx: Sink, platform: bks_core::Platform, check: F)
 where
     F: Fn() -> Fut,
@@ -202,6 +244,49 @@ where
             }
         }
         tokio::time::sleep(std::time::Duration::from_secs(LIVE_POLL_SECS)).await;
+    }
+}
+
+/// Polls Kick's concurrent viewer count every [`LIVE_POLL_SECS`], emitting a
+/// `Viewers` event on a change. Only the *count* is polled — Kick's live/offline
+/// transitions stay push-based (Pusher) — because Kick has no viewer-count push
+/// event. `Ok(None)` (offline) clears the count; a failed request keeps the
+/// previous one.
+async fn poll_kick_viewers(channel: String, tx: Sink) {
+    let mut prev: Option<Option<u64>> = None;
+    loop {
+        if tx.is_closed() {
+            break;
+        }
+        // Back off while offline: most Kick tabs are offline channels most of
+        // the day, and the live *transition* arrives instantly via Pusher —
+        // only the count (which the transition can't carry) waits for the next
+        // slower tick. A failed request keeps the previous state and cadence.
+        let mut offline = matches!(prev, Some(None));
+        match bks_kick::fetch_viewer_count(&channel).await {
+            Ok(count) => {
+                offline = count.is_none();
+                if prev != Some(count) {
+                    prev = Some(count);
+                    let event = ChatEvent::Viewers {
+                        platform: bks_core::Platform::Kick,
+                        count,
+                    };
+                    if tx.send(event).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!("kick viewer-count check failed for {channel}: {err:#}");
+            }
+        }
+        let secs = if offline {
+            KICK_OFFLINE_POLL_SECS
+        } else {
+            LIVE_POLL_SECS
+        };
+        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
     }
 }
 

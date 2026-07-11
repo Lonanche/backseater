@@ -9,8 +9,8 @@ mod history;
 
 pub use actions::{AuthExpired, KickActions, OnRefreshed, PinnableMessage};
 pub use api::{
-    fetch_channel_emotes, fetch_channel_info, fetch_user_info, ChannelInfo, KickUserInfo,
-    LastStream, SubscriberBadge,
+    fetch_channel_emotes, fetch_channel_info, fetch_user_info, fetch_viewer_count, ChannelInfo,
+    KickUserInfo, LastStream, SubscriberBadge,
 };
 pub use connector::KickSource;
 pub use history::fetch_recent;

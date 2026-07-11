@@ -14,6 +14,7 @@ mod irc_manager;
 mod ivr;
 mod pubsub;
 mod videos;
+mod viewers;
 
 pub use actions::{TwitchActions, TwitchUserCard};
 pub use badges::{fetch_badges, BadgeMap};
@@ -25,6 +26,7 @@ pub use history::fetch_recent;
 pub use ivr::{fetch_live_status, LiveStatus, SubAge};
 pub use pubsub::run as run_pubsub;
 pub use videos::fetch_last_stream;
+pub use viewers::fetch_viewer_count;
 
 // Re-exported for unit testing the parser in isolation.
 pub use builder::build_privmsg_elements;

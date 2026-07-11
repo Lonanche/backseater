@@ -118,6 +118,10 @@ pub struct Settings {
     /// Whether the pinned-message banner shows for Kick pins.
     #[serde(default = "default_true")]
     pub show_pinned_kick: bool,
+    /// Whether the live status bar (per-platform viewer counts) shows above the
+    /// chat log. On by default.
+    #[serde(default = "default_true")]
+    pub show_status_bar: bool,
     /// Whether the tab strip shows the global Mentions tab: a pinned pseudo-tab
     /// collecting every tab's mentions in one feed. Off by default.
     #[serde(default)]
@@ -162,6 +166,7 @@ impl Default for Settings {
             streamer_mode: StreamerModeChoice::Auto,
             show_pinned_twitch: true,
             show_pinned_kick: true,
+            show_status_bar: true,
             mentions_tab: false,
             beta_updates: false,
             mention_sound: false,
@@ -194,12 +199,13 @@ impl Settings {
         }
     }
 
-    /// Pushes the pinned-banner visibility into the process-wide flags the chat
-    /// views render against (same pattern as the theme flag). Call on load and
-    /// after every toggle.
-    pub fn apply_pinned_visibility(&self) {
+    /// Pushes the pinned-banner and status-bar visibility into the process-wide
+    /// flags the chat views render against (same pattern as the theme flag).
+    /// Call on load and after every toggle.
+    pub fn apply_visibility_flags(&self) {
         SHOW_PINNED_TWITCH.store(self.show_pinned_twitch, Ordering::Relaxed);
         SHOW_PINNED_KICK.store(self.show_pinned_kick, Ordering::Relaxed);
+        SHOW_STATUS_BAR.store(self.show_status_bar, Ordering::Relaxed);
     }
 
     /// Pushes the mention-sound master + streamer-mute toggles into the
@@ -228,6 +234,13 @@ use std::sync::RwLock;
 
 static SHOW_PINNED_TWITCH: AtomicBool = AtomicBool::new(true);
 static SHOW_PINNED_KICK: AtomicBool = AtomicBool::new(true);
+static SHOW_STATUS_BAR: AtomicBool = AtomicBool::new(true);
+
+/// Whether the live status bar (viewer counts) is enabled (a persisted,
+/// process-wide preference — see [`Settings::apply_visibility_flags`]).
+pub fn show_status_bar() -> bool {
+    SHOW_STATUS_BAR.load(Ordering::Relaxed)
+}
 
 /// The process-wide **global** ignore list (the app-wide `ignored_terms`). The
 /// shared channel models drop matching messages at ingest, so a globally-ignored
@@ -251,7 +264,7 @@ pub fn global_ignored(text: &str) -> bool {
 }
 
 /// Whether the pinned-message banner is enabled for `platform` (a persisted,
-/// process-wide preference — see [`Settings::apply_pinned_visibility`]).
+/// process-wide preference — see [`Settings::apply_visibility_flags`]).
 /// Platforms without pins default to hidden.
 pub fn show_pinned(platform: bks_core::Platform) -> bool {
     match platform {

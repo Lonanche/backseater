@@ -574,8 +574,8 @@ impl BackseaterApp {
         // Apply the persisted 7TV-cosmetics toggle process-wide before any tab
         // connects, so the bridge resolves (or skips) paints/badges accordingly.
         bks_emotes::set_paints_enabled(settings.show_7tv_paints);
-        // Same for the per-platform pinned-banner visibility the chat views read.
-        settings.apply_pinned_visibility();
+        // Same for the pinned-banner + status-bar visibility the chat views read.
+        settings.apply_visibility_flags();
         // And the mention-sound master + streamer-mute flags the play path reads.
         settings.apply_sound_flags();
         // Apply the persisted color theme to both the kit (window chrome, buttons,
@@ -1918,6 +1918,14 @@ impl BackseaterApp {
                 v_flex()
                     .gap_1()
                     .child(
+                        Checkbox::new("show-status-bar")
+                            .label("Show live status bar (viewer counts)")
+                            .checked(self.settings.show_status_bar)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.set_show_status_bar(*checked, cx);
+                            })),
+                    )
+                    .child(
                         Checkbox::new("show-pinned-twitch")
                             .label("Show pinned messages (Twitch)")
                             .checked(self.settings.show_pinned_twitch)
@@ -2542,7 +2550,23 @@ impl BackseaterApp {
         }
         *field = on;
         self.settings.save();
-        self.settings.apply_pinned_visibility();
+        self.settings.apply_visibility_flags();
+        for tab in &self.tabs {
+            tab.view.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
+    }
+
+    /// Toggles the live status bar (viewer counts). Persists, flips the
+    /// process-wide flag, and repaints every tab (the bar lives outside the
+    /// cached log, so a plain notify reaches it).
+    fn set_show_status_bar(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.settings.show_status_bar == on {
+            return;
+        }
+        self.settings.show_status_bar = on;
+        self.settings.save();
+        self.settings.apply_visibility_flags();
         for tab in &self.tabs {
             tab.view.update(cx, |_, cx| cx.notify());
         }
@@ -3094,16 +3118,19 @@ impl BackseaterApp {
                         platform: bks_core::Platform::Twitch,
                         channel: tab.config.twitch_channel.trim().to_string(),
                         status: view.live_status(bks_core::Platform::Twitch, cx),
+                        viewers: view.viewer_count(bks_core::Platform::Twitch, cx),
                     },
                     TipPlatform {
                         platform: bks_core::Platform::Kick,
                         channel: tab.config.kick_channel.trim().to_string(),
                         status: view.live_status(bks_core::Platform::Kick, cx),
+                        viewers: view.viewer_count(bks_core::Platform::Kick, cx),
                     },
                     TipPlatform {
                         platform: bks_core::Platform::YouTube,
                         channel: tab.config.youtube_channel.trim().to_string(),
                         status: view.live_status(bks_core::Platform::YouTube, cx),
+                        viewers: view.viewer_count(bks_core::Platform::YouTube, cx),
                     },
                 ];
                 let has_channel = tab.config.has_channel();
@@ -3702,12 +3729,14 @@ struct TipPlatform {
     platform: bks_core::Platform,
     channel: String,
     status: Option<LiveInfo>,
+    /// Latest concurrent viewer count, shown while live.
+    viewers: Option<u64>,
 }
 
-/// A small platform logo for the tooltip header — the real logo when the
-/// platform ships one ([`Platform::icon_url`]), else its brand-colored glyph.
-/// Fixed 16px (a popover, not a font-scaled chat row).
-fn tip_platform_icon(platform: bks_core::Platform) -> gpui::AnyElement {
+/// A small platform logo for the tooltip header and the chat status bar — the
+/// real logo when the platform ships one ([`Platform::icon_url`]), else its
+/// brand-colored glyph. Fixed 16px (chrome, not a font-scaled chat row).
+pub(crate) fn tip_platform_icon(platform: bks_core::Platform) -> gpui::AnyElement {
     match platform.icon_url() {
         Some(url) => img(SharedString::from(url))
             .h(px(16.))
@@ -3765,6 +3794,11 @@ fn live_tooltip_content(platforms: &[TipPlatform]) -> gpui::Div {
                         format!("last seen {} ago", format_uptime(now - since))
                     })
             };
+            // While live, the viewer count rides the header, right of the uptime.
+            let viewers = p
+                .viewers
+                .filter(|_| live)
+                .map(|n| format!("{} viewers", chatview::format_count(n)));
             // While live, the category rides the header too, right of the uptime.
             let game = p
                 .status
@@ -3810,6 +3844,11 @@ fn live_tooltip_content(platforms: &[TipPlatform]) -> gpui::Div {
                         div()
                             .text_color(gpui::rgb(render::offline_text()))
                             .child(SharedString::from(t))
+                    }))
+                    .children(viewers.map(|v| {
+                        div()
+                            .text_color(gpui::rgb(render::offline_text()))
+                            .child(SharedString::from(v))
                     }))
                     .children(game.map(SharedString::from)),
             );

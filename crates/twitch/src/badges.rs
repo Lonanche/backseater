@@ -11,9 +11,8 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-/// Public web client-id Twitch's own site uses for unauthenticated GraphQL.
-const WEB_CLIENT_ID: &str = "kimne78kx3ncx6brgo4mv6wki5h1ko";
-const GQL_URL: &str = "https://gql.twitch.tv/gql";
+use crate::http::{GQL_URL, WEB_CLIENT_ID};
+
 /// Persisted-query hash for `ChatList_Badges` (returns global + channel badges).
 const BADGES_QUERY_HASH: &str = "86f43113c04606e6476e39dcd432dee47c994d77a83e54b732e11d4935f0cd08";
 

@@ -232,6 +232,15 @@ pub enum ChatEvent {
         last_stream: Option<LastStream>,
         link: Option<String>,
     },
+    /// A periodic concurrent-viewer-count update for the platform's stream,
+    /// separate from [`ChatEvent::Live`] so a count refresh can't clobber the
+    /// live-status metadata (title/game/last stream). `None` = unknown or
+    /// offline. Emitted only when the count changes; the UI's status bar shows
+    /// it next to each live platform.
+    Viewers {
+        platform: Platform,
+        count: Option<u64>,
+    },
 }
 
 /// How a held AutoMod message was resolved.

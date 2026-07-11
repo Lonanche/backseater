@@ -1,14 +1,18 @@
-//! Anonymous Twitch channel-point + pinned-message connector over the Hermes
-//! WebSocket.
+//! Anonymous Twitch channel-point + pinned-message + viewer-count connector
+//! over the Hermes WebSocket.
 //!
-//! Channel-point redemptions and pinned-chat updates are *not* delivered over
-//! IRC — twitch.tv subscribes to them on `wss://hermes.twitch.tv` using the
-//! public web client id (no user auth), which is what lets a logged-out viewer
-//! see "X redeemed <reward>" and the pinned banner. We do the same: open Hermes,
-//! subscribe to `community-points-channel-v1.<channel_id>` and
-//! `pinned-chat-updates-v1.<channel_id>`, and translate `reward-redeemed`
-//! notifications into highlighted event rows and `pin-message`/`unpin-message`
-//! into [`ChatEvent::PinMessage`]/[`ChatEvent::UnpinMessage`].
+//! Channel-point redemptions, pinned-chat updates, and the live viewer count
+//! are *not* delivered over IRC — twitch.tv subscribes to them on
+//! `wss://hermes.twitch.tv` using the public web client id (no user auth),
+//! which is what lets a logged-out viewer see "X redeemed <reward>", the pinned
+//! banner, and the moving viewer number. We do the same: open Hermes, subscribe
+//! to `community-points-channel-v1.<channel_id>`,
+//! `pinned-chat-updates-v1.<channel_id>` and
+//! `video-playback-by-id.<channel_id>`, and translate `reward-redeemed`
+//! notifications into highlighted event rows, `pin-message`/`unpin-message`
+//! into [`ChatEvent::PinMessage`]/[`ChatEvent::UnpinMessage`], and `viewcount`
+//! pushes (every ~30s while live — the exact number the site shows; GQL's
+//! `viewersCount` only moves in coarser buckets) into [`ChatEvent::Viewers`].
 //!
 //! Hermes wraps each notification as `{type:"notification", notification:{pubsub}}`
 //! where `pubsub` is itself a JSON *string* (parsed a second time, like Kick's
@@ -43,15 +47,18 @@ struct Notification {
     pubsub: String,
 }
 
-/// The decoded PubSub payload — shared envelope for both topics; `data`'s shape
-/// depends on `type` (`reward-redeemed` vs `pin-message`/`unpin-message`), so
-/// it's kept raw and parsed per kind.
+/// The decoded PubSub payload — shared envelope for all three topics; `data`'s
+/// shape depends on `type` (`reward-redeemed` vs `pin-message`/`unpin-message`),
+/// so it's kept raw and parsed per kind. The video-playback topic's payloads are
+/// flat (no `data`): a `viewcount` carries `viewers` at the top level.
 #[derive(Deserialize)]
 struct PubSubPayload {
     #[serde(rename = "type")]
     kind: String,
     #[serde(default)]
     data: serde_json::Value,
+    #[serde(default)]
+    viewers: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -171,15 +178,16 @@ pub async fn run(channel_id: String, tx: ChatSink) -> anyhow::Result<()> {
         .context("connecting to Twitch Hermes")?;
     let (mut write, mut read) = ws.split();
 
-    // Subscribe to the channel's community-points + pinned-chat topics (one
-    // socket, two subscriptions). Hermes wants a unique id per request; a suffix
-    // off the channel id is enough here.
+    // Subscribe to the channel's community-points + pinned-chat + video-playback
+    // topics (one socket, three subscriptions). Hermes wants a unique id per
+    // request; a suffix off the channel id is enough here.
     for (tag, topic) in [
         (
             "points",
             format!("community-points-channel-v1.{channel_id}"),
         ),
         ("pins", format!("pinned-chat-updates-v1.{channel_id}")),
+        ("vc", format!("video-playback-by-id.{channel_id}")),
     ] {
         let subscribe = format!(
             r#"{{"type":"subscribe","id":"sub-{tag}-{channel_id}","subscribe":{{"id":"ps-{tag}-{channel_id}","type":"pubsub","pubsub":{{"topic":"{topic}"}}}}}}"#
@@ -252,6 +260,21 @@ pub async fn run(channel_id: String, tx: ChatSink) -> anyhow::Result<()> {
             "unpin-message" => ChatEvent::UnpinMessage {
                 platform: Platform::Twitch,
             },
+            // The site's live viewer number, pushed every ~30s while
+            // broadcasting. `stream-down` is deliberately NOT mapped to a
+            // count-clear: the topic also fires it on ad transitions / brief
+            // encoder drops mid-stream, which blanked a valid number; a real
+            // offline is cleared by the IVR poll's `Live { live: false }`.
+            "viewcount" => {
+                let Some(count) = payload.viewers else {
+                    continue;
+                };
+                tracing::debug!("twitch viewer count for channel {channel_id}: {count}");
+                ChatEvent::Viewers {
+                    platform: Platform::Twitch,
+                    count: Some(count),
+                }
+            }
             _ => continue,
         };
         if tx.send(event).is_err() {
@@ -388,6 +411,15 @@ mod tests {
             redeem_text(&data.redemption),
             "alice redeemed testtest (1 point)."
         );
+    }
+
+    #[test]
+    fn parses_flat_viewcount_payload() {
+        // Captured live from Hermes `video-playback-by-id`: flat, no `data`.
+        let inner = r#"{"type":"viewcount","server_time":1783794771.584091,"viewers":4090,"collaboration_status":"none","collaboration_viewers":0,"costream_status":"","costream_viewers":0}"#;
+        let payload: PubSubPayload = serde_json::from_str(inner).unwrap();
+        assert_eq!(payload.kind, "viewcount");
+        assert_eq!(payload.viewers, Some(4090));
     }
 
     #[test]

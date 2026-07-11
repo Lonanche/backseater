@@ -120,6 +120,46 @@ platform = implement one trait + one message builder, with zero UI changes**.
   narrow" footer. The search `InputState` is **window-bound** (created against the viewer-list
   window when it opens, like the settings inputs); list state lives on `ChatView`
   (`viewer_list`/`viewer_list_window`), module `crates/app/src/viewerlist.rs`.
+- **Live status bar + viewer counts**: a slim bar at the top of each chat view (above the pin
+  banners; popouts get it too) shows, per live platform of the tab, its icon + channel name + a
+  live dot + the concurrent viewer count (`ChatView::render_status_bar`; hidden when nothing is
+  live); the tab-chip tooltip shows the same count next to the uptime. Counts ride a dedicated
+  `ChatEvent::Viewers { platform, count }` (separate from `Live` so a count refresh can't clobber
+  title/game/last-stream state), stored in `ChannelModel.viewer_counts` and cleared on an offline
+  `Live`. Optional: Appearance → "Show live status bar" (`Settings.show_status_bar`, default on,
+  process-wide flag `settings::show_status_bar()` like the pinned toggles;
+  `Settings::apply_visibility_flags` publishes all three). When 2+ platforms have counts, a
+  **Total** segment (sum of the displayed values) closes the bar. Counts are **deduped +
+  live-gated in the store** (`ChannelModel`'s `Viewers` arm: an unchanged count is dropped, a
+  `Some` for an offline platform is a late frame racing the offline clear and is dropped too)
+  and fan out as their own granular `ChannelEvent::ViewersChanged`, which views answer with a
+  bare `cx.notify()` — NOT `Changed`, whose handler does a full `list_state.reset()` +
+  `refresh_log()` (that was a review finding: counts arrive every ~30s, they must never
+  re-measure the log). Sources: **Twitch** = the Hermes socket's
+  `video-playback-by-id.<channel_id>` topic (`twitch/src/pubsub.rs`, a third subscription next
+  to points/pins): anonymous `viewcount` pushes every ~30s while live — the exact number
+  twitch.tv shows (`stream-down` is deliberately NOT mapped to a clear: it also fires on
+  mid-stream ad transitions; a real offline is cleared by the poll's `Live{live:false}`); a GQL
+  `stream{viewersCount}` **seed** (`twitch/src/viewers.rs`, fired from the bridge's live poll)
+  fills the gap until the first push — it only emits and only latches `seeded` on a real
+  number (GQL lags IVR at go-live; forwarding its `None` deleted a pushed count), retrying each
+  30s poll until one lands. ⚠️ Don't poll the count: IVR caches `/twitch/user` for minutes and
+  even GQL only moves in coarse (~1min+) buckets — both verified live frozen while the Hermes
+  push moved (that's why GQL is seed-only). **Kick** = a poll of the light
+  `api/v2/channels/{slug}/livestream` endpoint (wreq, `bks_kick::fetch_viewer_count`): 30s
+  while live, backed off to 120s while offline (`KICK_OFFLINE_POLL_SECS` — going live is
+  Pusher-push, only the first count waits); live/offline *transitions* stay Pusher-push.
+  `data: null` = offline; the count field is **`viewers`**, not the channel endpoint's
+  `viewer_count` (verified live, both accepted), and a live response *missing* the count is an
+  error → the poll keeps the previous number instead of blanking a live stream. **YouTube** = a
+  throttled 30s InnerTube `updated_metadata` call riding the chat poll loop
+  (`updateViewershipAction`'s "N watching now"): a failed *request* keeps the previous count, a
+  response with no viewership clears it (else a stale number freezes on screen). Each
+  fetched/pushed count is `debug!`-logged with its channel. The bar's number doesn't snap: it
+  counts up/down to each fresh value Twitch-style (`ViewerAnim`/`eased_count` in `chatview.rs`,
+  900ms ease-out, repainting on a coalesced 50ms per-view timer that a settled `from == to`
+  anim never arms — the log stays cached, only the chrome repaints; the first count and a
+  platform re-appearing show as-is).
 - **Dark + light + custom themes**, switched live in the Appearance/Themes settings tabs
   (persisted in `settings.json`). The kit chrome switches via `gpui_component::Theme::change`; the chat
   log's own colors come from a `render::palette()` (`DARK`/`LIGHT`) selected by the process-wide
@@ -240,7 +280,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
   back onto the next stable. CI runs in ~5 min warm (`rust-cache`, `shared-key: build`); a
   version bump rewrites Cargo.lock → cache re-key → that one run takes ~15 min (expected, once
   per release).
-- 213 passing unit tests (`cargo test`).
+- 224 passing unit tests (`cargo test`).
 
 **Not done yet (designed for, not built):**
 - TikTok connector.

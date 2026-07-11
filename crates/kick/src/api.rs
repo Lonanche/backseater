@@ -252,6 +252,48 @@ pub async fn fetch_channel_info(channel: &str) -> anyhow::Result<ChannelInfo> {
     })
 }
 
+/// Fetches the channel's current concurrent viewer count from the lightweight
+/// v2 livestream endpoint (`/channels/{slug}/livestream` — `data` is null when
+/// offline). `Ok(None)` means *offline*; a live response that lacks the count
+/// (seen transiently right at go-live) is an `Err`, so the polling caller keeps
+/// the previous number instead of blanking a live stream's count.
+pub async fn fetch_viewer_count(channel: &str) -> anyhow::Result<Option<u64>> {
+    let slug = slugify(channel);
+    let resp = kick_get(format!(
+        "{CHANNELS_URL}{}/livestream",
+        bks_core::encode_url_component(&slug)
+    ))
+    .await
+    .with_context(|| format!("requesting kick livestream for {slug}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("kick livestream lookup for {slug} returned {}", resp.status());
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .with_context(|| format!("parsing kick livestream response for {slug}"))?;
+    let count = viewer_count_from(&body)
+        .with_context(|| format!("kick livestream response for {slug} has no viewer count"))?;
+    tracing::debug!("kick viewer count for {slug}: {count:?}");
+    Ok(count)
+}
+
+/// The viewer count in a v2 livestream response: `Ok(None)` when `data` is null
+/// (offline), `Ok(Some(n))` when live, `None` (→ error upstream) when live but
+/// the count field is null/absent. The `/livestream` endpoint names the field
+/// `viewers` (verified live), unlike the channel endpoint's embedded livestream
+/// object (`viewer_count`) — accept both in case Kick ever aligns them.
+fn viewer_count_from(body: &serde_json::Value) -> Option<Option<u64>> {
+    let data = &body["data"];
+    if data.is_null() {
+        return Some(None);
+    }
+    data["viewers"]
+        .as_u64()
+        .or(data["viewer_count"].as_u64())
+        .map(Some)
+}
+
 /// Fetches the channel's most recent past broadcast from the VODs endpoint
 /// (`/channels/{slug}/videos`, newest-first, so `[0]` is the latest) for the
 /// offline tooltip. `None` on any error / no VODs (the tooltip then just shows
@@ -634,6 +676,26 @@ mod tests {
         let live = raw.livestream.unwrap();
         assert!(live.is_live);
         assert_eq!(live.categories[0].name, "Just Chatting");
+    }
+
+    #[test]
+    fn viewer_count_reads_live_and_offline_shapes() {
+        // The real /livestream shape (verified live): the count is `viewers`.
+        let live: serde_json::Value =
+            serde_json::from_str(r#"{ "data": { "id": 5, "viewers": 531 } }"#).unwrap();
+        assert_eq!(viewer_count_from(&live), Some(Some(531)));
+        // The channel endpoint's embedded-livestream name, accepted as fallback.
+        let alt: serde_json::Value =
+            serde_json::from_str(r#"{ "data": { "id": 5, "viewer_count": 103 } }"#).unwrap();
+        assert_eq!(viewer_count_from(&alt), Some(Some(103)));
+        // data null = offline (a real clear).
+        let offline: serde_json::Value = serde_json::from_str(r#"{ "data": null }"#).unwrap();
+        assert_eq!(viewer_count_from(&offline), Some(None));
+        // Live but the count is null/absent = unknown (an error upstream, so the
+        // poll keeps the previous number instead of blanking a live stream).
+        let no_count: serde_json::Value =
+            serde_json::from_str(r#"{ "data": { "id": 5, "viewers": null } }"#).unwrap();
+        assert_eq!(viewer_count_from(&no_count), None);
     }
 
     #[test]

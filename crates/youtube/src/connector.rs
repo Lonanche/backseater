@@ -23,7 +23,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::api::{InnertubeContext, GET_LIVE_CHAT_URL, NEXT_URL, PLAYER_URL};
+use crate::api::{InnertubeContext, GET_LIVE_CHAT_URL, NEXT_URL, PLAYER_URL, UPDATED_METADATA_URL};
 use crate::builder::{item_to_event, parse_runs_text};
 
 /// How long to wait before re-checking a channel that isn't live yet, and before
@@ -31,6 +31,9 @@ use crate::builder::{item_to_event, parse_runs_text};
 const OFFLINE_RETRY: Duration = Duration::from_secs(15);
 /// Floor for the server-provided poll delay, so a `timeoutMs: 0` can't busy-loop.
 const MIN_POLL_DELAY: Duration = Duration::from_millis(1000);
+/// How often to refresh the concurrent-viewer count while live (rides the chat
+/// poll loop as its own throttled `updated_metadata` request).
+const VIEWER_POLL: Duration = Duration::from_secs(30);
 
 /// Anonymous YouTube connector. Each `join` resolves the source and runs its own
 /// InnerTube poll loop; events reach the UI only through the returned stream.
@@ -172,8 +175,28 @@ async fn watch_live_chat(source: &str, video_id: &str, tx: &ChatSink) -> anyhow:
     // Skip the first page's backlog so we don't dump a wall of old messages on
     // join. History interleaving is handled elsewhere.
     let mut skip_backlog = true;
+    let mut viewers: Option<u64> = None;
+    let mut next_viewer_check = tokio::time::Instant::now();
 
     loop {
+        // Throttled viewer-count refresh for the status bar. A failed *request*
+        // keeps the previous count; a response that carries no viewership
+        // (e.g. "No one watching") clears it — otherwise a stale number would
+        // stay frozen on screen for the rest of the session.
+        if tokio::time::Instant::now() >= next_viewer_check {
+            next_viewer_check = tokio::time::Instant::now() + VIEWER_POLL;
+            if let Some(fetched) = fetch_viewer_count(&ctx, video_id).await {
+                tracing::debug!("youtube viewer count for {source}: {fetched:?}");
+                if viewers != fetched {
+                    viewers = fetched;
+                    let _ = tx.send(ChatEvent::Viewers {
+                        platform: Platform::YouTube,
+                        count: viewers,
+                    });
+                }
+            }
+        }
+
         let body = json!({ "continuation": continuation });
         let resp = ctx.post(GET_LIVE_CHAT_URL, video_id, body).await?;
 
@@ -336,6 +359,31 @@ async fn player_started_at(
         .and_then(bks_core::parse_rfc3339)
 }
 
+/// The live stream's concurrent viewer count from the `updated_metadata`
+/// endpoint. The outer `Option` is the *request*: `None` = it failed (keep the
+/// previous count). The inner is the count: `Some(n)` watching now, `None` = the
+/// response carries no viewership (clear the shown count).
+async fn fetch_viewer_count(ctx: &InnertubeContext, video_id: &str) -> Option<Option<u64>> {
+    let resp = ctx
+        .post(UPDATED_METADATA_URL, video_id, json!({ "videoId": video_id }))
+        .await
+        .ok()?;
+    Some(viewership_count(&resp))
+}
+
+/// The number in an `updated_metadata` response's `updateViewershipAction`
+/// ("1,234 watching now" → 1234). `None` when the action is absent or the text
+/// has no digits ("No one watching").
+fn viewership_count(resp: &Value) -> Option<u64> {
+    let view_count = resp["actions"].as_array()?.iter().find_map(|a| {
+        let vc = &a["updateViewershipAction"]["viewCount"]["videoViewCountRenderer"]["viewCount"];
+        (!vc.is_null()).then_some(vc)
+    })?;
+    let text = parse_runs_text(view_count);
+    let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
 /// An offline `Live` event (title/start cleared), carrying the most recent past
 /// stream for the tooltip's "last live …" line when known.
 fn offline_live(last_stream: Option<bks_platform::LastStream>) -> ChatEvent {
@@ -358,4 +406,36 @@ async fn sleep_or_stop(tx: &ChatSink, delay: Duration) -> bool {
     }
     tokio::time::sleep(delay).await;
     tx.is_closed()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewership_count_parses_watching_now_runs() {
+        let resp: Value = serde_json::from_str(
+            r#"{ "actions": [
+                { "updateTitleAction": { "title": { "simpleText": "t" } } },
+                { "updateViewershipAction": { "viewCount": { "videoViewCountRenderer": {
+                    "viewCount": { "runs": [ { "text": "12,345" }, { "text": " watching now" } ] },
+                    "isLive": true
+                } } } }
+            ] }"#,
+        )
+        .unwrap();
+        assert_eq!(viewership_count(&resp), Some(12345));
+    }
+
+    #[test]
+    fn viewership_count_absent_or_digitless_is_none() {
+        let no_action: Value = serde_json::from_str(r#"{ "actions": [] }"#).unwrap();
+        assert_eq!(viewership_count(&no_action), None);
+        let no_digits: Value = serde_json::from_str(
+            r#"{ "actions": [ { "updateViewershipAction": { "viewCount": { "videoViewCountRenderer": {
+                "viewCount": { "simpleText": "No one watching" } } } } } ] }"#,
+        )
+        .unwrap();
+        assert_eq!(viewership_count(&no_digits), None);
+    }
 }

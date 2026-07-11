@@ -11,9 +11,7 @@ use anyhow::Context;
 use bks_platform::LastStream;
 use serde::Deserialize;
 
-/// Public web client-id Twitch's own site uses for unauthenticated GraphQL.
-const WEB_CLIENT_ID: &str = "kimne78kx3ncx6brgo4mv6wki5h1ko";
-const GQL_URL: &str = "https://gql.twitch.tv/gql";
+use crate::http::{GQL_URL, WEB_CLIENT_ID};
 
 /// The newest archive VOD's title / start / length / category.
 const LAST_ARCHIVE_QUERY: &str = "query($login: String!) { user(login: $login) { \

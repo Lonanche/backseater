@@ -15,6 +15,9 @@ members = [
 edition = "2021"
 version = "0.2.2"
 license = "MIT"
+# Floor set by `u64::is_multiple_of` (stabilized 1.87); gives a clear error
+# instead of a bare unresolved-method on older toolchains.
+rust-version = "1.87"
 
 [workspace.dependencies]
 bks-core = { path = "crates/core" }

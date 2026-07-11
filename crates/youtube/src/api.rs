@@ -35,6 +35,10 @@ pub const PLAYER_URL: &str = "https://www.youtube.com/youtubei/v1/player?prettyP
 /// Resolves a vanity URL (an `@handle` page) to its `UC…` browse id.
 pub const RESOLVE_URL_URL: &str =
     "https://www.youtube.com/youtubei/v1/navigation/resolve_url?prettyPrint=false";
+/// Live video metadata refresh — its `updateViewershipAction` carries the
+/// concurrent "N watching now" count the watch page shows.
+pub const UPDATED_METADATA_URL: &str =
+    "https://www.youtube.com/youtubei/v1/updated_metadata?prettyPrint=false";
 
 /// One process-wide client, shared across every YouTube read (pools connections).
 /// Browser-looking default headers are baked in so responses match the web app.
