@@ -29,16 +29,39 @@ pub(crate) fn set_beta_updates(on: bool) {
     BETA.store(on, Ordering::Relaxed);
 }
 
+/// Set on the first launch after an update applied (the Velopack restarted
+/// hook) — drives the one-time "Updated to X — what's new" banner.
+static UPDATED_TO: OnceLock<String> = OnceLock::new();
+
 /// Velopack's startup hook: runs install/uninstall/update callbacks and may
 /// exit or restart the process (e.g. mid-update). Must be the first thing in
 /// `main`, before any other state exists.
 pub(crate) fn startup() {
     VelopackApp::build()
+        .on_restarted(|version| {
+            let _ = UPDATED_TO.set(version.to_string());
+        })
         // Uninstall leaves no junk: the image cache lives outside the install
         // root (see `bks_auth::store::image_cache_dir`), so the uninstaller
         // wouldn't remove it by itself. Hook must be fast; a dir delete is.
         .on_before_uninstall_fast_callback(|_| bks_auth::store::purge_image_cache())
         .run();
+}
+
+/// The version this launch was just updated to, if it is the first run after
+/// an update applied.
+pub(crate) fn just_updated_to() -> Option<String> {
+    UPDATED_TO.get().cloned()
+}
+
+/// The GitHub release page for `version` — the "what's new" link target.
+pub(crate) fn release_url(version: &str) -> String {
+    format!("{REPO_URL}/releases/tag/v{version}")
+}
+
+/// The project repository (the Help section's links).
+pub(crate) fn repo_url() -> &'static str {
+    REPO_URL
 }
 
 fn manager() -> Result<UpdateManager, velopack::Error> {

@@ -171,6 +171,13 @@ platform = implement one trait + one message builder, with zero UI changes**.
   per-term flags, `sound_for()` gives the verdict, which rides `MentionEntry.sound` and plays
   once app-wide at `MentionStore::push` (post-dedup); the master/streamer gates are process-wide
   flags (`settings::apply_sound_flags`, read at play time).
+- **Help settings category + update notices**: Help shows the running version
+  (`updater::version_label()` — the installed Velopack package version, "-beta" marks the
+  channel, "(dev)" a non-installed run; NOT shown in window titles or chat chrome), GitHub /
+  release-notes links (`cx.open_url`), and "Open install folder" (`cx.reveal_path` on
+  `current_exe`). The update banner has a "What's new" link to the pending release's notes, and
+  the first launch after an update shows a one-time success-tinted "Updated to vX — What's new"
+  banner (Velopack `on_restarted` hook → `updater::just_updated_to()`, session-only, ✕ clears).
 - **Settings** (category sidebar: Account / Appearance / Themes / Highlights / Streamer Mode) and the **usercard** open as
   **separate OS windows** (`child_window.rs`: a `ChildWindow` renders a host entity's body in its own
   `cx.open_window`), draggable off the main window and freely resizable. All panel state stays on the

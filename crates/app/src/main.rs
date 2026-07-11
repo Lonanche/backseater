@@ -193,16 +193,18 @@ enum SettingsCategory {
     Themes,
     Highlights,
     Streamer,
+    Help,
 }
 
 impl SettingsCategory {
     /// The categories, in sidebar order.
-    const ALL: [SettingsCategory; 5] = [
+    const ALL: [SettingsCategory; 6] = [
         SettingsCategory::Account,
         SettingsCategory::Appearance,
         SettingsCategory::Themes,
         SettingsCategory::Highlights,
         SettingsCategory::Streamer,
+        SettingsCategory::Help,
     ];
 
     fn label(self) -> &'static str {
@@ -212,6 +214,7 @@ impl SettingsCategory {
             SettingsCategory::Themes => "Themes",
             SettingsCategory::Highlights => "Highlights",
             SettingsCategory::Streamer => "Streamer Mode",
+            SettingsCategory::Help => "Help",
         }
     }
 }
@@ -534,6 +537,9 @@ pub(crate) struct BackseaterApp {
     update_ready: Option<String>,
     /// Whether the update banner was ✕-dismissed. Session-only.
     update_banner_dismissed: bool,
+    /// The version this launch was updated to, when it is the first run after
+    /// an update (drives the one-time "updated" banner; ✕ clears it).
+    updated_to: Option<String>,
     /// Checks GitHub Releases for a newer build at launch and then every
     /// [`updater::CHECK_INTERVAL`]; ends once an update has been downloaded.
     _update_watch: Task<()>,
@@ -736,6 +742,7 @@ impl BackseaterApp {
             streamer_banner_dismissed: false,
             update_ready: None,
             update_banner_dismissed: false,
+            updated_to: updater::just_updated_to(),
             _update_watch,
             window_title: String::new(),
             mention_store,
@@ -1484,16 +1491,6 @@ impl BackseaterApp {
                         }),
                     )
             }),
-        )
-        // Which build this is; a "-beta" suffix (from the installed Velopack
-        // package version) marks the beta channel, "(dev)" a non-installed run.
-        .child(
-            div()
-                .px_3()
-                .pt_3()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(SharedString::from(updater::version_label())),
         );
 
         let body = match selected {
@@ -1506,6 +1503,7 @@ impl BackseaterApp {
                 .child(self.mentions_tab_section(cx))
                 .child(self.term_list_section(TermList::global(TermKind::Ignore), cx)),
             SettingsCategory::Streamer => v_flex().gap_5().child(self.streamer_section(cx)),
+            SettingsCategory::Help => v_flex().gap_5().child(self.help_section(cx)),
         };
 
         h_flex()
@@ -2111,6 +2109,56 @@ impl BackseaterApp {
                             )),
                     )
             })
+            .into_any_element()
+    }
+
+    /// The Help settings category: the running version, project links, and the
+    /// install location. The version lives here (not chat/window chrome).
+    fn help_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let link = |id: &'static str, label: &'static str, url: String| {
+            div()
+                .id(id)
+                .cursor_pointer()
+                .text_color(gpui::rgb(render::link_color()))
+                .hover(|s| s.underline())
+                .child(SharedString::from(label))
+                .on_click(move |_, _, cx| cx.open_url(&url))
+        };
+        v_flex()
+            .gap_3()
+            .child(section_title("Help"))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from("Version")),
+                    )
+                    .child(SharedString::from(updater::version_label())),
+            )
+            .child(link(
+                "help-github",
+                "Backseater on GitHub",
+                updater::repo_url().to_string(),
+            ))
+            .child(link(
+                "help-releases",
+                "Release notes",
+                format!("{}/releases", updater::repo_url()),
+            ))
+            .child(
+                h_flex().child(
+                    Button::new("help-open-install")
+                        .label("Open install folder")
+                        .outline()
+                        .on_click(|_, _, cx| {
+                            if let Ok(exe) = std::env::current_exe() {
+                                cx.reveal_path(&exe);
+                            }
+                        }),
+                ),
+            )
             .into_any_element()
     }
 
@@ -2800,6 +2848,17 @@ impl BackseaterApp {
             .text_size(px(13.))
             .child(SharedString::from("⭳"))
             .child(div().flex_1().min_w_0().child(SharedString::from(label)))
+            .child({
+                let url =
+                    updater::release_url(self.update_ready.as_deref().unwrap_or_default());
+                div()
+                    .id("update-whats-new")
+                    .cursor_pointer()
+                    .text_color(gpui::rgb(render::link_color()))
+                    .hover(|s| s.underline())
+                    .child(SharedString::from("What's new"))
+                    .on_click(move |_, _, cx| cx.open_url(&url))
+            })
             .child(
                 Button::new("update-banner-restart")
                     .label("Restart")
@@ -2820,6 +2879,54 @@ impl BackseaterApp {
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
                             this.update_banner_dismissed = true;
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The one-time "updated" banner: the first launch after an update applied
+    /// (Velopack's restarted hook) announces the new version with a link to its
+    /// release notes. ✕ dismisses; a normal launch never shows it.
+    fn updated_banner(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let version = self.updated_to.clone().unwrap_or_default();
+        let url = updater::release_url(&version);
+        h_flex()
+            .w_full()
+            .px_3()
+            .py_1()
+            .gap_2()
+            .items_center()
+            .bg(cx.theme().success.opacity(0.15))
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .text_size(px(13.))
+            .child(div().flex_1().min_w_0().child(SharedString::from(format!(
+                "Updated to v{version}"
+            ))))
+            .child(
+                div()
+                    .id("updated-whats-new")
+                    .cursor_pointer()
+                    .text_color(gpui::rgb(render::link_color()))
+                    .hover(|s| s.underline())
+                    .child(SharedString::from("What's new"))
+                    .on_click(move |_, _, cx| cx.open_url(&url)),
+            )
+            .child(
+                div()
+                    .id("updated-banner-dismiss")
+                    .px_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_color(cx.theme().muted_foreground)
+                    .hover(|s| s.bg(cx.theme().secondary))
+                    .child(SharedString::from("✕"))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.updated_to = None;
                             cx.notify();
                         }),
                     ),
@@ -3453,6 +3560,9 @@ impl Render for BackseaterApp {
                 self.update_ready.is_some() && !self.update_banner_dismissed,
                 |el| el.child(self.update_banner(cx)),
             )
+            .when(self.updated_to.is_some(), |el| {
+                el.child(self.updated_banner(cx))
+            })
             // `min_h_0` lets this flex item shrink below its (tall) content so
             // the feed is bounded to the window and scrolls instead of overflowing.
             .child(
