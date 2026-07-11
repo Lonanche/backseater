@@ -33,7 +33,12 @@ pub(crate) fn set_beta_updates(on: bool) {
 /// exit or restart the process (e.g. mid-update). Must be the first thing in
 /// `main`, before any other state exists.
 pub(crate) fn startup() {
-    VelopackApp::build().run();
+    VelopackApp::build()
+        // Uninstall leaves no junk: the image cache lives outside the install
+        // root (see `bks_auth::store::image_cache_dir`), so the uninstaller
+        // wouldn't remove it by itself. Hook must be fast; a dir delete is.
+        .on_before_uninstall_fast_callback(|_| bks_auth::store::purge_image_cache())
+        .run();
 }
 
 fn manager() -> Result<UpdateManager, velopack::Error> {

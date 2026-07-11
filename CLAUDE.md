@@ -374,7 +374,8 @@ in one tab / the picker is reused everywhere.
 It's also **disk-backed** like Chatterino: gpui's image loader re-downloads on every cache miss (no disk
 cache) and re-decodes, so a short eviction lifetime made emotes that scroll off and back churn the network
 and load slowly (a real regression at 60s), and nothing survived a restart. `LruImageCache::load` for a
-remote URL writes each fetched image to `<cache>/backseater/images/<hash>` (`bks_auth::store::image_cache_dir`)
+remote URL writes each fetched image to `<cache>/backseater-cache/images/<hash>` (`bks_auth::store::image_cache_dir`
+— NOT `<cache>/backseater`, which on Windows is Velopack's install root and wiped on uninstall/repair)
 and on a later miss decodes straight from those bytes — no network. So a first load this session of a
 previously-seen emote, and any reload after eviction, is a fast local read; only a truly first-ever
 sighting hits the network. Remote-URL decoding is ours (`decode_frames`, mirroring gpui's loader logic +

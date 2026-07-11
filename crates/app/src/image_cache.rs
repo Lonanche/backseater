@@ -19,7 +19,7 @@
 //!    emotes that scroll off and back churn the network and load slowly, and nothing
 //!    survives a restart. So we keep a persistent on-disk byte cache keyed by
 //!    URL hash and read disk-first: [`load_cached`] writes each
-//!    fetched image to `<cache>/backseater/images/<hash>` and, on a later miss,
+//!    fetched image to `<cache>/backseater-cache/images/<hash>` and, on a later miss,
 //!    decodes straight from those bytes — no network. So a first load this session
 //!    of a previously-seen emote, and any reload after eviction, is a fast local
 //!    read; only a truly first-ever sighting hits the network.
@@ -222,7 +222,7 @@ fn drop_slot(slot: Slot, cx: &mut App) {
     }
 }
 
-/// The on-disk cache file for `url` (`<cache>/backseater/images/<hex hash>`), or
+/// The on-disk cache file for `url` (`<cache>/backseater-cache/images/<hex hash>`), or
 /// `None` if the cache dir can't be created.
 fn cache_file(url: &str) -> Option<PathBuf> {
     let dir = bks_auth::store::image_cache_dir().ok()?;

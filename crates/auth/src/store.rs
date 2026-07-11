@@ -27,17 +27,30 @@ fn path(name: &str) -> anyhow::Result<PathBuf> {
     Ok(dir.join(format!("{name}.json")))
 }
 
-/// The on-disk image cache directory (`<cache>/backseater/images`), created if
-/// needed. Lives in the OS *cache* dir (not config) since it's regenerable —
-/// safe for the OS to clear. Used by the app's persistent emote-image cache so
-/// emotes survive restarts without re-downloading.
+/// The on-disk image cache directory (`<cache>/backseater-cache/images`),
+/// created if needed. Lives in the OS *cache* dir (not config) since it's
+/// regenerable — safe for the OS to clear. Used by the app's persistent
+/// emote-image cache so emotes survive restarts without re-downloading.
+/// ⚠️ NOT `<cache>/backseater`: on Windows the cache dir is `%LocalAppData%`,
+/// so that path is (case-insensitively) the Velopack install root
+/// (`%LocalAppData%\Backseater`) — anything kept there is wiped by
+/// uninstall/repair and clutters the install directory.
 pub fn image_cache_dir() -> anyhow::Result<PathBuf> {
     let dir = dirs::cache_dir()
         .context("no OS cache dir")?
-        .join("backseater")
+        .join("backseater-cache")
         .join("images");
     std::fs::create_dir_all(&dir).context("creating image cache dir")?;
     Ok(dir)
+}
+
+/// Deletes the whole image-cache tree (`<cache>/backseater-cache`). Called by
+/// the app's uninstall hook so removing the app leaves no cache behind (the
+/// cache lives outside the install root, so the uninstaller alone won't).
+pub fn purge_image_cache() {
+    if let Some(dir) = dirs::cache_dir().map(|d| d.join("backseater-cache")) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 /// Saves `creds` to `<config>/backseater/<name>.json`, creating the dir if needed.
