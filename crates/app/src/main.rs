@@ -1476,6 +1476,16 @@ impl BackseaterApp {
                         }),
                     )
             }),
+        )
+        // Which build this is; a "-beta" suffix (from the installed Velopack
+        // package version) marks the beta channel, "(dev)" a non-installed run.
+        .child(
+            div()
+                .px_3()
+                .pt_3()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(SharedString::from(updater::version_label())),
         );
 
         let body = match selected {

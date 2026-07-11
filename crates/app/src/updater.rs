@@ -5,7 +5,7 @@
 //! and the updater stays off.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use velopack::sources::GithubSource;
@@ -44,6 +44,25 @@ pub(crate) fn startup() {
 fn manager() -> Result<UpdateManager, velopack::Error> {
     let prerelease = BETA.load(Ordering::Relaxed);
     UpdateManager::new(GithubSource::new(REPO_URL, None, prerelease), None, None)
+}
+
+/// A human label for the running build: "v0.2.1", "v0.3.0-beta.1 (beta)", or
+/// "v0.2.1 (dev)" when not running from a Velopack install. The installed
+/// package version is authoritative — it carries the pre-release suffix that
+/// identifies a beta build; the crate version is the dev/portable fallback.
+pub(crate) fn version_label() -> &'static str {
+    static LABEL: OnceLock<String> = OnceLock::new();
+    LABEL.get_or_init(|| match manager() {
+        Ok(m) => {
+            let v = m.get_current_version_as_string();
+            if v.contains('-') {
+                format!("v{v} (beta)")
+            } else {
+                format!("v{v}")
+            }
+        }
+        Err(_) => concat!("v", env!("CARGO_PKG_VERSION"), " (dev)").to_string(),
+    })
 }
 
 /// Checks GitHub Releases for a newer build and downloads it, returning its
