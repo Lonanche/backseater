@@ -126,6 +126,19 @@ pub struct Settings {
     /// default; betas move to the next stable automatically (semver ordering).
     #[serde(default)]
     pub beta_updates: bool,
+    /// Whether a mention plays the alert ping. Off by default (opt-in);
+    /// individual terms can then be muted via [`muted_mentions`](Self::muted_mentions).
+    #[serde(default)]
+    pub mention_sound: bool,
+    /// Mention terms (normalized: lowercase, no `@`) whose matches stay silent
+    /// while [`mention_sound`](Self::mention_sound) is on. May include account
+    /// names and per-tab terms — one app-wide mute list.
+    #[serde(default)]
+    pub muted_mentions: Vec<String>,
+    /// Whether streamer mode also mutes mention sounds. On by default — going
+    /// live shouldn't leak pings into the stream unless the user opts out.
+    #[serde(default = "default_true")]
+    pub streamer_mute_sounds: bool,
 }
 
 fn default_font_size() -> f32 {
@@ -151,6 +164,9 @@ impl Default for Settings {
             show_pinned_kick: true,
             mentions_tab: false,
             beta_updates: false,
+            mention_sound: false,
+            muted_mentions: Vec::new(),
+            streamer_mute_sounds: true,
         }
     }
 }
@@ -185,7 +201,27 @@ impl Settings {
         SHOW_PINNED_TWITCH.store(self.show_pinned_twitch, Ordering::Relaxed);
         SHOW_PINNED_KICK.store(self.show_pinned_kick, Ordering::Relaxed);
     }
+
+    /// Pushes the mention-sound master + streamer-mute toggles into the
+    /// process-wide flags the play path reads. Call on load and after toggles.
+    pub fn apply_sound_flags(&self) {
+        MENTION_SOUND.store(self.mention_sound, Ordering::Relaxed);
+        STREAMER_MUTE.store(self.streamer_mute_sounds, Ordering::Relaxed);
+    }
 }
+
+/// Whether the mention ping is enabled at all (the master toggle).
+pub fn mention_sound_enabled() -> bool {
+    MENTION_SOUND.load(Ordering::Relaxed)
+}
+
+/// Whether active streamer mode should silence mention pings.
+pub fn streamer_mute_sounds() -> bool {
+    STREAMER_MUTE.load(Ordering::Relaxed)
+}
+
+static MENTION_SOUND: AtomicBool = AtomicBool::new(false);
+static STREAMER_MUTE: AtomicBool = AtomicBool::new(true);
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;

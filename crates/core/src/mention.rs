@@ -6,37 +6,73 @@
 //! leading `@` on either side is ignored. This is pure (no GUI/state) so the UI
 //! can build a matcher from the current login names + settings and test it.
 
+/// One compiled term: the lowercase text plus whether a match on it should
+/// play the mention alert sound (per-term mute in the UI).
+#[derive(Clone)]
+struct Term {
+    text: String,
+    sound: bool,
+}
+
 /// A compiled set of lowercase mention terms. Cheap to build; clone freely.
 #[derive(Clone, Default)]
 pub struct MentionMatcher {
-    terms: Vec<String>,
+    terms: Vec<Term>,
+}
+
+/// Normalizes a raw term the way the matcher stores it: trimmed, leading `@`
+/// removed, lowercased. Public so the UI's muted-term list can key on the same
+/// form the matcher compares against.
+pub fn normalize_term(term: &str) -> String {
+    term.trim().trim_start_matches('@').to_lowercase()
 }
 
 impl MentionMatcher {
-    /// Builds a matcher from raw terms. Each term is trimmed, lowercased, and has
-    /// a leading `@` removed; blank terms are dropped. Duplicates are harmless.
+    /// Builds a matcher from raw terms (all with sound enabled). Each term is
+    /// normalized ([`normalize_term`]); blank terms are dropped. Duplicates are
+    /// harmless.
     pub fn new(terms: impl IntoIterator<Item = String>) -> Self {
+        Self::with_sound(terms.into_iter().map(|t| (t, true)))
+    }
+
+    /// Builds a matcher from `(term, sound)` pairs — `sound: false` marks a term
+    /// whose matches highlight but stay silent (muted in the UI).
+    pub fn with_sound(terms: impl IntoIterator<Item = (String, bool)>) -> Self {
         let terms = terms
             .into_iter()
-            .map(|t| t.trim().trim_start_matches('@').to_lowercase())
-            .filter(|t| !t.is_empty())
+            .map(|(t, sound)| Term {
+                text: normalize_term(&t),
+                sound,
+            })
+            .filter(|t| !t.text.is_empty())
             .collect();
         Self { terms }
     }
 
     /// Whether any term appears as a standalone word in `text`.
     pub fn matches(&self, text: &str) -> bool {
-        if self.terms.is_empty() {
-            return false;
-        }
-        text.split(|c: char| !is_word_char(c))
-            .map(|word| word.trim_start_matches('@'))
-            .filter(|word| !word.is_empty())
-            .any(|word| {
-                self.terms
-                    .iter()
-                    .any(|term| word.eq_ignore_ascii_case(term))
-            })
+        self.match_terms(text).next().is_some()
+    }
+
+    /// Whether a match in `text` should play the alert sound: true when any
+    /// *matching* term has sound enabled (a muted term still highlights).
+    pub fn sound_for(&self, text: &str) -> bool {
+        self.match_terms(text).any(|t| t.sound)
+    }
+
+    /// All terms that appear as standalone words in `text`.
+    fn match_terms<'a>(&'a self, text: &'a str) -> impl Iterator<Item = &'a Term> + 'a {
+        let words: Vec<&str> = if self.terms.is_empty() {
+            Vec::new()
+        } else {
+            text.split(|c: char| !is_word_char(c))
+                .map(|word| word.trim_start_matches('@'))
+                .filter(|word| !word.is_empty())
+                .collect()
+        };
+        self.terms
+            .iter()
+            .filter(move |term| words.iter().any(|w| w.eq_ignore_ascii_case(&term.text)))
     }
 }
 
@@ -57,6 +93,26 @@ mod tests {
     #[test]
     fn matches_bare_name() {
         assert!(m(&["alice"]).matches("hey alice how are you"));
+    }
+
+    #[test]
+    fn sound_follows_the_matching_terms_flags() {
+        let m = MentionMatcher::with_sound(vec![
+            ("alice".to_string(), false),
+            ("mods".to_string(), true),
+        ]);
+        // A muted term still highlights — just silently.
+        assert!(m.matches("hi alice"));
+        assert!(!m.sound_for("hi alice"));
+        assert!(m.sound_for("hey mods"));
+        // Any matching term with sound on wins.
+        assert!(m.sound_for("alice ping the mods"));
+        assert!(!m.sound_for("nothing here"));
+    }
+
+    #[test]
+    fn normalize_matches_the_matcher_form() {
+        assert_eq!(super::normalize_term(" @Alice "), "alice");
     }
 
     #[test]

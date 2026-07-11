@@ -49,8 +49,9 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", 
 
 # Streamer-mode OBS detection: enumerate processes via the Toolhelp snapshot API.
 # 0.61 matches a `windows` already in the tree (via gpui), so no second copy.
+# Win32_Media_Audio: PlaySound for the mention alert ping (sound.rs).
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_Media_Audio"] }
 
 # Embeds resources/icon.ico as the exe's icon resource (see build.rs).
 [build-dependencies]

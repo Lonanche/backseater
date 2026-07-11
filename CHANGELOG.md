@@ -3,6 +3,12 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that tag
 (extracted by `.github/workflows/release.yml`).
 
+## v0.2.2
+
+- Mention sound alerts (opt-in): enable "Play a sound on mention" in Highlights settings.
+  Each term chip (including your account names) has a 🔔 to mute just that term, and
+  streamer mode silences all pings by default (changeable in Streamer Mode settings).
+
 ## v0.2.1
 
 - The app version is shown in the settings sidebar (pre-release builds are marked "beta").

@@ -27,6 +27,9 @@ pub struct MentionEntry {
     pub source: SharedString,
     pub view: WeakEntity<ChatView>,
     pub msg: Box<Message>,
+    /// Whether the matched term(s) want the alert ping (per-term mute already
+    /// applied by the matcher); the master/streamer-mode gates apply at play.
+    pub sound: bool,
 }
 
 /// The shared mention list, an entity so consumers re-render when one arrives
@@ -56,6 +59,15 @@ impl MentionStore {
                 .any(|e| e.msg.platform == entry.msg.platform && e.msg.id == entry.msg.id)
         {
             return;
+        }
+        // The store is the one point a live mention passes exactly once
+        // app-wide (deduped above), so the alert ping plays here: master
+        // toggle on, matched term unmuted, and not silenced by streamer mode.
+        if entry.sound
+            && crate::settings::mention_sound_enabled()
+            && !(crate::streamer_mode::is_active() && crate::settings::streamer_mute_sounds())
+        {
+            crate::sound::play_mention_ping();
         }
         self.entries.push_back(entry);
         if self.entries.len() > MAX_MENTIONS {

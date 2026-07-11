@@ -399,7 +399,9 @@ pub(crate) struct ChatView {
     mention_store: Entity<crate::mentions::MentionStore>,
     /// Mentions matched during the current drain burst, flushed to the shared
     /// store once the burst ends ([`push`](Self::push) has no `Context`).
-    pending_mentions: Vec<Message>,
+    /// Live mentions matched this burst, with each message's per-term sound
+    /// verdict (computed at match time, against the matcher that matched it).
+    pending_mentions: Vec<(Message, bool)>,
     /// Tails + repaints the mentions panel when a mention arrives in *any* tab
     /// (the store notifies on every push; mentions are rare).
     _mention_sub: gpui::Subscription,
@@ -762,7 +764,8 @@ impl ChatView {
             if self.mentions.matches(&msg.raw_text) {
                 self.mentions_new = true;
                 if !msg.historical {
-                    self.pending_mentions.push((**msg).clone());
+                    let sound = self.mentions.sound_for(&msg.raw_text);
+                    self.pending_mentions.push(((**msg).clone(), sound));
                 }
             }
         }
@@ -835,7 +838,7 @@ impl ChatView {
         let fallback = self.config.display_name();
         let msgs = std::mem::take(&mut self.pending_mentions);
         self.mention_store.update(cx, |store, cx| {
-            for msg in msgs {
+            for (msg, sound) in msgs {
                 let source = if msg.channel.is_empty() {
                     fallback.clone()
                 } else {
@@ -847,6 +850,7 @@ impl ChatView {
                         source: SharedString::from(source),
                         view: view.clone(),
                         msg: Box::new(msg),
+                        sound,
                     },
                     cx,
                 );

@@ -23,6 +23,7 @@ mod render;
 mod selectable;
 mod session;
 mod settings;
+mod sound;
 mod streamer_mode;
 mod tabs;
 mod updater;
@@ -569,6 +570,8 @@ impl BackseaterApp {
         bks_emotes::set_paints_enabled(settings.show_7tv_paints);
         // Same for the per-platform pinned-banner visibility the chat views read.
         settings.apply_pinned_visibility();
+        // And the mention-sound master + streamer-mute flags the play path reads.
+        settings.apply_sound_flags();
         // Apply the persisted color theme to both the kit (window chrome, buttons,
         // settings) and the chat-log palette (via the bks-core flag `render` reads).
         apply_theme(&settings, window, cx);
@@ -874,13 +877,18 @@ impl BackseaterApp {
     /// (union). Built fresh so it tracks login + settings + tab-config changes.
     fn tab_mentions(&self, config: &TabConfig) -> bks_core::MentionMatcher {
         let state = self.session.login_state();
+        let muted = &self.settings.muted_mentions;
         let terms = state
             .twitch
             .into_iter()
             .chain(state.kick)
             .chain(self.settings.custom_mentions.iter().cloned())
-            .chain(config.custom_mentions.iter().cloned());
-        bks_core::MentionMatcher::new(terms)
+            .chain(config.custom_mentions.iter().cloned())
+            .map(|t| {
+                let sound = !muted.contains(&bks_core::normalize_term(&t));
+                (t, sound)
+            });
+        bks_core::MentionMatcher::with_sound(terms)
     }
 
     /// The **global** ignore list, compiled from the app-wide ignored terms. This
@@ -2081,7 +2089,60 @@ impl BackseaterApp {
                     .text_color(cx.theme().muted_foreground)
                     .child(SharedString::from(status)),
             )
+            .child({
+                use gpui_component::checkbox::Checkbox;
+                v_flex()
+                    .gap_1()
+                    .child(
+                        Checkbox::new("streamer-mute-sounds")
+                            .label("Mute mention sounds while active")
+                            .checked(self.settings.streamer_mute_sounds)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.set_streamer_mute_sounds(*checked, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(
+                                "While streamer mode is active, mention pings stay silent so \
+                                 they don't leak into the stream. Uncheck to keep sounds on.",
+                            )),
+                    )
+            })
             .into_any_element()
+    }
+
+    /// Toggles the mention-ping master switch (Highlights settings).
+    fn set_mention_sound(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.settings.mention_sound = on;
+        self.settings.save();
+        self.settings.apply_sound_flags();
+        cx.notify();
+    }
+
+    /// Toggles whether active streamer mode silences mention pings.
+    fn set_streamer_mute_sounds(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.settings.streamer_mute_sounds = on;
+        self.settings.save();
+        self.settings.apply_sound_flags();
+        cx.notify();
+    }
+
+    /// Flips one mention term's sound (the chip 🔔/🔕). Stored app-wide in the
+    /// matcher's normalized form, so muting a term mutes it in every scope.
+    fn toggle_mention_mute(&mut self, term: &str, cx: &mut Context<Self>) {
+        let norm = bks_core::normalize_term(term);
+        let muted = &mut self.settings.muted_mentions;
+        if let Some(ix) = muted.iter().position(|m| *m == norm) {
+            muted.remove(ix);
+        } else {
+            muted.push(norm);
+        }
+        self.settings.save();
+        self.refresh_mentions(cx);
+        cx.notify();
     }
 
     /// The "Mentions tab" toggle in Highlights: shows/hides the pinned global
@@ -2120,38 +2181,85 @@ impl BackseaterApp {
     /// aren't listed here.
     /// Renders one Highlights term list (Mentions or Ignore): the current terms
     /// as removable chips plus an input + Add button.
+    /// A mention chip's 🔔/🔕 sound toggle (only mention terms get one; ignore
+    /// terms have no sound). Muting is app-wide by normalized term.
+    fn term_bell(&self, id_stem: &str, term: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let muted = self
+            .settings
+            .muted_mentions
+            .contains(&bks_core::normalize_term(term));
+        let toggle = term.to_string();
+        div()
+            .id(SharedString::from(format!("bell-{id_stem}-{term}")))
+            .px_1()
+            .cursor_pointer()
+            .text_color(cx.theme().muted_foreground)
+            .when(muted, |s| s.opacity(0.6))
+            .child(SharedString::from(if muted { "🔕" } else { "🔔" }))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_mention_mute(&toggle, cx);
+            }))
+            .into_any_element()
+    }
+
     fn term_list_section(&self, list: TermList, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let chips: Vec<gpui::AnyElement> = self
-            .terms(list)
-            .iter()
-            .cloned()
-            .map(|term| {
-                let remove = term.clone();
-                h_flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .bg(cx.theme().secondary)
-                    .child(SharedString::from(term))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "rm-{}-{remove}",
-                                list.id_stem()
-                            )))
-                            .px_1()
-                            .cursor_pointer()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(SharedString::from("✕"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.remove_term(list, &remove, cx);
-                            })),
-                    )
-                    .into_any_element()
-            })
-            .collect();
+        let is_mentions = list.kind == TermKind::Mentions;
+        // The global Mentions list also shows the logged-in account names as
+        // fixed chips (they always highlight — no ✕), so their sound is
+        // muteable like any custom term's.
+        let mut chips: Vec<gpui::AnyElement> = Vec::new();
+        if is_mentions && list.scope == TermScope::Global {
+            let state = self.session.login_state();
+            for name in state.twitch.into_iter().chain(state.kick) {
+                chips.push(
+                    h_flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(cx.theme().muted)
+                        .child(SharedString::from(name.clone()))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(SharedString::from("(you)")),
+                        )
+                        .child(self.term_bell(&list.id_stem(), &name, cx))
+                        .into_any_element(),
+                );
+            }
+        }
+        chips.extend(self.terms(list).clone().into_iter().map(|term| {
+            let remove = term.clone();
+            h_flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(cx.theme().secondary)
+                .child(SharedString::from(term.clone()))
+                .when(is_mentions, |chip| {
+                    chip.child(self.term_bell(&list.id_stem(), &term, cx))
+                })
+                .child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "rm-{}-{remove}",
+                            list.id_stem()
+                        )))
+                        .px_1()
+                        .cursor_pointer()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(SharedString::from("✕"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.remove_term(list, &remove, cx);
+                        })),
+                )
+                .into_any_element()
+        }));
 
         v_flex()
             .gap_3()
@@ -2162,6 +2270,31 @@ impl BackseaterApp {
                     .text_color(cx.theme().muted_foreground)
                     .child(SharedString::from(list.description())),
             )
+            .when(is_mentions && list.scope == TermScope::Global, |s| {
+                use gpui_component::checkbox::Checkbox;
+                s.child(
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            Checkbox::new("mention-sound")
+                                .label("Play a sound on mention")
+                                .checked(self.settings.mention_sound)
+                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                    this.set_mention_sound(*checked, cx);
+                                })),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(SharedString::from(
+                                    "Off by default. When on, each term's 🔔 mutes just that \
+                                     term; streamer mode mutes all sounds unless changed in \
+                                     Streamer Mode settings.",
+                                )),
+                        ),
+                )
+            })
             .when(!chips.is_empty(), |s| {
                 s.child(h_flex().flex_wrap().gap_2().children(chips))
             })

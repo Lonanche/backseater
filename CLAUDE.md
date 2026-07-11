@@ -160,6 +160,17 @@ platform = implement one trait + one message builder, with zero UI changes**.
   ignore terms (word, phrase, or `re:<regex>`), global and per-tab; a **mentions panel** shows
   messages that mention the user (per-tab or all-tabs feed with "#channel" tags, click → jump to
   the source tab).
+- **Mention alert sound** (`app/src/sound.rs`): a bundled synthesized ping
+  (`crates/app/assets/sounds/ping.wav` — ours, NOT copied from Chatterino; its wav's provenance
+  is undocumented) played via Win32 `PlaySound` (`SND_MEMORY|SND_ASYNC`, `windows` feature
+  `Win32_Media_Audio`). **Opt-in**: Highlights → "Play a sound on mention" (default off);
+  per-term 🔔/🔕 on every mention chip — account names show as fixed "(you)" chips so they're
+  muteable too — backed by one app-wide `Settings.muted_mentions` list keyed on
+  `bks_core::normalize_term`; Streamer Mode → "Mute mention sounds while active" (default on).
+  A muted term still *highlights* (only the sound differs): `MentionMatcher::with_sound` carries
+  per-term flags, `sound_for()` gives the verdict, which rides `MentionEntry.sound` and plays
+  once app-wide at `MentionStore::push` (post-dedup); the master/streamer gates are process-wide
+  flags (`settings::apply_sound_flags`, read at play time).
 - **Settings** (category sidebar: Account / Appearance / Themes / Highlights / Streamer Mode) and the **usercard** open as
   **separate OS windows** (`child_window.rs`: a `ChildWindow` renders a host entity's body in its own
   `cx.open_window`), draggable off the main window and freely resizable. All panel state stays on the
