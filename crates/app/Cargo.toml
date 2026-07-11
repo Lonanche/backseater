@@ -35,6 +35,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # animated emote for its static thumbnail (~1/frames the work of the full decode
 # pipeline). Version matches gpui's `image` so the `Frame` types unify.
 image = "0.25"
+# Installer + auto-update (see updater.rs): startup hooks, GitHub Releases
+# update source, apply-and-restart. Packaging happens in CI via the `vpk` CLI.
+velopack = "1.2"
 
 # GPUI is unpublished: pin to the exact zed rev that gpui-component is built
 # against (see gpui-component Cargo.toml), or the two won't unify.

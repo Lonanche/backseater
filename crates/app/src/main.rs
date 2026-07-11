@@ -25,6 +25,7 @@ mod session;
 mod settings;
 mod streamer_mode;
 mod tabs;
+mod updater;
 mod usercard;
 mod viewerlist;
 
@@ -525,6 +526,16 @@ pub(crate) struct BackseaterApp {
     /// Whether the "streamer mode is on" banner was ✕-dismissed. Session-only;
     /// reset each time streamer mode activates so the notice reappears.
     streamer_banner_dismissed: bool,
+    /// Version of an update that has been downloaded and is ready to apply
+    /// (drives the update banner). Set once by the update watch; Velopack also
+    /// applies a pending update on the next normal launch, so dismissing the
+    /// banner still updates eventually.
+    update_ready: Option<String>,
+    /// Whether the update banner was ✕-dismissed. Session-only.
+    update_banner_dismissed: bool,
+    /// Checks GitHub Releases for a newer build at launch and then every
+    /// [`updater::CHECK_INTERVAL`]; ends once an update has been downloaded.
+    _update_watch: Task<()>,
     /// The main window's current title ("Backseater - {active tab}"), memoized
     /// so render only calls `set_window_title` when it actually changes.
     window_title: String,
@@ -689,6 +700,25 @@ impl BackseaterApp {
             }
         });
 
+        // Look for a newer release now and on a slow cadence after; the
+        // blocking Velopack call (network + disk) runs off the main thread.
+        // Finding one downloads it, shows the banner, and ends the loop.
+        let _update_watch = cx.spawn(async move |weak, cx| loop {
+            let version = cx
+                .background_executor()
+                .spawn(async { updater::check_and_download() })
+                .await;
+            if let Some(version) = version {
+                weak.update(cx, |this, cx| {
+                    this.update_ready = Some(version);
+                    cx.notify();
+                })
+                .ok();
+                break;
+            }
+            cx.background_executor().timer(updater::CHECK_INTERVAL).await;
+        });
+
         Self {
             session,
             tabs,
@@ -716,6 +746,9 @@ impl BackseaterApp {
             obs_running,
             _obs_watch,
             streamer_banner_dismissed: false,
+            update_ready: None,
+            update_banner_dismissed: false,
+            _update_watch,
             window_title: String::new(),
             mention_store,
             mentions_tab_selected: false,
@@ -2562,6 +2595,53 @@ impl BackseaterApp {
             .into_any_element()
     }
 
+    /// The "update ready" banner under the tab strip: a newer release has been
+    /// downloaded in the background; Restart applies it now, ✕ hides the notice
+    /// (Velopack still applies the pending update on the next launch).
+    fn update_banner(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let label = format!(
+            "Update {} is ready — restart to apply",
+            self.update_ready.as_deref().unwrap_or_default()
+        );
+        h_flex()
+            .w_full()
+            .px_3()
+            .py_1()
+            .gap_2()
+            .items_center()
+            .bg(cx.theme().info.opacity(0.15))
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .text_size(px(13.))
+            .child(SharedString::from("⭳"))
+            .child(div().flex_1().min_w_0().child(SharedString::from(label)))
+            .child(
+                Button::new("update-banner-restart")
+                    .label("Restart")
+                    .outline()
+                    .xsmall()
+                    .on_click(|_, _, _| updater::restart_to_update()),
+            )
+            .child(
+                div()
+                    .id("update-banner-dismiss")
+                    .px_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_color(cx.theme().muted_foreground)
+                    .hover(|s| s.bg(cx.theme().secondary))
+                    .child(SharedString::from("✕"))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.update_banner_dismissed = true;
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// The pinned "@ Mentions" chip at the front of the tab strip (only when
     /// enabled in Highlights settings): selecting it shows the shared all-tabs
     /// mention feed instead of a tab. Like a normal tab it has an ✕ (closes it =
@@ -3184,6 +3264,10 @@ impl Render for BackseaterApp {
                 streamer_mode::is_active() && !self.streamer_banner_dismissed,
                 |el| el.child(self.streamer_banner(cx)),
             )
+            .when(
+                self.update_ready.is_some() && !self.update_banner_dismissed,
+                |el| el.child(self.update_banner(cx)),
+            )
             // `min_h_0` lets this flex item shrink below its (tall) content so
             // the feed is bounded to the window and scrolls instead of overflowing.
             .child(
@@ -3211,6 +3295,10 @@ fn field(label: &str, input: &Entity<InputState>) -> impl IntoElement {
 }
 
 fn main() {
+    // Velopack first: its install/update hooks may restart or exit the process
+    // before the app proper starts.
+    updater::startup();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),

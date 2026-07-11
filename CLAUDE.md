@@ -199,6 +199,20 @@ platform = implement one trait + one message builder, with zero UI changes**.
   (title bar + taskbar), and Explorer shows it on the exe; don't change the id. The main window
   title is "Backseater - {active tab}", set in `BackseaterApp::render` (memoized in `window_title`,
   so select/rename/close/restore are all covered with no per-call-site hooks).
+- **Windows installer + auto-update (Velopack)**: a `v*` tag triggers
+  `.github/workflows/release.yml`, which builds the exe, packs it with the `vpk` CLI
+  (`Backseater-win-Setup.exe` + portable zip + delta packages) and publishes to **GitHub
+  Releases**; the in-app updater (`app/src/updater.rs`) reads the same feed via the `velopack`
+  crate's `GithubSource`. `updater::startup()` (`VelopackApp::build().run()`) is the **first line
+  of `main`** — its install/update hooks may exit/restart the process. The check runs at launch +
+  every 4h (blocking, on the background executor), downloads silently, then an info-tinted banner
+  under the tab strip says "Update X is ready — restart to apply" (Restart →
+  `apply_updates_and_restart`; ✕ dismisses session-only — Velopack applies the pending update on
+  the next launch anyway). A `cargo run`/portable copy is not a Velopack install →
+  `UpdateManager::new` errors → updater quietly off (logged at debug). ⚠️ The crate's
+  `UpdateInfo`/`VelopackAsset` fields are C#-style PascalCase (`update.TargetFullRelease.Version`),
+  and `UpdateCheck::UpdateAvailable` carries a `Box<UpdateInfo>`. Releases ship **unsigned**;
+  release steps are in `docs/RELEASING.md`.
 - 213 passing unit tests (`cargo test`).
 
 **Not done yet (designed for, not built):**
@@ -549,6 +563,9 @@ cargo run -p backseater     # run the app
 Channels are set per tab (right-click a tab → Settings); tabs persist to
 `<config>/backseater/tabs.json`. `BKS_DEBUG=1` env var logs received messages to stderr (handy
 when you can't see the window).
+
+**Releasing:** bump the workspace `version` in `Cargo.toml`, commit, then push a `vX.Y.Z` tag —
+CI builds and publishes the installer + update feed to GitHub Releases (`docs/RELEASING.md`).
 
 **Twitch login (send/moderate):** type `/login`; `/logout` clears it. The app ships with a built-in
 Twitch Client ID (`DEFAULT_CLIENT_ID` in `crates/auth/src/twitch.rs`, redirect `http://localhost:38276`)
