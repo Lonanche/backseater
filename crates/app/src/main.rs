@@ -2260,7 +2260,15 @@ impl BackseaterApp {
         let mut chips: Vec<gpui::AnyElement> = Vec::new();
         if is_mentions && list.scope == TermScope::Global {
             let state = self.session.login_state();
+            // One chip per distinct name — the same handle on Twitch and Kick
+            // is one mention term (matching + muting are by normalized term).
+            let mut seen: Vec<String> = Vec::new();
             for name in state.twitch.into_iter().chain(state.kick) {
+                let norm = bks_core::normalize_term(&name);
+                if seen.contains(&norm) {
+                    continue;
+                }
+                seen.push(norm);
                 chips.push(
                     h_flex()
                         .items_center()
