@@ -32,10 +32,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build
 
+      # A tag with a pre-release suffix (v0.3.0-beta.1) publishes as a GitHub
+      # pre-release: only users with "Get beta updates" enabled receive it.
       - name: Version from tag
         id: version
-        run: echo "version=$($env:GITHUB_REF_NAME -replace '^v')" >> $env:GITHUB_OUTPUT
+        run: |
+          echo "version=$($env:GITHUB_REF_NAME -replace '^v')" >> $env:GITHUB_OUTPUT
+          echo "pre=$(if ($env:GITHUB_REF_NAME -match '-') { 'true' } else { 'false' })" >> $env:GITHUB_OUTPUT
 
       # The tag's "## vX.Y.Z" section of CHANGELOG.md becomes the release notes.
       - name: Extract release notes
@@ -60,7 +66,7 @@ jobs:
       # Fetch the previous release so vpk can build a delta package from it;
       # the first release has nothing to download, which is fine.
       - name: Download previous release
-        run: vpk download github --repoUrl https://github.com/${{ github.repository }} --token ${{ secrets.GITHUB_TOKEN }}
+        run: vpk download github --repoUrl https://github.com/${{ github.repository }} --token ${{ secrets.GITHUB_TOKEN }} ${{ steps.version.outputs.pre == 'true' && '--pre' || '' }}
         continue-on-error: true
 
       - name: Build installer
@@ -83,3 +89,4 @@ jobs:
           --publish
           --releaseName "Backseater ${{ steps.version.outputs.version }}"
           --tag ${{ github.ref_name }}
+          ${{ steps.version.outputs.pre == 'true' && '--pre' || '' }}

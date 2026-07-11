@@ -1,0 +1,36 @@
+# Build + test gate on main and PRs. Also keeps the dependency cache warm on
+# the default branch: tag-triggered release runs can only restore caches
+# created on main (GitHub scopes caches per ref), so this workflow building
+# with the same shared-key is what makes releases fast.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same toolchain setup as release.yml (wreq compiles BoringSSL).
+      - uses: ilammy/setup-nasm@v1
+      - name: Point bindgen at the runner's libclang
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build
+
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test
+
+      # Warm the release-profile dependency artifacts too — the release
+      # workflow builds --release, and dev-profile caches don't help it.
+      - run: cargo build --release -p backseater

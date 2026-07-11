@@ -4,6 +4,7 @@
 //! install — a `cargo run` / portable copy quietly reports "not installed"
 //! and the updater stays off.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -20,6 +21,14 @@ pub(crate) const CHECK_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
 /// apply it without re-checking (and so a failed apply can be retried).
 static READY: Mutex<Option<UpdateInfo>> = Mutex::new(None);
 
+/// Whether checks also consider GitHub pre-releases (the beta channel). Set
+/// from the persisted "Get beta updates" setting (`Settings.beta_updates`).
+static BETA: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_beta_updates(on: bool) {
+    BETA.store(on, Ordering::Relaxed);
+}
+
 /// Velopack's startup hook: runs install/uninstall/update callbacks and may
 /// exit or restart the process (e.g. mid-update). Must be the first thing in
 /// `main`, before any other state exists.
@@ -28,7 +37,8 @@ pub(crate) fn startup() {
 }
 
 fn manager() -> Result<UpdateManager, velopack::Error> {
-    UpdateManager::new(GithubSource::new(REPO_URL, None, false), None, None)
+    let prerelease = BETA.load(Ordering::Relaxed);
+    UpdateManager::new(GithubSource::new(REPO_URL, None, prerelease), None, None)
 }
 
 /// Checks GitHub Releases for a newer build and downloads it, returning its

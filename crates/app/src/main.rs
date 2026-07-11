@@ -700,24 +700,9 @@ impl BackseaterApp {
             }
         });
 
-        // Look for a newer release now and on a slow cadence after; the
-        // blocking Velopack call (network + disk) runs off the main thread.
-        // Finding one downloads it, shows the banner, and ends the loop.
-        let _update_watch = cx.spawn(async move |weak, cx| loop {
-            let version = cx
-                .background_executor()
-                .spawn(async { updater::check_and_download() })
-                .await;
-            if let Some(version) = version {
-                weak.update(cx, |this, cx| {
-                    this.update_ready = Some(version);
-                    cx.notify();
-                })
-                .ok();
-                break;
-            }
-            cx.background_executor().timer(updater::CHECK_INTERVAL).await;
-        });
+        // Point the updater at the persisted channel before the first check.
+        updater::set_beta_updates(settings.beta_updates);
+        let _update_watch = Self::spawn_update_watch(cx);
 
         Self {
             session,
@@ -1943,6 +1928,27 @@ impl BackseaterApp {
                     ),
             )
             .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        Checkbox::new("beta-updates")
+                            .label("Get beta updates")
+                            .checked(self.settings.beta_updates)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.set_beta_updates(*checked, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(
+                                "Also install pre-release (beta) builds. A beta moves to the \
+                                 next stable release automatically.",
+                            )),
+                    ),
+            )
+            .child(
                 h_flex()
                     .w_full()
                     .items_center()
@@ -2593,6 +2599,42 @@ impl BackseaterApp {
                     ),
             )
             .into_any_element()
+    }
+
+    /// Looks for a newer release now and on a slow cadence after; the blocking
+    /// Velopack call (network + disk) runs off the main thread. Finding one
+    /// downloads it, shows the banner, and ends the loop.
+    fn spawn_update_watch(cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |weak, cx| loop {
+            let version = cx
+                .background_executor()
+                .spawn(async { updater::check_and_download() })
+                .await;
+            if let Some(version) = version {
+                weak.update(cx, |this, cx| {
+                    this.update_ready = Some(version);
+                    cx.notify();
+                })
+                .ok();
+                break;
+            }
+            cx.background_executor().timer(updater::CHECK_INTERVAL).await;
+        })
+    }
+
+    /// Toggles the beta update channel: persists the setting, points the
+    /// updater at (or away from) pre-releases, and restarts the update watch so
+    /// the change takes effect now instead of at the next scheduled check.
+    fn set_beta_updates(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.settings.beta_updates = on;
+        self.settings.save();
+        updater::set_beta_updates(on);
+        // An already-downloaded update stays offered; otherwise re-check under
+        // the new channel immediately.
+        if self.update_ready.is_none() {
+            self._update_watch = Self::spawn_update_watch(cx);
+        }
+        cx.notify();
     }
 
     /// The "update ready" banner under the tab strip: a newer release has been

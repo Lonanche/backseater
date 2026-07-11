@@ -28,6 +28,13 @@ in sync is for `--version`-style correctness, not the updater.
 The "Download previous release" step is `continue-on-error` because the very first release has
 nothing to build a delta from — that failure is expected once.
 
+## Beta releases
+
+Tag with a pre-release suffix — e.g. `git tag v0.3.0-beta.1` — and the workflow publishes it as
+a GitHub **pre-release**. Only users who enabled Appearance → "Get beta updates" receive it;
+everyone else skips it, and beta users move to the next stable automatically once it's published
+(semver: `0.3.0-beta.1 < 0.3.0`).
+
 Releases ship unsigned (SmartScreen shows "unknown publisher"; users click
 More info → Run anyway). If code signing is added later, it slots into the workflow at two
 points: `backseater.exe` before `vpk pack`, and `Backseater-win-Setup.exe` after it.

@@ -212,7 +212,13 @@ platform = implement one trait + one message builder, with zero UI changes**.
   `UpdateManager::new` errors → updater quietly off (logged at debug). ⚠️ The crate's
   `UpdateInfo`/`VelopackAsset` fields are C#-style PascalCase (`update.TargetFullRelease.Version`),
   and `UpdateCheck::UpdateAvailable` carries a `Box<UpdateInfo>`. Releases ship **unsigned**;
-  release steps are in `docs/RELEASING.md`.
+  release steps are in `docs/RELEASING.md`. A `-beta`-suffixed tag (`v0.3.0-beta.1`) publishes as
+  a GitHub **pre-release**: only users with Appearance → "Get beta updates" (`Settings.
+  beta_updates` → `updater::set_beta_updates` → `GithubSource(prerelease)`) receive it, and
+  semver moves them back onto the next stable. `ci.yml` gates main (clippy `-D warnings` +
+  tests) and keeps the dependency cache warm — release runs on tag refs can only restore caches
+  created on main, so both workflows share `rust-cache` `shared-key: build` and CI also builds
+  the release profile.
 - 213 passing unit tests (`cargo test`).
 
 **Not done yet (designed for, not built):**

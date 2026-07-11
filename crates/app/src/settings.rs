@@ -122,6 +122,10 @@ pub struct Settings {
     /// collecting every tab's mentions in one feed. Off by default.
     #[serde(default)]
     pub mentions_tab: bool,
+    /// Whether the updater also installs pre-release (beta) builds. Off by
+    /// default; betas move to the next stable automatically (semver ordering).
+    #[serde(default)]
+    pub beta_updates: bool,
 }
 
 fn default_font_size() -> f32 {
@@ -146,6 +150,7 @@ impl Default for Settings {
             show_pinned_twitch: true,
             show_pinned_kick: true,
             mentions_tab: false,
+            beta_updates: false,
         }
     }
 }
