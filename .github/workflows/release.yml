@@ -44,11 +44,19 @@ jobs:
           echo "pre=$(if ($env:GITHUB_REF_NAME -match '-') { 'true' } else { 'false' })" >> $env:GITHUB_OUTPUT
 
       # The tag's "## vX.Y.Z" section of CHANGELOG.md becomes the release notes.
+      # A pre-release tag (v0.2.2-beta.1) falls back to its stable section
+      # (## v0.2.2) — betas inherit the upcoming version's notes, so the
+      # changelog keeps one section per stable version, no beta sections.
       - name: Extract release notes
         run: |
-          $tag = [regex]::Escape($env:GITHUB_REF_NAME)
-          $m = [regex]::Match((Get-Content CHANGELOG.md -Raw), "(?ms)^## $tag[^\r\n]*\r?\n(.*?)(?=^## |\z)")
-          $notes = if ($m.Success) { $m.Groups[1].Value.Trim() } else { "_No changelog entry for this release._" }
+          $content = Get-Content CHANGELOG.md -Raw
+          function Find-Notes($header) {
+            $m = [regex]::Match($content, "(?ms)^## $([regex]::Escape($header))\s*?\r?\n(.*?)(?=^## |\z)")
+            if ($m.Success) { $m.Groups[1].Value.Trim() } else { $null }
+          }
+          $notes = Find-Notes $env:GITHUB_REF_NAME
+          if (-not $notes) { $notes = Find-Notes ($env:GITHUB_REF_NAME -replace '-.*$') }
+          if (-not $notes) { $notes = "_No changelog entry for this release._" }
           Set-Content notes.md $notes -Encoding utf8
 
       - run: cargo build --release -p backseater
