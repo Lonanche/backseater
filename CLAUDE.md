@@ -171,7 +171,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
   per-term flags, `sound_for()` gives the verdict, which rides `MentionEntry.sound` and plays
   once app-wide at `MentionStore::push` (post-dedup); the master/streamer gates are process-wide
   flags (`settings::apply_sound_flags`, read at play time).
-- **Help settings category + update notices**: Help shows the running version
+- **About settings category + update notices**: About shows the running version
   (`updater::version_label()` — the installed Velopack package version, "-beta" marks the
   channel, "(dev)" a non-installed run; NOT shown in window titles or chat chrome), GitHub /
   release-notes links (`cx.open_url`), and "Open install folder" (`cx.reveal_path` on
@@ -231,7 +231,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
   `UpdateInfo`/`VelopackAsset` fields are C#-style PascalCase (`update.TargetFullRelease.Version`),
   and `UpdateCheck::UpdateAvailable` carries a `Box<UpdateInfo>`. Releases ship **unsigned**;
   release steps are in `docs/RELEASING.md`. A `-beta`-suffixed tag (`v0.3.0-beta.1`) publishes as
-  a GitHub **pre-release**: only users with Appearance → "Get beta updates" (`Settings.
+  a GitHub **pre-release**: only users with About → "Get beta updates" (`Settings.
   beta_updates` → `updater::set_beta_updates` → `GithubSource(prerelease)`) receive it, and
   semver moves them back onto the next stable. `ci.yml` gates main (clippy `-D warnings` +
   tests) and keeps the dependency cache warm — release runs on tag refs can only restore caches

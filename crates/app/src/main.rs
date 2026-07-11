@@ -193,7 +193,7 @@ enum SettingsCategory {
     Themes,
     Highlights,
     Streamer,
-    Help,
+    About,
 }
 
 impl SettingsCategory {
@@ -204,7 +204,7 @@ impl SettingsCategory {
         SettingsCategory::Themes,
         SettingsCategory::Highlights,
         SettingsCategory::Streamer,
-        SettingsCategory::Help,
+        SettingsCategory::About,
     ];
 
     fn label(self) -> &'static str {
@@ -214,7 +214,7 @@ impl SettingsCategory {
             SettingsCategory::Themes => "Themes",
             SettingsCategory::Highlights => "Highlights",
             SettingsCategory::Streamer => "Streamer Mode",
-            SettingsCategory::Help => "Help",
+            SettingsCategory::About => "About",
         }
     }
 }
@@ -1503,7 +1503,7 @@ impl BackseaterApp {
                 .child(self.mentions_tab_section(cx))
                 .child(self.term_list_section(TermList::global(TermKind::Ignore), cx)),
             SettingsCategory::Streamer => v_flex().gap_5().child(self.streamer_section(cx)),
-            SettingsCategory::Help => v_flex().gap_5().child(self.help_section(cx)),
+            SettingsCategory::About => v_flex().gap_5().child(self.about_section(cx)),
         };
 
         h_flex()
@@ -1944,27 +1944,6 @@ impl BackseaterApp {
                     ),
             )
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        Checkbox::new("beta-updates")
-                            .label("Get beta updates")
-                            .checked(self.settings.beta_updates)
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.set_beta_updates(*checked, cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(SharedString::from(
-                                "Also install pre-release (beta) builds. A beta moves to the \
-                                 next stable release automatically.",
-                            )),
-                    ),
-            )
-            .child(
                 h_flex()
                     .w_full()
                     .items_center()
@@ -2112,9 +2091,11 @@ impl BackseaterApp {
             .into_any_element()
     }
 
-    /// The Help settings category: the running version, project links, and the
-    /// install location. The version lives here (not chat/window chrome).
-    fn help_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// The About settings category: the running version, the update channel,
+    /// project links, and the install location. The version lives here (not
+    /// chat/window chrome).
+    fn about_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use gpui_component::checkbox::Checkbox;
         let link = |id: &'static str, label: &'static str, url: String| {
             div()
                 .id(id)
@@ -2126,7 +2107,7 @@ impl BackseaterApp {
         };
         v_flex()
             .gap_3()
-            .child(section_title("Help"))
+            .child(section_title("About"))
             .child(
                 h_flex()
                     .gap_2()
@@ -2137,19 +2118,40 @@ impl BackseaterApp {
                     )
                     .child(SharedString::from(updater::version_label())),
             )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        Checkbox::new("beta-updates")
+                            .label("Get beta updates")
+                            .checked(self.settings.beta_updates)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.set_beta_updates(*checked, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(
+                                "Also install pre-release (beta) builds. A beta moves to the \
+                                 next stable release automatically.",
+                            )),
+                    ),
+            )
             .child(link(
-                "help-github",
+                "about-github",
                 "Backseater on GitHub",
                 updater::repo_url().to_string(),
             ))
             .child(link(
-                "help-releases",
+                "about-releases",
                 "Release notes",
                 format!("{}/releases", updater::repo_url()),
             ))
             .child(
                 h_flex().child(
-                    Button::new("help-open-install")
+                    Button::new("about-open-install")
                         .label("Open install folder")
                         .outline()
                         .on_click(|_, _, cx| {

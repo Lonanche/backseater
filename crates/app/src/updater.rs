@@ -59,7 +59,7 @@ pub(crate) fn release_url(version: &str) -> String {
     format!("{REPO_URL}/releases/tag/v{version}")
 }
 
-/// The project repository (the Help section's links).
+/// The project repository (the About section's links).
 pub(crate) fn repo_url() -> &'static str {
     REPO_URL
 }

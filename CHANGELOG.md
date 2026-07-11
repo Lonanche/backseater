@@ -8,15 +8,15 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that tag
 - Mention sound alerts (opt-in): enable "Play a sound on mention" in Highlights settings.
   Each term chip (including your account names) has a 🔔 to mute just that term, and
   streamer mode silences all pings by default (changeable in Streamer Mode settings).
-- New Help settings category: app version, GitHub / release-notes links, and an
-  "Open install folder" button.
+- New About settings category: app version, the beta-updates opt-in, GitHub /
+  release-notes links, and an "Open install folder" button.
 - After an update applies, a one-time banner announces the new version with a
   "What's new" link; the update banner links to the release notes too.
 
 ## v0.2.1
 
 - The app version is shown in the settings sidebar (pre-release builds are marked "beta").
-- New Appearance option "Get beta updates": opt into pre-release builds; betas move to the
+- New option "Get beta updates": opt into pre-release builds; betas move to the
   next stable release automatically.
 - The emote image cache moved out of the install directory, and uninstalling now removes it.
 
