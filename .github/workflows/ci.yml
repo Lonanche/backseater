@@ -1,7 +1,13 @@
-# Build + test gate on main and PRs. Also keeps the dependency cache warm on
-# the default branch: tag-triggered release runs can only restore caches
-# created on main (GitHub scopes caches per ref), so this workflow building
-# with the same shared-key is what makes releases fast.
+# CI + auto-release. Every push/PR runs clippy + tests (and a release-profile
+# build that keeps the dependency cache warm). On main, when the workspace
+# version in Cargo.toml has NO GitHub release yet, the same run packs the
+# Windows installer with Velopack and publishes it — so releasing is just:
+# bump the version (append -beta.N for a beta pre-release), update
+# CHANGELOG.md, commit, push. The vX.Y.Z tag is created by the publish step;
+# tags are never pushed by hand. A failed build releases nothing.
+#
+# Releases ship unsigned. If code signing is added later, it slots in at two
+# points: backseater.exe before `vpk pack`, and the Setup.exe after it.
 
 name: CI
 
@@ -10,13 +16,17 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   test:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      # Same toolchain setup as release.yml (wreq compiles BoringSSL).
+      # bks-kick's `wreq` compiles BoringSSL from source: NASM for its x64
+      # assembly, libclang for bindgen (LLVM is preinstalled on the runner).
       - uses: ilammy/setup-nasm@v1
       - name: Point bindgen at the runner's libclang
         run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
@@ -30,7 +40,81 @@ jobs:
 
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test
-
-      # Warm the release-profile dependency artifacts too — the release
-      # workflow builds --release, and dev-profile caches don't help it.
       - run: cargo build --release -p backseater
+
+      # ---- Auto-release: everything below only runs on a push to main whose
+      # ---- Cargo.toml version has no published release yet.
+      - name: Check for an unreleased version
+        id: version
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $m = Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1
+          $v = $m.Matches[0].Groups[1].Value
+          gh release view "v$v" --repo $env:GITHUB_REPOSITORY *> $null
+          $exists = if ($LASTEXITCODE -eq 0) { 'true' } else { 'false' }
+          echo "version=$v" >> $env:GITHUB_OUTPUT
+          echo "pre=$(if ($v.Contains('-')) { 'true' } else { 'false' })" >> $env:GITHUB_OUTPUT
+          echo "exists=$exists" >> $env:GITHUB_OUTPUT
+
+      # The version's "## vX.Y.Z" section of CHANGELOG.md becomes the release
+      # notes. A pre-release version (0.3.0-beta.1) falls back to its stable
+      # section (## v0.3.0) — betas inherit the upcoming version's notes, so
+      # the changelog keeps one section per stable version, no beta sections.
+      - name: Extract release notes
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          $content = Get-Content CHANGELOG.md -Raw
+          function Find-Notes($header) {
+            $m = [regex]::Match($content, "(?ms)^## $([regex]::Escape($header))\s*?\r?\n(.*?)(?=^## |\z)")
+            if ($m.Success) { $m.Groups[1].Value.Trim() } else { $null }
+          }
+          $v = '${{ steps.version.outputs.version }}'
+          $notes = Find-Notes "v$v"
+          if (-not $notes) { $notes = Find-Notes ("v" + ($v -replace '-.*$')) }
+          if (-not $notes) { $notes = "_No changelog entry for this release._" }
+          Set-Content notes.md $notes -Encoding utf8
+
+      # Assets and the icon are embedded in the exe, so the install payload is
+      # the single binary.
+      - name: Stage install payload
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          New-Item -ItemType Directory publish | Out-Null
+          Copy-Item target\release\backseater.exe publish\
+
+      - name: Install Velopack CLI
+        if: steps.version.outputs.exists == 'false'
+        run: dotnet tool install -g vpk
+
+      # Fetch the previous release so vpk can build a delta package from it;
+      # the very first release has nothing to download, which is fine.
+      - name: Download previous release
+        if: steps.version.outputs.exists == 'false'
+        run: vpk download github --repoUrl https://github.com/${{ github.repository }} --token ${{ secrets.GITHUB_TOKEN }} ${{ steps.version.outputs.pre == 'true' && '--pre' || '' }}
+        continue-on-error: true
+
+      - name: Build installer
+        if: steps.version.outputs.exists == 'false'
+        run: >
+          vpk pack
+          --packId Backseater
+          --packVersion ${{ steps.version.outputs.version }}
+          --packDir publish
+          --mainExe backseater.exe
+          --packTitle Backseater
+          --packAuthors Lonanche
+          --icon crates\app\resources\icon.ico
+          --releaseNotes notes.md
+
+      - name: Publish to GitHub Releases
+        if: steps.version.outputs.exists == 'false'
+        run: >
+          vpk upload github
+          --repoUrl https://github.com/${{ github.repository }}
+          --token ${{ secrets.GITHUB_TOKEN }}
+          --publish
+          --releaseName "Backseater ${{ steps.version.outputs.version }}"
+          --tag v${{ steps.version.outputs.version }}
+          ${{ steps.version.outputs.pre == 'true' && '--pre' || '' }}

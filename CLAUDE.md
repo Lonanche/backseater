@@ -219,11 +219,12 @@ platform = implement one trait + one message builder, with zero UI changes**.
   (title bar + taskbar), and Explorer shows it on the exe; don't change the id. The main window
   title is "Backseater - {active tab}", set in `BackseaterApp::render` (memoized in `window_title`,
   so select/rename/close/restore are all covered with no per-call-site hooks).
-- **Windows installer + auto-update (Velopack)**: a `v*` tag triggers
-  `.github/workflows/release.yml`, which builds the exe, packs it with the `vpk` CLI
+- **Windows installer + auto-update (Velopack)**: `.github/workflows/ci.yml` **auto-releases** —
+  on every push to main (after clippy + tests pass) it checks whether the workspace version in
+  `Cargo.toml` has a GitHub release yet; if not it packs the exe with the `vpk` CLI
   (`Backseater-win-Setup.exe` + portable zip + delta packages) and publishes to **GitHub
-  Releases**; the in-app updater (`app/src/updater.rs`) reads the same feed via the `velopack`
-  crate's `GithubSource`. `updater::startup()` (`VelopackApp::build().run()`) is the **first line
+  Releases** (the `vX.Y.Z` tag is created by the publish — never push tags by hand). The in-app
+  updater (`app/src/updater.rs`) reads the same feed via the `velopack` crate's `GithubSource`. `updater::startup()` (`VelopackApp::build().run()`) is the **first line
   of `main`** — its install/update hooks may exit/restart the process. The check runs at launch +
   every 4h (blocking, on the background executor), downloads silently, then an info-tinted banner
   under the tab strip says "Update X is ready — restart to apply" (Restart →
@@ -232,13 +233,13 @@ platform = implement one trait + one message builder, with zero UI changes**.
   `UpdateManager::new` errors → updater quietly off (logged at debug). ⚠️ The crate's
   `UpdateInfo`/`VelopackAsset` fields are C#-style PascalCase (`update.TargetFullRelease.Version`),
   and `UpdateCheck::UpdateAvailable` carries a `Box<UpdateInfo>`. Releases ship **unsigned**;
-  release steps are in `docs/RELEASING.md`. A `-beta`-suffixed tag (`v0.3.0-beta.1`) publishes as
-  a GitHub **pre-release**: only users with About → "Get beta updates" (`Settings.
-  beta_updates` → `updater::set_beta_updates` → `GithubSource(prerelease)`) receive it, and
-  semver moves them back onto the next stable. `ci.yml` gates main (clippy `-D warnings` +
-  tests) and keeps the dependency cache warm — release runs on tag refs can only restore caches
-  created on main, so both workflows share `rust-cache` `shared-key: build` and CI also builds
-  the release profile.
+  release steps are in `docs/RELEASING.md` (bump the version + changelog, push — that's all). A
+  `-beta`-suffixed **version** (`0.3.0-beta.1` in Cargo.toml) publishes as a GitHub
+  **pre-release**: only users with About → "Get beta updates" (`Settings.beta_updates` →
+  `updater::set_beta_updates` → `GithubSource(prerelease)`) receive it, and semver moves them
+  back onto the next stable. CI runs in ~5 min warm (`rust-cache`, `shared-key: build`); a
+  version bump rewrites Cargo.lock → cache re-key → that one run takes ~15 min (expected, once
+  per release).
 - 213 passing unit tests (`cargo test`).
 
 **Not done yet (designed for, not built):**
@@ -591,8 +592,9 @@ Channels are set per tab (right-click a tab → Settings); tabs persist to
 `<config>/backseater/tabs.json`. `BKS_DEBUG=1` env var logs received messages to stderr (handy
 when you can't see the window).
 
-**Releasing:** bump the workspace `version` in `Cargo.toml`, commit, then push a `vX.Y.Z` tag —
-CI builds and publishes the installer + update feed to GitHub Releases (`docs/RELEASING.md`).
+**Releasing:** bump the workspace `version` in `Cargo.toml` (+ a CHANGELOG section) and push —
+CI auto-publishes the installer + update feed to GitHub Releases (`docs/RELEASING.md`).
+Never push `v*` tags by hand; the publish step creates them.
 
 **Twitch login (send/moderate):** type `/login`; `/logout` clears it. The app ships with a built-in
 Twitch Client ID (`DEFAULT_CLIENT_ID` in `crates/auth/src/twitch.rs`, redirect `http://localhost:38276`)

@@ -1,7 +1,7 @@
 # Changelog
 
-Each `## vX.Y.Z` section becomes the GitHub release notes for that tag
-(extracted by `.github/workflows/release.yml`).
+Each `## vX.Y.Z` section becomes the GitHub release notes for that version
+(extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
 ## v0.2.2
 

@@ -1,50 +1,45 @@
 # Releasing Backseater
 
-Releases are Windows installers built with [Velopack](https://velopack.io) and published to
-GitHub Releases by CI. The app updates itself from the same feed (banner appears when a new
-version has been downloaded; it also applies pending updates on the next launch).
+Releases are built with [Velopack](https://velopack.io) and published to GitHub Releases
+**automatically by CI** (`.github/workflows/ci.yml`): every push to `main` runs clippy + tests,
+then checks whether the workspace version in `Cargo.toml` already has a GitHub release — if it
+doesn't, the same run packs the Windows installer and publishes it. The `vX.Y.Z` tag is created
+by the publish step; tags are never pushed by hand. The app updates itself from the published
+releases (banner appears when a new version has been downloaded; it also applies pending updates
+on the next launch).
 
 ## Cutting a release
 
-1. Bump `version` in the workspace `Cargo.toml` and add a `## vX.Y.Z` section to
-   `CHANGELOG.md` (it becomes the GitHub release notes), then commit and push.
-2. **Wait for CI on that commit to go green** — it's the quality gate, and its
-   run is what warms the build cache the release run restores (tag-ref runs can
-   only restore caches created on `main`).
-3. Tag the CI-green commit and push the tag:
+1. Bump `version` in the workspace `Cargo.toml` — e.g. `0.2.3`, or `0.2.3-beta.1` for a beta.
+2. Add (or extend) the `## v0.2.3` section in `CHANGELOG.md` — it becomes the release notes.
+3. Commit and push.
 
-   ```sh
-   git tag v0.2.0
-   git push origin v0.2.0
-   ```
+CI gates the release on clippy + tests: a red build publishes nothing — fix and push again.
+On green, the release appears at `https://github.com/Lonanche/backseater/releases` containing:
 
-3. `.github/workflows/release.yml` builds `backseater.exe`, packs it with `vpk`, and publishes
-   a GitHub Release containing:
-   - `Backseater-win-Setup.exe` — the installer (this is what users download)
-   - `Backseater-win-Portable.zip` — portable build (does not auto-update)
-   - `Backseater-<version>-full.nupkg` / `-delta.nupkg` — the update feed the app consumes
-   - `releases.win.json` — the feed index
+- `Backseater-win-Setup.exe` — the installer (this is what users download)
+- `Backseater-win-Portable.zip` — portable build (does not auto-update)
+- `Backseater-<version>-full.nupkg` / `-delta.nupkg` — the update feed the app consumes
+- `releases.win.json` — the feed index
 
-The pack version comes from the tag, so the tag is the source of truth; keeping `Cargo.toml`
-in sync is for `--version`-style correctness, not the updater.
-
-The "Download previous release" step is `continue-on-error` because the very first release has
-nothing to build a delta from — that failure is expected once.
+Pushes that don't change the version publish nothing, so ordinary development is unaffected.
+The "Download previous release" step is `continue-on-error` because a first release has nothing
+to build a delta from — that failure is expected once.
 
 ## Beta releases
 
-Tag with a pre-release suffix — e.g. `git tag v0.3.0-beta.1` — and the workflow publishes it as
-a GitHub **pre-release**. Only users who enabled About → "Get beta updates" receive it;
-everyone else skips it, and beta users move to the next stable automatically once it's published
-(semver: `0.3.0-beta.1 < 0.3.0`).
+A version with a pre-release suffix (`0.3.0-beta.1`) publishes as a GitHub **pre-release**.
+Only users who enabled About → "Get beta updates" receive it; everyone else skips it, and beta
+users move to the next stable automatically once it's published (semver:
+`0.3.0-beta.1 < 0.3.0`).
 
-**The beta → stable cycle:** develop on `main`, tag `v0.3.0-beta.1`, let beta users test. Fixes
-go on `main` and get tagged `v0.3.0-beta.2`, etc. — beta users auto-update to each. When solid,
-tag `v0.3.0` (usually on the same commit as the last good beta); everyone converges on it.
-Not every release needs a beta — small fixes can tag stable directly.
+**The beta → stable cycle:** develop on `main`, set the version to `0.3.0-beta.1`, push → beta
+users test. Fixes land on `main` with the version bumped to `0.3.0-beta.2`, etc. When solid,
+set the plain `0.3.0` and push — everyone converges on the stable release. Not every release
+needs a beta; small fixes can go straight to a stable version.
 
 **Changelog during betas:** keep ONE `## v0.3.0` section and keep appending beta-cycle fixes to
-it — no per-beta sections. A beta tag inherits its stable section as release notes (the
+it — no per-beta sections. A beta version inherits its stable section as release notes (the
 workflow strips the `-beta.N` suffix as a fallback when no exact section exists), and the final
 stable release publishes the completed section.
 
