@@ -1,0 +1,430 @@
+//! The chat-log region as its **own cached child view** of [`ChatView`].
+//!
+//! Why: `cx.notify(view)` dirties the view *and every ancestor view*
+//! (`window.rs::mark_view_dirty`), so a picker `EmoteCell`'s animation tick
+//! dirties `ChatView` — and an uncached `ChatView` re-render rebuilds the log's
+//! visible rows (hundreds of flex-wrap token elements) at up to 50fps while the
+//! picker shows animated emotes. Caching only spares subtrees *off* the dirty
+//! path, so the heavy log lives here, as a sibling of the picker: a cell tick
+//! re-renders ChatView's (light) chrome while this view's prepaint/paint are
+//! reused wholesale. The log's own animated emotes notify *this* view (they
+//! render inside it, so `window.current_view()` is the `LogView`), which keeps
+//! chat animation working exactly as before.
+//!
+//! All state stays on `ChatView` (rows, selection, list state, config); this
+//! view only *renders* it. That means `ChatView` must explicitly notify this
+//! view whenever log content changes — new rows, font size, panel resize, theme —
+//! via [`ChatView::refresh_log`] (a `.cached()` view reuses its paint until it
+//! is itself dirtied or its bounds change). Scrolling notifies it through the
+//! `ListState` scroll handler; bounds changes (window/panel resize, picker
+//! open/close) miss the cache key and re-render automatically.
+
+use gpui::prelude::*;
+use gpui::{
+    div, image_cache, list, px, App, Context, FollowMode, FontWeight, MouseButton, Pixels, Point,
+    SharedString, WeakEntity, Window,
+};
+use gpui_component::scroll::ScrollableElement;
+use gpui_component::{h_flex, v_flex, ActiveTheme};
+
+use super::{name_click_for, pin_click_for, reply_click_for, ChatView, EmotePopup, Row};
+use crate::channel_store::ChannelModel;
+use crate::{render, ORDINAL_STRIDE, SCROLLBAR_WIDTH};
+use bks_core::Message;
+
+/// A message decorated with its author's resolved 7TV cosmetics for rendering:
+/// the shared message untouched when there are none (no copy), else an owned
+/// clone with the paint/badge applied. Cosmetics live on the shared model, not
+/// baked onto the immutable message, so they apply retroactively + are shared.
+pub(super) fn decorate<'a>(msg: &'a Message, model: &ChannelModel) -> std::borrow::Cow<'a, Message> {
+    match model.cosmetics_for(msg.platform, &msg.author.user_id) {
+        Some(c) => {
+            let mut owned = msg.clone();
+            crate::apply_cosmetics_to_author(&mut owned.author, c);
+            std::borrow::Cow::Owned(owned)
+        }
+        None => std::borrow::Cow::Borrowed(msg),
+    }
+}
+
+pub(super) struct LogView {
+    host: WeakEntity<ChatView>,
+}
+
+impl LogView {
+    pub(super) fn new(host: WeakEntity<ChatView>) -> Self {
+        Self { host }
+    }
+}
+
+/// The style for the cached `AnyView` node wrapping the log. A cached view's
+/// layout node is built from this refinement alone (its content isn't measured),
+/// so it must carry the flex participation the old inline container had:
+/// `flex_1` + `min_w_0` + `min_h_0`, filling the row beside the events panel.
+/// The cache key includes the resolved bounds, so a resize re-renders correctly.
+pub(super) fn log_view_style() -> gpui::StyleRefinement {
+    let mut s = gpui::StyleRefinement {
+        flex_grow: Some(1.),
+        flex_shrink: Some(1.),
+        flex_basis: Some(px(0.).into()),
+        ..Default::default()
+    };
+    s.min_size.width = Some(px(0.).into());
+    s.min_size.height = Some(px(0.).into());
+    s
+}
+
+impl Render for LogView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(host) = self.host.upgrade() else {
+            return div().into_any_element();
+        };
+        let (font_size, selection, focus, list_state, log_image_cache, hide_events_in_log, model) = {
+            let h = host.read(cx);
+            (
+                h.font_size,
+                h.selection.clone(),
+                h.focus.clone(),
+                h.list_state.clone(),
+                h.image_cache.clone(),
+                h.config.layout.contains(crate::tabs::PanelKind::Events) && h.config.events_only,
+                h.channel.clone(),
+            )
+        };
+
+        // Rebuild the per-frame token registry. This runs only when the log
+        // actually re-renders; while the cached paint is reused the registry
+        // keeps the previous frame's tokens — whose bounds are still exact,
+        // since an unchanged cache key means nothing moved.
+        selection.begin_frame();
+
+        // Repaints the log when a link's hover state changes (shared across all
+        // pieces of a wrapped link so the whole link underlines together). Must
+        // notify *this* view: the underline paints inside these rows, and a
+        // notify on ChatView alone would not dirty this cached child.
+        let link_hover: render::LinkHover = {
+            let log = cx.entity();
+            std::rc::Rc::new(move |cx: &mut App| {
+                log.update(cx, |_, cx| cx.notify());
+            })
+        };
+        // Clicking an emote opens its info popup at the click position (the
+        // popup renders as a ChatView overlay, so that's who gets notified).
+        let emote_click: render::EmoteClick = {
+            let host = host.clone();
+            std::rc::Rc::new(
+                move |emote: &bks_core::Emote,
+                      pos: Point<Pixels>,
+                      _window: &mut Window,
+                      cx: &mut App| {
+                    let popup = EmotePopup::from_emote(emote, pos);
+                    host.update(cx, |this, cx| {
+                        this.emote_popup = Some(popup);
+                        cx.notify();
+                    });
+                },
+            )
+        };
+        // A held AutoMod row's Allow/Deny: forward to the controller (the row
+        // resolves itself when the EventSub update comes back).
+        let automod_click: render::AutoModClick = {
+            let host = host.clone();
+            std::rc::Rc::new(
+                move |message_id: &str, allow: bool, _window: &mut Window, cx: &mut App| {
+                    let message_id = message_id.to_string();
+                    host.update(cx, |this, _| {
+                        this.automod_action(message_id, allow);
+                    });
+                },
+            )
+        };
+        // Clicking a 7TV emote *link* in chat fetches the emote by id, then opens
+        // the same popup. A loading placeholder shows immediately so the click
+        // feels responsive while the REST lookup runs.
+        let seventv_link_click: render::SeventvLinkClick = {
+            let host = host.clone();
+            std::rc::Rc::new(
+                move |id: &str, pos: Point<Pixels>, _window: &mut Window, cx: &mut App| {
+                    let id = id.to_string();
+                    host.update(cx, |this, cx| {
+                        this.open_seventv_link(id, pos, cx);
+                    });
+                },
+            )
+        };
+
+        let render_entity = host.clone();
+        let render_model = model.clone();
+        let chat_list = list(list_state.clone(), move |ix, _window, cx: &mut App| {
+            let this = render_entity.read(cx);
+            let model = render_model.read(cx);
+            let Some(row) = model.rows.get(ix) else {
+                return div().into_any_element();
+            };
+            // Ordinals are derived from the row index (not a running counter),
+            // so a selection's endpoints stay valid as the visible window
+            // shifts; the stride leaves room for every token in a row.
+            let mut ordinal = ix * ORDINAL_STRIDE;
+            let inner = match row {
+                Row::Message { msg } => {
+                    // This view's own filters (shared buffer, per-view display):
+                    // an ignored message renders as an empty (height-0) row so the
+                    // list stays index-aligned with the shared model; mention tint
+                    // is this view's terms.
+                    if this.ignore.matches(&msg.raw_text) {
+                        return div().into_any_element();
+                    }
+                    let mentioned = this.mentions.matches(&msg.raw_text);
+                    let name_click = name_click_for(&render_entity, msg);
+                    let reply_click = reply_click_for(&render_entity, msg);
+                    // The 📌 button only renders for rows the user can moderate and
+                    // that carry a real platform message id (not a local echo).
+                    let can_pin = model.can_moderate(msg.platform);
+                    let pin_click = (can_pin && !msg.id.starts_with("echo-"))
+                        .then(|| pin_click_for(&render_entity, msg));
+                    // Struck (ban/delete) + cosmetics come from the shared model's
+                    // side-tables, not baked onto the immutable message.
+                    let struck = model.is_struck(msg);
+                    let decorated = decorate(msg, model);
+                    render::render_message(
+                        &decorated,
+                        render::RowFlags {
+                            struck,
+                            mentioned,
+                        },
+                        font_size,
+                        &this.selection,
+                        &mut ordinal,
+                        render::RowHandlers {
+                            name_click: Some(name_click),
+                            link_hover: Some(link_hover.clone()),
+                            emote_click: Some(emote_click.clone()),
+                            seventv_link_click: Some(seventv_link_click.clone()),
+                            reply_click: Some(reply_click),
+                            pin_click,
+                        },
+                    )
+                    .into_any_element()
+                }
+                Row::System(text) => render::render_system(text, font_size).into_any_element(),
+                Row::Error(text) => {
+                    render::render_error(text, font_size, &this.selection, &mut ordinal)
+                        .into_any_element()
+                }
+                Row::Event { .. } if hide_events_in_log => return div().into_any_element(),
+                Row::Event {
+                    platform,
+                    kind,
+                    text,
+                    message,
+                    ..
+                } => render::render_event(
+                    *platform,
+                    *kind,
+                    text,
+                    None,
+                    message.as_deref(),
+                    font_size,
+                    false,
+                )
+                .into_any_element(),
+                Row::Live {
+                    platform,
+                    live,
+                    title,
+                } => render::render_live(*platform, *live, title, font_size).into_any_element(),
+                Row::AutoMod {
+                    message_id,
+                    user,
+                    text,
+                    reason,
+                    resolved,
+                } => render::render_automod(
+                    message_id,
+                    user,
+                    text,
+                    reason,
+                    resolved.as_ref().map(|(s, m)| (*s, m.as_str())),
+                    font_size,
+                    &this.selection,
+                    &mut ordinal,
+                    automod_click.clone(),
+                )
+                .into_any_element(),
+            };
+            // Per-row bottom gap (the list lays rows back-to-back; it has no
+            // flex `gap`). Width is given by the list; `min_w_0` lets rows wrap.
+            // A uniform left inset (`pl_2`) gives every row breathing room from
+            // the edge and is the shared content-left-edge that highlighted rows
+            // align to (their tinted pill bleeds back to here with a negative
+            // margin, so its text still lines up with normal rows). `pr` is
+            // applied per row (not on the list, where `Auto` sizing would clip
+            // rather than reflow) so the right gutter narrows each row's content
+            // and the reply button clears the thumb.
+            div()
+                .w_full()
+                .min_w_0()
+                .pb_1()
+                .pl_2()
+                .pr(px(SCROLLBAR_WIDTH))
+                .child(inner)
+                .into_any_element()
+        })
+        // `Auto` sizing lays the list out with a bare default style, so it must be
+        // told to fill its parent or it collapses to zero height (no rows visible).
+        .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
+        .size_full();
+
+        let sel_down = selection.clone();
+        let sel_move = selection.clone();
+        let sel_up = selection.clone();
+        let sel_copy = selection.clone();
+        let host_down = host.clone();
+
+        v_flex()
+            .id("chat-log")
+            .track_focus(&focus)
+            // Fill the bounds the cached wrapper node resolved (the flex math
+            // lives on that node — see [`log_view_style`]); `min_*_0` keep the
+            // list scrolling inside instead of growing the panel.
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .relative() // anchors the absolutely-positioned "jump to latest" pill.
+            // Pad every side except the right: the right side is reserved for the
+            // overlay scrollbar (the list adds `pr` so rows clear the thumb), so the
+            // thumb can sit flush at the panel's right edge.
+            .pl_2()
+            .pt_2()
+            .pb_2()
+            // Slightly lighter than the window background so dark usernames (also
+            // contrast-fixed in `render`) read better — the reference the name
+            // contrast-fix lightens against.
+            .bg(gpui::rgb(render::chat_bg()))
+            // Child rows inherit this; the size is an app preference.
+            .text_size(px(font_size))
+            // Drag-to-select: down starts, move extends, up ends. Focus
+            // the log on down so Ctrl/Cmd+C reaches the copy handler.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_, ev: &gpui::MouseDownEvent, window, cx| {
+                    host_down.update(cx, |this, cx| {
+                        this.focus.focus(window, cx);
+                    });
+                    sel_down.start(ev.position);
+                    cx.notify();
+                }),
+            )
+            .on_mouse_move(
+                cx.listener(move |_, ev: &gpui::MouseMoveEvent, _window, cx| {
+                    if sel_move.is_selecting() && sel_move.extend(ev.position) {
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |_, _ev: &gpui::MouseUpEvent, _window, _cx| {
+                    sel_up.finish();
+                }),
+            )
+            .on_key_down(cx.listener(move |_, ev: &gpui::KeyDownEvent, _window, cx| {
+                let ks = &ev.keystroke;
+                if ks.key == "c" && (ks.modifiers.control || ks.modifiers.platform) {
+                    let text = sel_copy.selected_text();
+                    if !text.is_empty() {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    }
+                }
+            }))
+            // The virtualized list fills the remaining height and scrolls itself;
+            // `flex_1` + `min_h_0` give it a definite height to lay rows against.
+            // `relative` so the scrollbar (absolute, fills its parent) overlays the
+            // list; it drives the same `ListState`, so dragging it scrolls the log.
+            .child(
+                // `vertical_scrollbar` overlays an absolute, full-bleed scrollbar
+                // bound to the list's `ListState` (so dragging it scrolls the log);
+                // it must sit on a `relative` parent the same size as the list.
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    // Route the log's emote/badge images through the scoped cache so
+                    // the eviction sweep can free off-screen emotes' decoded frames.
+                    .child(image_cache(log_image_cache).size_full().child(chat_list))
+                    .vertical_scrollbar(&list_state),
+            )
+            // When scrolled up off the bottom, show a "jump to latest" pill.
+            .children(self.jump_to_latest(&list_state, cx))
+            .into_any_element()
+    }
+}
+
+impl LogView {
+    /// The "jump to latest" pill, shown only while the log is scrolled up off the
+    /// bottom (not following the tail). Clicking it snaps back to the newest row,
+    /// which re-engages tail-follow. Absolutely positioned, centered over the log's
+    /// bottom edge (its container is `relative`).
+    fn jump_to_latest(
+        &self,
+        list_state: &gpui::ListState,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if list_state.is_following_tail() {
+            return None;
+        }
+        let list_state = list_state.clone();
+        // A full-width, non-interactive overlay row pinned to the bottom that just
+        // centers the pill; only the pill itself is clickable.
+        Some(
+            div()
+                .absolute()
+                .bottom_2()
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_1p5()
+                        .h_7()
+                        .pl_3()
+                        .pr_2p5()
+                        .rounded_full()
+                        .bg(cx.theme().popover)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .text_color(cx.theme().popover_foreground)
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .shadow_lg()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(cx.theme().accent).border_color(cx.theme().accent))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |_, _ev: &gpui::MouseDownEvent, _window, cx| {
+                                // Re-engage tail-follow (scrolls to the end *and*
+                                // resumes sticking to the bottom, hiding the pill).
+                                list_state.set_follow_mode(FollowMode::Tail);
+                                cx.notify();
+                            }),
+                        )
+                        .child(SharedString::from("Jump to latest"))
+                        .child(
+                            // A small circular badge holding the down chevron.
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size_4()
+                                .rounded_full()
+                                .bg(cx.theme().muted)
+                                .child(SharedString::from("↓")),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+}

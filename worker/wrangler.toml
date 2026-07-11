@@ -1,0 +1,8 @@
+name = "chat-kick-broker"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# Secrets are NOT set here — they'd be committed. Set them out-of-band:
+#   wrangler secret put KICK_CLIENT_ID
+#   wrangler secret put KICK_CLIENT_SECRET
+# (See worker/README.md.)

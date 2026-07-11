@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/platform",
+    "crates/auth",
+    "crates/twitch",
+    "crates/kick",
+    "crates/youtube",
+    "crates/emotes",
+    "crates/app",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+bks-core = { path = "crates/core" }
+bks-platform = { path = "crates/platform" }
+bks-auth = { path = "crates/auth" }
+bks-twitch = { path = "crates/twitch" }
+bks-kick = { path = "crates/kick" }
+bks-youtube = { path = "crates/youtube" }
+bks-emotes = { path = "crates/emotes" }
+
+anyhow = "1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"

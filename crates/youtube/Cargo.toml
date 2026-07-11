@@ -1,0 +1,21 @@
+[package]
+name = "bks-youtube"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+bks-core.workspace = true
+bks-platform.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+# YouTube's youtube.com endpoints are NOT Cloudflare-fingerprint-gated the way
+# Kick's are, so a plain rustls client passes — no `wreq`/BoringSSL needed.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
+once_cell = "1"

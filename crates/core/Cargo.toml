@@ -1,0 +1,11 @@
+[package]
+name = "bks-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+chrono.workspace = true
+regex.workspace = true
+tracing.workspace = true

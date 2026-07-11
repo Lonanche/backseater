@@ -1,0 +1,24 @@
+[package]
+name = "bks-auth"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "rt"] }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+dirs = "6"
+open = "5"
+# PKCE for the Kick authorization-code flow: random verifier + S256 challenge.
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+
+# Credentials go in the OS keyring (Windows Credential Manager, DPAPI-encrypted)
+# instead of plaintext JSON; other platforms keep the file until they're ported.
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }

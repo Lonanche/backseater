@@ -1,0 +1,30 @@
+[package]
+name = "bks-kick"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+bks-core.workspace = true
+bks-platform.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# Cloudflare fingerprints the TLS ClientHello and 403s every plain Rust client
+# (rustls/native-tls) on Kick's read endpoints. `wreq` forges a real Chrome
+# BoringSSL fingerprint, which passes — so the anonymous channel/emotes/usercard/
+# history reads go directly to Kick (no broker proxy). Builds BoringSSL from source
+# (needs NASM + libclang on Windows — see CLAUDE.md).
+wreq = { version = "5", features = ["json", "cookies"] }
+wreq-util = "2"
+once_cell = "1"
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# The dep tree has both `ring` and `aws-lc-rs`, so rustls can't auto-pick a
+# crypto provider; we install `ring` explicitly before connecting (see connector).
+rustls = { version = "0.23", default-features = false, features = ["ring"] }

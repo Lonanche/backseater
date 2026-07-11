@@ -1,0 +1,6 @@
+/target
+/dist
+*.pdb
+.claude/worktrees/
+
+.claude/

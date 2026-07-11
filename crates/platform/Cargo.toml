@@ -1,0 +1,13 @@
+[package]
+name = "bks-platform"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+bks-core.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+serde.workspace = true
+chrono.workspace = true

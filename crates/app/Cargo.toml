@@ -1,0 +1,54 @@
+[package]
+name = "backseater"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "backseater"
+path = "src/main.rs"
+
+[dependencies]
+bks-core.workspace = true
+bks-platform.workspace = true
+bks-auth.workspace = true
+bks-twitch.workspace = true
+bks-kick.workspace = true
+bks-youtube.workspace = true
+bks-emotes.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+anyhow.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+chrono.workspace = true
+serde.workspace = true
+smol = "2"
+# For `FutureExt::shared` to build the `Shared<Task<..>>` gpui's ImageCache wants.
+futures = "0.3"
+# Runtime-agnostic async Semaphore to cap concurrent image downloads (the picker
+# otherwise fires hundreds of GETs at once and the CDN throttles them to a crawl).
+async-lock = "3"
+# Our own HTTP client for image downloads, driven on bridge::runtime() (multi-thread)
+# instead of gpui's reqwest_client (pinned to a single worker thread → slow downloads).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# Poster-frame decode for the emote picker: decode ONLY the first frame of an
+# animated emote for its static thumbnail (~1/frames the work of the full decode
+# pipeline). Version matches gpui's `image` so the `Frame` types unify.
+image = "0.25"
+
+# GPUI is unpublished: pin to the exact zed rev that gpui-component is built
+# against (see gpui-component Cargo.toml), or the two won't unify.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["font-kit", "runtime_shaders"] }
+reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "063e55bbc4fb13907a988111e3581595cbcaefde" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "063e55bbc4fb13907a988111e3581595cbcaefde" }
+
+# Streamer-mode OBS detection: enumerate processes via the Toolhelp snapshot API.
+# 0.61 matches a `windows` already in the tree (via gpui), so no second copy.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp"] }
+
+# Embeds resources/icon.ico as the exe's icon resource (see build.rs).
+[build-dependencies]
+winresource = "0.1"
