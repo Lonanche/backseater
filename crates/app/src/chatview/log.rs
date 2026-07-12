@@ -238,6 +238,7 @@ impl Render for LogView {
                             struck,
                             mentioned,
                             external_highlight: true,
+                            hide_timestamp: !crate::settings::show_timestamps_chat(),
                         },
                         font_size,
                         &this.selection,

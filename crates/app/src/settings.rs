@@ -183,6 +183,15 @@ pub struct Settings {
     /// chat log. On by default.
     #[serde(default = "default_true")]
     pub show_status_bar: bool,
+    /// Whether message timestamps show in the chat log. On by default.
+    #[serde(default = "default_true")]
+    pub show_timestamps_chat: bool,
+    /// Whether timestamps show on the events panel's rows. On by default.
+    #[serde(default = "default_true")]
+    pub show_timestamps_events: bool,
+    /// Whether timestamps show on the mentions panel's rows. On by default.
+    #[serde(default = "default_true")]
+    pub show_timestamps_mentions: bool,
     /// Whether the tab strip shows the global Mentions tab: a pinned pseudo-tab
     /// collecting every tab's mentions in one feed. Off by default.
     #[serde(default)]
@@ -243,6 +252,9 @@ impl Default for Settings {
             show_pinned_twitch: true,
             show_pinned_kick: true,
             show_status_bar: true,
+            show_timestamps_chat: true,
+            show_timestamps_events: true,
+            show_timestamps_mentions: true,
             mentions_tab: false,
             mentions_tab_name: None,
             beta_updates: false,
@@ -303,6 +315,9 @@ impl Settings {
         SHOW_PINNED_TWITCH.store(self.show_pinned_twitch, Ordering::Relaxed);
         SHOW_PINNED_KICK.store(self.show_pinned_kick, Ordering::Relaxed);
         SHOW_STATUS_BAR.store(self.show_status_bar, Ordering::Relaxed);
+        SHOW_TIMESTAMPS_CHAT.store(self.show_timestamps_chat, Ordering::Relaxed);
+        SHOW_TIMESTAMPS_EVENTS.store(self.show_timestamps_events, Ordering::Relaxed);
+        SHOW_TIMESTAMPS_MENTIONS.store(self.show_timestamps_mentions, Ordering::Relaxed);
     }
 
     /// Pushes the mention-sound master + streamer-mute toggles into the
@@ -356,11 +371,29 @@ use std::sync::{Arc, RwLock};
 static SHOW_PINNED_TWITCH: AtomicBool = AtomicBool::new(true);
 static SHOW_PINNED_KICK: AtomicBool = AtomicBool::new(true);
 static SHOW_STATUS_BAR: AtomicBool = AtomicBool::new(true);
+static SHOW_TIMESTAMPS_CHAT: AtomicBool = AtomicBool::new(true);
+static SHOW_TIMESTAMPS_EVENTS: AtomicBool = AtomicBool::new(true);
+static SHOW_TIMESTAMPS_MENTIONS: AtomicBool = AtomicBool::new(true);
 
 /// Whether the live status bar (viewer counts) is enabled (a persisted,
 /// process-wide preference — see [`Settings::apply_visibility_flags`]).
 pub fn show_status_bar() -> bool {
     SHOW_STATUS_BAR.load(Ordering::Relaxed)
+}
+
+/// Whether message timestamps show in the chat log (persisted, process-wide).
+pub fn show_timestamps_chat() -> bool {
+    SHOW_TIMESTAMPS_CHAT.load(Ordering::Relaxed)
+}
+
+/// Whether timestamps show on the events panel's rows (persisted, process-wide).
+pub fn show_timestamps_events() -> bool {
+    SHOW_TIMESTAMPS_EVENTS.load(Ordering::Relaxed)
+}
+
+/// Whether timestamps show on the mentions panel's rows (persisted, process-wide).
+pub fn show_timestamps_mentions() -> bool {
+    SHOW_TIMESTAMPS_MENTIONS.load(Ordering::Relaxed)
 }
 
 /// The process-wide **global** ignore list (the app-wide `ignored_terms`). The

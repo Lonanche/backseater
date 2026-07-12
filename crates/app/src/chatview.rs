@@ -3667,6 +3667,7 @@ impl ChatView {
                             render::RowFlags {
                                 struck,
                                 mentioned: true,
+                                hide_timestamp: !crate::settings::show_timestamps_mentions(),
                                 ..Default::default()
                             },
                             font_size,

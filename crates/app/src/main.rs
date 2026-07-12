@@ -2253,6 +2253,46 @@ impl BackseaterApp {
                     ))
             )
             .child(div().h_1())
+            .child(section_title("Timestamps"))
+            .child(
+                setting_card()
+                    .child(setting_row(
+                        "Chat",
+                        Some("Show the time before each message in the chat log."),
+                        Switch::new("show-timestamps-chat")
+                            .small()
+                            .checked(self.settings.show_timestamps_chat)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.set_show_timestamps(TimestampSurface::Chat, *checked, cx);
+                            }))
+                            .into_any_element(),
+                    ))
+                    .child(card_divider())
+                    .child(setting_row(
+                        "Events panel",
+                        Some("Show the time on each row of the events panel."),
+                        Switch::new("show-timestamps-events")
+                            .small()
+                            .checked(self.settings.show_timestamps_events)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.set_show_timestamps(TimestampSurface::Events, *checked, cx);
+                            }))
+                            .into_any_element(),
+                    ))
+                    .child(card_divider())
+                    .child(setting_row(
+                        "Mentions panel",
+                        Some("Show the time on each row of the mentions panel."),
+                        Switch::new("show-timestamps-mentions")
+                            .small()
+                            .checked(self.settings.show_timestamps_mentions)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.set_show_timestamps(TimestampSurface::Mentions, *checked, cx);
+                            }))
+                            .into_any_element(),
+                    )),
+            )
+            .child(div().h_1())
             .child(section_title("Pinned messages"))
             .child(
                 setting_card()
@@ -3351,6 +3391,25 @@ impl BackseaterApp {
         for tab in &self.tabs {
             tab.view.update(cx, |_, cx| cx.notify());
         }
+        cx.notify();
+    }
+
+    /// Toggles a per-surface "show timestamps" setting (chat log / events panel /
+    /// mentions panel). Persists, flips the process-wide flag, and re-measures
+    /// every tab's log since hiding the timestamp changes row layout/wrap.
+    fn set_show_timestamps(&mut self, surface: TimestampSurface, on: bool, cx: &mut Context<Self>) {
+        let field = match surface {
+            TimestampSurface::Chat => &mut self.settings.show_timestamps_chat,
+            TimestampSurface::Events => &mut self.settings.show_timestamps_events,
+            TimestampSurface::Mentions => &mut self.settings.show_timestamps_mentions,
+        };
+        if *field == on {
+            return;
+        }
+        *field = on;
+        self.settings.save();
+        self.settings.apply_visibility_flags();
+        self.remeasure_tabs(cx);
         cx.notify();
     }
 
@@ -4683,6 +4742,15 @@ fn format_uptime(elapsed: chrono::Duration) -> String {
             format!("{d}d{h}h")
         }
     }
+}
+
+/// Which surface a "show timestamps" toggle applies to (chat log / events panel /
+/// mentions panel), used by [`BackseaterApp::set_show_timestamps`].
+#[derive(Clone, Copy)]
+enum TimestampSurface {
+    Chat,
+    Events,
+    Mentions,
 }
 
 /// One platform's snapshot for a tab tooltip: the channel it's set to plus its

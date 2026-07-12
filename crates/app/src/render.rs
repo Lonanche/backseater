@@ -1346,6 +1346,10 @@ pub struct RowFlags {
     /// the message doesn't also paint its own. Panels (mentions, pin banner)
     /// leave it false and get the self-contained tint.
     pub external_highlight: bool,
+    /// Suppress the row's leading timestamp. Set from the per-surface "show
+    /// timestamps" settings by the chat log and mentions panel; other surfaces
+    /// (usercard, pin banner) leave it false and always show the time.
+    pub hide_timestamp: bool,
 }
 
 /// One chat message as a wrapping row: platform · time · name · tokens. When
@@ -1378,6 +1382,7 @@ pub fn render_message(
         struck,
         mentioned,
         external_highlight,
+        hide_timestamp,
     } = flags;
     let scale = Scale::new(font_size);
     let name_color = readable_color(
@@ -1573,13 +1578,16 @@ pub fn render_message(
         .child(platform_badge(msg.platform, scale).mr_1())
         // The timestamp is chat-font-sized: full-size text fills the line box, so it shares the
         // body text's baseline exactly — a smaller size can't be made to align
-        // with both the text baseline and the icon/badge centers at once.
-        .child(
-            line_box(scale)
-                .mr_1()
-                .text_color(rgb(palette().timestamp))
-                .child(time),
-        )
+        // with both the text baseline and the icon/badge centers at once. Hidden
+        // when the surface's "show timestamps" setting is off.
+        .when(!hide_timestamp, |row| {
+            row.child(
+                line_box(scale)
+                    .mr_1()
+                    .text_color(rgb(palette().timestamp))
+                    .child(time),
+            )
+        })
         .children(author_badges)
         .children(tokens);
 
@@ -2358,13 +2366,15 @@ pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElem
                             .unwrap_or_else(|| event_kind_color(ev.kind)))),
                     ),
                 )
-                .child(
-                    line_box(scale)
-                        .flex_none()
-                        .text_size(px(scale.small))
-                        .text_color(rgb(p.timestamp))
-                        .child(SharedString::from(time)),
-                )
+                .when(crate::settings::show_timestamps_events(), |row| {
+                    row.child(
+                        line_box(scale)
+                            .flex_none()
+                            .text_size(px(scale.small))
+                            .text_color(rgb(p.timestamp))
+                            .child(SharedString::from(time)),
+                    )
+                })
                 .child(platform_badge(ev.platform, scale).flex_none())
                 .child(content),
         );
