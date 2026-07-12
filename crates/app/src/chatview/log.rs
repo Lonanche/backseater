@@ -231,15 +231,17 @@ impl Render for LogView {
                     kind,
                     text,
                     message,
+                    accent,
                     ..
                 } => {
-                    highlight = Some(render::highlight_event(*kind));
+                    highlight = Some(render::highlight_event(*kind, *accent));
                     render::render_event(
                         *platform,
                         *kind,
                         text,
                         None,
                         message.as_deref(),
+                        *accent,
                         font_size,
                         false,
                     )

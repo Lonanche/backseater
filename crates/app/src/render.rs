@@ -406,12 +406,16 @@ pub(crate) fn highlight_first_message() -> (u32, u32) {
     (p.first_message_bg, p.first_message_label)
 }
 
-pub(crate) fn highlight_event(kind: EventKind) -> (u32, u32) {
+/// `accent` (a platform-assigned row color — Twitch announcement colors)
+/// overrides the kind's accent-bar/label tone; the background tint stays the
+/// kind's own so the row still reads as an event on both themes.
+pub(crate) fn highlight_event(kind: EventKind, accent: Option<u32>) -> (u32, u32) {
     let p = palette();
-    match kind {
+    let (bg, fg) = match kind {
         EventKind::WatchStreak => (p.streak_bg, p.streak_text),
         _ => (p.event_bg, p.event_text),
-    }
+    };
+    (bg, accent.unwrap_or(fg))
 }
 
 pub(crate) fn highlight_live(live: bool) -> (u32, u32) {
@@ -1969,18 +1973,20 @@ pub fn render_automod(
 /// self-contained tinted pill inside the row box; `false` (the chat log) stays
 /// bare — the log's full-width row wrapper paints the tint + accent bar
 /// edge-to-edge instead.
+#[allow(clippy::too_many_arguments)]
 pub fn render_event(
     platform: Platform,
     kind: EventKind,
     text: &str,
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
     message: Option<&Message>,
+    accent: Option<u32>,
     font_size: f32,
     panel: bool,
 ) -> impl IntoElement {
     let scale = Scale::new(font_size);
     let p = palette();
-    let (bg, fg) = highlight_event(kind);
+    let (bg, fg) = highlight_event(kind, accent);
 
     // The system text is split into per-word tokens (like a chat body) so a long
     // event string wraps at word boundaries instead of overflowing the (often
@@ -2063,6 +2069,7 @@ fn event_kind_color(kind: EventKind) -> u32 {
         EventKind::Bits => 0x00bcd4,
         EventKind::Reward => 0x4a90e2,
         EventKind::WatchStreak => 0xffb340,
+        EventKind::Announcement => 0x9147ff,
         EventKind::Other => 0x8a919e,
     }
 }
@@ -2161,9 +2168,14 @@ pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElem
                 .items_start()
                 .gap_1p5()
                 .child(
-                    image_line_box(scale, dot)
-                        .flex_none()
-                        .child(div().size(px(dot)).rounded_full().bg(rgb(event_kind_color(ev.kind)))),
+                    image_line_box(scale, dot).flex_none().child(
+                        // The dot takes the event's own accent when the
+                        // platform assigned one (announcement colors).
+                        div().size(px(dot)).rounded_full().bg(rgb(ev
+                            .details
+                            .accent
+                            .unwrap_or_else(|| event_kind_color(ev.kind)))),
+                    ),
                 )
                 .child(
                     line_box(scale)

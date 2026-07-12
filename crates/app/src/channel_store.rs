@@ -461,6 +461,7 @@ impl ChannelModel {
                     platform,
                     self.events_base + self.events.len() as u64,
                 );
+                let accent = details.accent;
                 self.events.push_back(RetainedEvent {
                     platform,
                     kind,
@@ -489,6 +490,7 @@ impl ChannelModel {
                         text,
                         timestamp,
                         message,
+                        accent,
                     },
                     cx,
                 );

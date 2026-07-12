@@ -27,19 +27,23 @@ pub enum EventKind {
     /// A Twitch watch streak (`viewermilestone` USERNOTICE) — a viewer watched
     /// several consecutive streams.
     WatchStreak,
-    /// Anything else (rituals, announcements, bits-badge tiers, ...).
+    /// A moderator announcement (Twitch `/announce`): the chatter's message
+    /// decorated with a highlight color (carried in [`EventDetails::accent`]).
+    Announcement,
+    /// Anything else (rituals, bits-badge tiers, ...).
     Other,
 }
 
 impl EventKind {
     /// Every kind, for building a default "all enabled" checklist.
-    pub const ALL: [EventKind; 7] = [
+    pub const ALL: [EventKind; 8] = [
         EventKind::Sub,
         EventKind::Gift,
         EventKind::Raid,
         EventKind::Bits,
         EventKind::Reward,
         EventKind::WatchStreak,
+        EventKind::Announcement,
         EventKind::Other,
     ];
 
@@ -52,6 +56,7 @@ impl EventKind {
             EventKind::Bits => "Bits / Kicks",
             EventKind::Reward => "Channel points",
             EventKind::WatchStreak => "Watch streaks",
+            EventKind::Announcement => "Announcements",
             EventKind::Other => "Other",
         }
     }
@@ -97,6 +102,11 @@ pub struct EventDetails {
     /// Recipients listed directly on the announcement, for platforms that send
     /// one event for the whole batch (Kick) instead of per-recipient events.
     pub recipients: Vec<String>,
+    /// A platform-assigned highlight color for the row (0xRRGGBB) — Twitch's
+    /// announcement colors (blue/green/orange/purple). `None` = the kind's
+    /// default highlight (Twitch's PRIMARY is the channel's own accent color,
+    /// which anonymous chat can't see, so it maps to `None` too).
+    pub accent: Option<u32>,
 }
 
 /// A channel's active chat-restriction modes, platform-agnostic. Always a

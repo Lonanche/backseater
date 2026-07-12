@@ -147,43 +147,77 @@ pub(crate) fn clearchat_event(cc: &tmi::msg::ClearChat<'_>, historical: bool) ->
 /// like a normal chat line. `None` when there's no system-msg (nothing to show).
 /// Shared by the live loop and history backfill.
 pub(crate) fn usernotice_event(un: &tmi::msg::UserNotice<'_>) -> Option<ChatEvent> {
-    let text = un.system_message()?.to_string();
-    // The attached sub message (if any) carries native emote positions in the
-    // USERNOTICE `emotes` tag, indexed against this text — same as a PRIVMSG, so
-    // pass it un-trimmed (trimming would shift those positions).
-    let message = un
-        .text()
-        .filter(|s| !s.trim().is_empty())
-        .and_then(|user_msg| {
-            let sender = un.sender()?;
-            Some(Box::new(Message {
-                id: un.message_id().to_string(),
-                platform: Platform::Twitch,
-                channel: bks_core::strip_channel(un.channel()).to_string(),
-                timestamp: un.timestamp(),
-                author: Author {
-                    login: sender.login().to_string(),
-                    display_name: sender.name().to_string(),
-                    color: un.color().and_then(Color::from_hex),
-                    badges: un.badges().map(badge_from_irc).collect(),
-                    user_id: sender.id().to_string(),
-                    paint: None,
-                },
-                elements: build_privmsg_elements(user_msg, un.raw_emotes(), None),
-                raw_text: user_msg.to_string(),
-                reply: None,
-                first_message: false,
-                historical: false,
-            }))
+    // An announcement (`/announce`) ships NO system-msg — the announcement IS
+    // the chatter's message, decorated with `msg-param-color` — so it must be
+    // handled before the system-msg bail below (which silently dropped them).
+    if let tmi::msg::user_notice::Event::Announcement(a) = un.event() {
+        return Some(ChatEvent::Event {
+            platform: Platform::Twitch,
+            kind: EventKind::Announcement,
+            text: "📢 Announcement".to_string(),
+            timestamp: un.timestamp(),
+            // No text = nothing to announce (shouldn't happen, but an empty
+            // highlighted row would just be noise).
+            message: Some(usernotice_message(un)?),
+            details: EventDetails {
+                actor: un.sender().map(|s| s.name().to_string()),
+                compact: Some("made an announcement".to_string()),
+                accent: announcement_accent(a.highlight_color()),
+                ..Default::default()
+            },
         });
+    }
+    let text = un.system_message()?.to_string();
     Some(ChatEvent::Event {
         platform: Platform::Twitch,
         kind: usernotice_kind(un),
         text,
         timestamp: un.timestamp(),
-        message,
+        message: usernotice_message(un),
         details: usernotice_details(un),
     })
+}
+
+/// The chat message attached to a USERNOTICE (a sub/resub's optional line, an
+/// announcement's body) as a full [`Message`] — author, badges, timestamp, and
+/// elements built through the same path as a PRIVMSG so its native emotes
+/// render inline. The USERNOTICE `emotes` tag is indexed against the raw text,
+/// so it's passed un-trimmed (trimming would shift those positions).
+fn usernotice_message(un: &tmi::msg::UserNotice<'_>) -> Option<Box<Message>> {
+    let user_msg = un.text().filter(|s| !s.trim().is_empty())?;
+    let sender = un.sender()?;
+    Some(Box::new(Message {
+        id: un.message_id().to_string(),
+        platform: Platform::Twitch,
+        channel: bks_core::strip_channel(un.channel()).to_string(),
+        timestamp: un.timestamp(),
+        author: Author {
+            login: sender.login().to_string(),
+            display_name: sender.name().to_string(),
+            color: un.color().and_then(Color::from_hex),
+            badges: un.badges().map(badge_from_irc).collect(),
+            user_id: sender.id().to_string(),
+            paint: None,
+        },
+        elements: build_privmsg_elements(user_msg, un.raw_emotes(), None),
+        raw_text: user_msg.to_string(),
+        reply: None,
+        first_message: false,
+        historical: false,
+    }))
+}
+
+/// Twitch's announcement highlight colors (`msg-param-color`). `PRIMARY` is
+/// the channel's own profile accent, which anonymous chat can't see → `None`
+/// (the UI falls back to the event kind's default highlight).
+fn announcement_accent(color: &str) -> Option<u32> {
+    match color {
+        "BLUE" => Some(0x1E69FF),
+        "GREEN" => Some(0x00C7AC),
+        "ORANGE" => Some(0xFA8C16),
+        "PURPLE" => Some(0x9147FF),
+        _ => None,
+    }
 }
 
 /// The login key anonymous gifters share, so an anonymous mass gift's
@@ -355,6 +389,7 @@ fn usernotice_kind(un: &tmi::msg::UserNotice<'_>) -> EventKind {
         }
         Event::Raid(_) => EventKind::Raid,
         Event::BitsBadgeTier(_) => EventKind::Bits,
+        Event::Announcement(_) => EventKind::Announcement,
         _ => EventKind::Other,
     }
 }
@@ -618,6 +653,51 @@ mod tests {
                 assert_eq!(msg.author.badges.len(), 1);
             }
             other => panic!("expected an event with an attached message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn announcement_becomes_event_with_message_and_accent() {
+        // A real announcement USERNOTICE: system-msg is EMPTY — the chatter's
+        // text IS the announcement (this shape used to be silently dropped).
+        let raw = "@badge-info=;badges=moderator/1;color=#1E90FF;display-name=qaixx;\
+                   emotes=;flags=;id=8c0fea53;login=qaixx;mod=1;msg-id=announcement;\
+                   msg-param-color=BLUE;room-id=404660262;subscriber=0;system-msg=;\
+                   tmi-sent-ts=1738762344755;user-id=955666532;user-type=mod;vip=0 \
+                   :tmi.twitch.tv USERNOTICE #trausi :big news everyone";
+        let un = parse_usernotice(raw);
+        match usernotice_event(&un) {
+            Some(ChatEvent::Event {
+                kind,
+                message: Some(msg),
+                details,
+                ..
+            }) => {
+                assert_eq!(kind, EventKind::Announcement);
+                assert_eq!(msg.raw_text, "big news everyone");
+                assert_eq!(msg.author.display_name, "qaixx");
+                assert_eq!(details.accent, Some(0x1E69FF));
+                assert_eq!(details.actor.as_deref(), Some("qaixx"));
+            }
+            other => panic!("expected an announcement event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn announcement_primary_color_has_no_accent() {
+        // PRIMARY is the channel's own accent color, unknown anonymously.
+        let raw = "@badge-info=subscriber/93;badges=moderator/1,subscriber/3072;color=#2E8B57;\
+                   display-name=trausibot;emotes=;flags=;id=bb1bec25;login=trausibot;mod=1;\
+                   msg-id=announcement;msg-param-color=PRIMARY;room-id=11148817;subscriber=1;\
+                   system-msg=;tmi-sent-ts=1695554663565;user-id=82008718;user-type=mod \
+                   :tmi.twitch.tv USERNOTICE #lonanche :$ping xd";
+        let un = parse_usernotice(raw);
+        match usernotice_event(&un) {
+            Some(ChatEvent::Event { kind, details, .. }) => {
+                assert_eq!(kind, EventKind::Announcement);
+                assert_eq!(details.accent, None);
+            }
+            other => panic!("expected an announcement event, got {other:?}"),
         }
     }
 

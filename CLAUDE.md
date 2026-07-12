@@ -36,7 +36,13 @@ platform = implement one trait + one message builder, with zero UI changes**.
 - Colored usernames, timestamps, system notices, clear-chat/timeout notices.
 - **Public channel events** (Twitch + Kick, anonymous — they're public): shown as highlighted rows.
   Twitch uses tmi's ready-made `USERNOTICE` `system-msg` (covers sub/resub/gift/mystery/raid/
-  announcement/ritual/bits in one accessor). Kick formats Pusher events: `SubscriptionEvent`,
+  ritual/bits in one accessor). ⚠️ **Announcements are the exception**: their `system-msg` is
+  EMPTY (the chatter's text IS the announcement), so they're a dedicated early branch in
+  `usernotice_event` — `EventKind::Announcement`, text "📢 Announcement", the body as the attached
+  `Message`, and `msg-param-color` mapped to `EventDetails::accent` (0xRRGGBB; `PRIMARY` = the
+  channel's own accent, unknowable anonymously → `None` = kind default). The accent overrides the
+  row's accent-bar/label color (`render::highlight_event(kind, accent)`) and the events panel's
+  dot; `Row::Event` carries it. Kick formats Pusher events: `SubscriptionEvent`,
   `GiftedSubscriptionsEvent`, `StreamHostEvent` (Kick's "raid"/host), `KicksGifted` (bits/cheer
   equivalent), `RewardRedeemedEvent` (channel points). Kick has **no** raid event — host is its
   equivalent. (Leaderboard/prediction Pusher events are intentionally ignored;

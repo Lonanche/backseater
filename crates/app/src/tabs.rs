@@ -29,6 +29,7 @@ pub struct EventFilter {
     pub bits: bool,
     pub reward: bool,
     pub watch_streak: bool,
+    pub announcement: bool,
     pub other: bool,
 }
 
@@ -41,6 +42,7 @@ impl Default for EventFilter {
             bits: true,
             reward: true,
             watch_streak: true,
+            announcement: true,
             other: true,
         }
     }
@@ -56,6 +58,7 @@ impl EventFilter {
             EventKind::Bits => self.bits,
             EventKind::Reward => self.reward,
             EventKind::WatchStreak => self.watch_streak,
+            EventKind::Announcement => self.announcement,
             EventKind::Other => self.other,
         }
     }
@@ -69,6 +72,7 @@ impl EventFilter {
             EventKind::Bits => &mut self.bits,
             EventKind::Reward => &mut self.reward,
             EventKind::WatchStreak => &mut self.watch_streak,
+            EventKind::Announcement => &mut self.announcement,
             EventKind::Other => &mut self.other,
         }
     }

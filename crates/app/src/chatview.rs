@@ -147,6 +147,9 @@ pub(crate) enum Row {
         text: String,
         timestamp: chrono::DateTime<chrono::Utc>,
         message: Option<Box<Message>>,
+        /// A platform-assigned highlight color (Twitch announcement colors)
+        /// overriding the kind's default accent; see `EventDetails::accent`.
+        accent: Option<u32>,
     },
     /// A stream going live or offline, shown as a highlighted notice row (green
     /// on live, muted on offline) with the platform icon.
