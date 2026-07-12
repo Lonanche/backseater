@@ -169,9 +169,16 @@ impl Controller {
         twitch_channel: String,
         kick_channel: String,
     ) -> Self {
+        // A Kick-only tab has nowhere else to send, so it starts (and stays)
+        // targeted at Kick; anything else defaults to Twitch.
+        let target = if twitch_channel.is_empty() && !kick_channel.is_empty() {
+            SendTarget::Kick
+        } else {
+            SendTarget::default()
+        };
         Self {
             state: Arc::new(Mutex::new(State::default())),
-            target: Arc::new(std::sync::Mutex::new(SendTarget::default())),
+            target: Arc::new(std::sync::Mutex::new(target)),
             session,
             events,
             rt,
@@ -303,8 +310,12 @@ impl Controller {
     }
 
     /// On Kick logout, a tab targeting Kick/Both can no longer send there, so
-    /// fall back to Twitch.
+    /// fall back to Twitch — unless the tab has no Twitch channel, where Kick
+    /// stays the target so a send gets the "log into Kick first" hint.
     fn reset_target_off_kick(&self) {
+        if !self.has_twitch() {
+            return;
+        }
         let mut target = self.target.lock().unwrap();
         if matches!(*target, SendTarget::Kick | SendTarget::Both) {
             *target = SendTarget::Twitch;
@@ -375,9 +386,10 @@ impl Controller {
     }
 
     /// Cycles the send target Twitch → Kick → Both (only meaningful when logged
-    /// into Kick and this tab has a Kick channel).
+    /// into Kick and this tab has both channels — a single-platform tab has
+    /// nothing to switch to).
     pub fn cycle_send_target(&self) {
-        if !self.kick_logged_in() || !self.has_kick() {
+        if !self.kick_logged_in() || !self.has_kick() || !self.has_twitch() {
             return;
         }
         let mut target = self.target.lock().unwrap();

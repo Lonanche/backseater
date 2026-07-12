@@ -3175,9 +3175,13 @@ impl ChatView {
     }
 
     /// A clickable chip showing/cycling the send target — only when logged into
-    /// Kick and this tab has a Kick channel (otherwise nothing to switch).
+    /// Kick and this tab has both a Twitch and a Kick channel (a
+    /// single-platform tab has nothing to switch).
     fn send_target_toggle(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if !self.controller.kick_logged_in() || !self.controller.has_kick() {
+        if !self.controller.kick_logged_in()
+            || !self.controller.has_kick()
+            || !self.controller.has_twitch()
+        {
             return None;
         }
         use bks_core::Platform;
