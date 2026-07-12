@@ -91,6 +91,7 @@ impl Render for LogView {
                 h.channel.clone(),
             )
         };
+        let paused = host.read(cx).log_paused;
 
         // Rebuild the per-frame token registry. This runs only when the log
         // actually re-renders; while the cached paint is reused the registry
@@ -468,8 +469,10 @@ impl Render for LogView {
                         d.vertical_scrollbar(&list_state)
                     }),
             )
-            // When scrolled up off the bottom, show a "jump to latest" pill.
+            // When scrolled up off the bottom, show a "jump to latest" pill;
+            // while hover-paused at the bottom, a "paused" pill instead.
             .children(self.jump_to_latest(&list_state, cx))
+            .children(self.paused_pill(paused, &list_state, cx))
             .into_any_element()
     }
 }
@@ -536,6 +539,46 @@ impl LogView {
                                 .bg(cx.theme().muted)
                                 .child(SharedString::from("↓")),
                         ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// A small non-interactive "Chat paused" pill while hover-pause holds the
+    /// log still. Shown only while still tail-following — a mid-pause manual
+    /// scroll shows the "jump to latest" pill instead (they'd overlap).
+    fn paused_pill(
+        &self,
+        paused: bool,
+        list_state: &gpui::ListState,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if !paused || !list_state.is_following_tail() {
+            return None;
+        }
+        Some(
+            div()
+                .absolute()
+                .bottom_2()
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_1p5()
+                        .h_7()
+                        .px_3()
+                        .rounded_full()
+                        .bg(cx.theme().popover)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .text_color(cx.theme().popover_foreground)
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .shadow_lg()
+                        .child(SharedString::from("⏸ Chat paused")),
                 )
                 .into_any_element(),
         )

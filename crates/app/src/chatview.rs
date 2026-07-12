@@ -599,6 +599,19 @@ pub(crate) struct ChatView {
     /// Tracked view-side and applied on the next log render — a group-hover
     /// display switch inside the row panics when hover flips mid-frame.
     hover_strip_row: Option<String>,
+    /// Whether the pointer is over this view's chat-log region (tracked by the
+    /// log wrapper's `on_hover`; the composer/input bar is outside it).
+    log_hovered: bool,
+    /// Hover-pause is engaged: appended rows are withheld from [`list_state`]
+    /// (the shared model keeps them; [`unpause_log`](Self::unpause_log) splices
+    /// the tail back in), so a tail-following log holds still under the pointer.
+    /// Only ever engaged while following the tail — a view the user scrolled up
+    /// doesn't move on appends anyway.
+    log_paused: bool,
+    /// A [`ChannelEvent::Changed`] arrived while paused: its full re-measure
+    /// (`list_state.reset`) would snap the frozen view to the live bottom, so
+    /// it's deferred to the unpause.
+    paused_needs_reset: bool,
     /// Set once the personal Twitch emotes have been fetched, so we only hit
     /// Helix the first time the picker opens (not on every toggle).
     emotes_fetched: bool,
@@ -801,6 +814,9 @@ impl ChatView {
             popup: None,
             pin_duration_choice: Some(controller::Controller::PIN_DURATION_SECS),
             hover_strip_row: None,
+            log_hovered: false,
+            log_paused: false,
+            paused_needs_reset: false,
             emotes_fetched: false,
             sent_history: Vec::new(),
             history_index: None,
@@ -831,13 +847,35 @@ impl ChatView {
     ) {
         use crate::channel_store::ChannelEvent;
         match event {
-            ChannelEvent::Appended { index, msg } | ChannelEvent::Inserted { index, msg } => {
-                self.list_state.splice(*index..*index, 1);
+            ChannelEvent::Appended { index, msg } => {
+                // Engage hover-pause lazily too (not just on hover-enter): the
+                // user may have scrolled back to the bottom while hovering.
+                self.maybe_pause_log(cx);
+                // While paused, appended rows are withheld from the list (the
+                // unpause splices the missing tail back in); the view keeps
+                // showing `rows[0..item_count]`, whose indices stay valid.
+                if !self.log_paused {
+                    self.list_state.splice(*index..*index, 1);
+                }
                 // A new row may be a mention (for our terms) — flag the mentions
                 // panel to tail + feed the all-tabs store.
                 self.note_new_row(msg.as_deref());
             }
+            ChannelEvent::Inserted { index, msg } => {
+                // History backfill sorts into place. While paused, an insert
+                // inside the frozen prefix must apply (it shifts the rows the
+                // frozen indices map to); one landing past it belongs to the
+                // withheld tail instead.
+                if !self.log_paused || *index <= self.list_state.item_count() {
+                    let ix = (*index).min(self.list_state.item_count());
+                    self.list_state.splice(ix..ix, 1);
+                }
+                self.note_new_row(msg.as_deref());
+            }
             ChannelEvent::RemovedFront => {
+                // Applied even while paused: the frozen view tracks the shared
+                // buffer's front so `rows[ix]` lookups can't skew, and the
+                // trimmed rows are far above a bottom-anchored viewport.
                 self.list_state.splice(0..1, 0);
             }
             ChannelEvent::EventAppended { seq } => {
@@ -865,7 +903,14 @@ impl ChatView {
             // or channel state a render reads changed (strikes/cosmetics/pins).
             // Re-measure so a changed row's new height is picked up (rare event).
             ChannelEvent::Changed => {
-                self.list_state.reset(self.channel.read(cx).len());
+                if self.log_paused {
+                    // The reset would sync the withheld tail in and snap to the
+                    // bottom — defer it to the unpause (the repaint below still
+                    // shows in-place changes like strikes).
+                    self.paused_needs_reset = true;
+                } else {
+                    self.list_state.reset(self.channel.read(cx).len());
+                }
                 // Pins may have changed: drop dismissals whose pin is gone
                 // (unpinned/replaced/expired) so the restore chip only ever
                 // represents — and restores — pins that are still active.
@@ -947,6 +992,9 @@ impl ChatView {
             cx,
         );
         self.controller = channel.read(cx).controller.clone();
+        // A fresh model means a fresh list — any hover-pause freeze is moot.
+        self.log_paused = false;
+        self.paused_needs_reset = false;
         self.list_state.reset(channel.read(cx).len());
         self._channel_sub = cx.subscribe(&channel, Self::on_channel_event);
         self.channel_key = key;
@@ -1051,6 +1099,62 @@ impl ChatView {
         self.log_view.update(cx, |_, cx| cx.notify());
     }
 
+    /// The log wrapper's hover tracking (the pause-on-hover feature). Entering
+    /// engages the pause when eligible; leaving resumes — back to the newest
+    /// message if the view was still following the tail, staying put if the
+    /// user scrolled up themselves in the meantime.
+    fn set_log_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if self.log_hovered == hovered {
+            return;
+        }
+        self.log_hovered = hovered;
+        if hovered {
+            self.maybe_pause_log(cx);
+        } else if self.log_paused {
+            self.unpause_log(cx);
+        }
+    }
+
+    /// Engages hover-pause when the setting is on, the pointer is over the log,
+    /// and the view is following the tail (a scrolled-up view doesn't move on
+    /// appends, so there's nothing to pause). A no-op otherwise; called on
+    /// hover-enter and again per appended row, so scrolling back to the bottom
+    /// mid-hover pauses too.
+    fn maybe_pause_log(&mut self, cx: &mut Context<Self>) {
+        if !self.log_paused
+            && self.log_hovered
+            && crate::settings::pause_chat_on_hover()
+            && self.list_state.is_following_tail()
+        {
+            self.log_paused = true;
+            self.refresh_log(cx); // show the "paused" pill
+            cx.notify();
+        }
+    }
+
+    /// Ends hover-pause: splices the withheld tail into the list (the follow
+    /// mode does the rest — still tail-following snaps to the newest row, a
+    /// mid-pause manual scroll keeps its place), or runs the re-measure a
+    /// `Changed` deferred.
+    fn unpause_log(&mut self, cx: &mut Context<Self>) {
+        self.log_paused = false;
+        let len = self.channel.read(cx).len();
+        if self.paused_needs_reset {
+            self.paused_needs_reset = false;
+            self.list_state.reset(len);
+        } else {
+            let shown = self.list_state.item_count();
+            if len > shown {
+                self.list_state.splice(shown..shown, len - shown);
+            } else if len < shown {
+                // Shouldn't happen (trims apply while paused) — resync anyway.
+                self.list_state.reset(len);
+            }
+        }
+        self.refresh_log(cx);
+        cx.notify();
+    }
+
     /// Applies a new chat font size (called when the preference changes). Row
     /// heights change, so the list must re-measure (`reset` keeps the count).
     pub(crate) fn set_font_size(&mut self, font_size: f32, cx: &mut Context<Self>) {
@@ -1061,6 +1165,9 @@ impl ChatView {
     /// Re-measures every row and repaints the log — for preference changes that
     /// change row heights without changing the rows (font family/size).
     pub(crate) fn remeasure(&mut self, cx: &mut Context<Self>) {
+        // The reset below syncs any hover-pause-withheld tail in, so the
+        // deferred re-measure (if one was pending) just happened.
+        self.paused_needs_reset = false;
         self.list_state.reset(self.channel.read(cx).len());
         self.events_list_state.reset(self.events_shown.len());
         self.refresh_log(cx);
@@ -3774,13 +3881,19 @@ impl ChatView {
                             .unwrap_or_else(|| div().into_any_element());
                         // Pinned messages float over the log's top edge (inside
                         // the chat, Twitch-style), so the wrapper is `relative`.
+                        // Its hover drives pause-on-hover: the region is the log
+                        // only — the composer below is deliberately outside it.
                         let log = div()
+                            .id("chat-log-region")
                             .relative()
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
                             .flex()
                             .flex_col()
+                            .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                                this.set_log_hovered(*hovered, cx);
+                            }))
                             .child(log)
                             .children(self.render_pin_overlay(cx))
                             .into_any_element();

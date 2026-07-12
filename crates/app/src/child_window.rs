@@ -135,6 +135,8 @@ pub struct ChildWindow<H: Render> {
 
 impl<H: Render> Render for ChildWindow<H> {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        // Un-stick hover state if the pointer left the window (see stale_hover.rs).
+        crate::stale_hover::clear(window, cx);
         let Some(host) = self.host.upgrade() else {
             // The host is gone (its tab closed or was rebuilt): nothing to show.
             window.remove_window();

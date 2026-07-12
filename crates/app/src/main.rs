@@ -26,6 +26,7 @@ mod selectable;
 mod session;
 mod settings;
 mod sound;
+mod stale_hover;
 mod streamer_mode;
 mod tabs;
 mod updater;
@@ -2318,6 +2319,21 @@ impl BackseaterApp {
                             }))
                             .into_any_element(),
                     ))
+                    .child(card_divider())
+                    .child(setting_row(
+                        "Pause chat on hover",
+                        Some(
+                            "Hold the chat still while the pointer is over it; it \
+                             catches up to the newest message when you move away.",
+                        ),
+                        Switch::new("pause-chat-on-hover")
+                            .small()
+                            .checked(self.settings.pause_chat_on_hover)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.set_pause_chat_on_hover(*checked, cx);
+                            }))
+                            .into_any_element(),
+                    ))
             )
             .child(div().h_1())
             .child(section_title("Timestamps"))
@@ -3515,6 +3531,18 @@ impl BackseaterApp {
         for tab in &self.tabs {
             tab.view.update(cx, |_, cx| cx.notify());
         }
+        cx.notify();
+    }
+
+    /// Toggles pause-on-hover. Persists + flips the process-wide flag; a view
+    /// already paused resumes on its next hover-exit (checked at engage time).
+    fn set_pause_chat_on_hover(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.settings.pause_chat_on_hover == on {
+            return;
+        }
+        self.settings.pause_chat_on_hover = on;
+        self.settings.save();
+        self.settings.apply_visibility_flags();
         cx.notify();
     }
 
@@ -4730,6 +4758,9 @@ fn setting_row(
 
 impl Render for BackseaterApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Un-stick hover state if the pointer left the window (see stale_hover.rs).
+        stale_hover::clear(window, cx);
+
         // Layout edits (divider drags, header-arrow moves) happen inside a tab's
         // view, which updates its own live config; sync any change back into the
         // persisted config here (the only place with both the view and the tab

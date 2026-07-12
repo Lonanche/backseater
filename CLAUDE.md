@@ -308,6 +308,33 @@ platform = implement one trait + one message builder, with zero UI changes**.
   ignore terms (word, phrase, or `re:<regex>`), global and per-tab; a **mentions panel** shows
   messages that mention the user (per-tab or all-tabs feed with "#channel" tags, click → jump to
   the source tab).
+- **Pause chat on hover** (Appearance → Chat, `Settings.pause_chat_on_hover`, default off): while
+  the pointer is over a **tail-following** chat log (the log region only — the composer below is
+  outside it), the view freezes and shows a "⏸ Chat paused" pill; leaving resumes to the newest
+  message. A view the user scrolled up themselves never pauses/jumps (it doesn't move on appends
+  anyway). ⚠️ Implementation is **withholding, not scroll-pinning**: gpui's Bottom-aligned list
+  cannot hold a position within one viewport of the end (`logical_scroll_top` collapses to `None`
+  = glued-to-bottom on every layout, and an anchor at `item_ix == count` is shifted along by
+  end-splices), so a paused `ChatView` just stops splicing `Appended` events into its own
+  `list_state` (`log_paused`; the shared model is untouched — per-view pause, popouts pause
+  independently). Invariant while paused: **view list == `rows[0..item_count]`** — `RemovedFront`
+  and in-prefix `Inserted`s still apply, an `Inserted` past the frozen end joins the withheld
+  tail, and a `Changed` re-measure is deferred (`paused_needs_reset`). `unpause_log` splices the
+  missing tail in; the still-engaged `FollowMode::Tail` then snaps to the end (or stays put if
+  the user wheeled up mid-pause, which flips `is_following_tail`). Engagement is checked on
+  hover-enter *and* per-append (`maybe_pause_log`), so scrolling back to bottom mid-hover pauses.
+- **Stale-hover clear** (`app/src/stale_hover.rs`): ⚠️ gpui never un-hovers when the pointer
+  leaves the window — on Windows `WM_MOUSELEAVE` only flips `is_window_hovered()` and refreshes;
+  no input event moves `Window::mouse_position`, and hover = per-frame hit test of that position,
+  so whatever sat under the last in-window coordinate stayed "hovered" forever (row tints,
+  tooltips, `on_hover(false)` never fired — it would also have stuck the hover-pause). Fix:
+  **every window root's render** (BackseaterApp, PopoutWindow, MentionsWindow, ChildWindow) calls
+  `stale_hover::clear(window, cx)`, which — when the window is unhovered but the tracked position
+  still lies inside the viewport — defers one synthetic `MouseMove` to (-9999,-9999) via the
+  public `Window::dispatch_event`, emptying the next hit test. Skipped while a mouse button is
+  held (`GetKeyState`, feature `Win32_UI_Input_KeyboardAndMouse`): captured drags keep streaming
+  real outside coordinates, and a synthetic jump would yank a live drag. Add the call to any NEW
+  window root.
 - **Mention alert sound** (`app/src/sound.rs`): a bundled synthesized ping
   (`crates/app/assets/sounds/ping.wav` — ours, NOT copied from Chatterino; its wav's provenance
   is undocumented) played via Win32 `PlaySound` (`SND_MEMORY|SND_ASYNC`, `windows` feature

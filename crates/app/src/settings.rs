@@ -204,6 +204,11 @@ pub struct Settings {
     /// Whether message timestamps show in the chat log. On by default.
     #[serde(default = "default_true")]
     pub show_timestamps_chat: bool,
+    /// Whether hovering the chat log pauses it (new messages held back until the
+    /// pointer leaves; a view the user scrolled up themselves is left alone).
+    /// Off by default.
+    #[serde(default)]
+    pub pause_chat_on_hover: bool,
     /// Whether timestamps show on the events panel's rows. On by default.
     #[serde(default = "default_true")]
     pub show_timestamps_events: bool,
@@ -277,6 +282,7 @@ impl Default for Settings {
             show_pinned_kick: true,
             show_status_bar: true,
             show_timestamps_chat: true,
+            pause_chat_on_hover: false,
             show_timestamps_events: true,
             show_timestamps_mentions: true,
             mentions_tab: false,
@@ -342,6 +348,7 @@ impl Settings {
         SHOW_TIMESTAMPS_CHAT.store(self.show_timestamps_chat, Ordering::Relaxed);
         SHOW_TIMESTAMPS_EVENTS.store(self.show_timestamps_events, Ordering::Relaxed);
         SHOW_TIMESTAMPS_MENTIONS.store(self.show_timestamps_mentions, Ordering::Relaxed);
+        PAUSE_CHAT_ON_HOVER.store(self.pause_chat_on_hover, Ordering::Relaxed);
         let opacity = self
             .suppressed_opacity
             .clamp(*SUPPRESSED_OPACITY_RANGE.start(), *SUPPRESSED_OPACITY_RANGE.end());
@@ -412,6 +419,12 @@ static SHOW_STATUS_BAR: AtomicBool = AtomicBool::new(true);
 static SHOW_TIMESTAMPS_CHAT: AtomicBool = AtomicBool::new(true);
 static SHOW_TIMESTAMPS_EVENTS: AtomicBool = AtomicBool::new(true);
 static SHOW_TIMESTAMPS_MENTIONS: AtomicBool = AtomicBool::new(true);
+static PAUSE_CHAT_ON_HOVER: AtomicBool = AtomicBool::new(false);
+
+/// Whether hovering the chat log pauses it (persisted, process-wide).
+pub fn pause_chat_on_hover() -> bool {
+    PAUSE_CHAT_ON_HOVER.load(Ordering::Relaxed)
+}
 
 /// Whether the live status bar (viewer counts) is enabled (a persisted,
 /// process-wide preference — see [`Settings::apply_visibility_flags`]).
