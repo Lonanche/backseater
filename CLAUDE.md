@@ -68,14 +68,48 @@ platform = implement one trait + one message builder, with zero UI changes**.
 - **Twitch + Kick login** (OAuth) → **send messages** + **moderation** (`/ban` `/timeout` `/unban`
   `/delete`) via the input box and `/commands`. A ban/timeout strikes through + fades the target's
   past messages (kept struck after `/unban`). A send-target toggle (shows the target **platform
-  icon(s)** — Twitch / Kick / both — with a tooltip) appears when logged into both; mod commands are
-  disabled in Both mode. See the auth note below.
+  icon(s)** — Twitch / Kick / both — with a tooltip) appears when logged into both; **all** commands
+  are disabled in Both mode (gated in `handle_command` + the chatview intercepts, with a
+  switch-the-target notice). See the auth note below.
+- **Slash commands + autocomplete** (`crates/app/src/commands.rs` = the registry: name/aliases/
+  usage/description/platforms/mod_only — a future user-defined custom-command feature layers
+  entries onto it). Typing `/` at the **start of the line** opens the same autocomplete popup as
+  `@`/`:` listing the **send target platform's** commands only (Kick sees just Kick's; Both shows
+  the disabled notice), with **mod-only commands hidden unless the user can moderate** that
+  channel (`ChannelModel::can_moderate` — Twitch = IRC USERSTATE mod flag, Kick = logged in) and
+  **broadcaster-only ones (`/raid` `/unraid` `/mod` `/unmod` `/vip` `/unvip`) hidden unless they
+  own it** (`ChannelModel::is_broadcaster` — Twitch = USERSTATE broadcaster badge, Kick = login
+  slug == channel slug; typing a hidden command anyway still runs it, the API returns the real
+  error). Enter on an exact-match
+  candidate sends instead of re-inserting. Twitch commands (Helix, `helix.rs` + `TwitchActions`):
+  `/announce`(+`blue/green/orange/purple`), `/warn <user> <reason>` (confirmation notice on
+  success), `/clear`, chat modes `/slow [secs]` `/slowoff` `/followers [duration]` `/followersoff`
+  `/subscribers(off)` `/emoteonly(off)` `/uniquechat(off)` (PATCH `/helix/chat/settings`; feedback
+  arrives via ROOMSTATE → the mode bar), `/mod` `/unmod` `/vip` `/unvip` (broadcaster-only per
+  Twitch), `/shoutout`, `/raid` `/unraid`, `/me` (sent as `/me` PRIVMSG text — the one slash
+  command Twitch IRC still interprets). The scopes for these (announcements/warnings/
+  chat_settings/shoutouts/raids/moderators/vips manage) are in `SCOPES`; an older token keeps
+  chatting and the commands 401/403 with a hint until the next login. **Chatview-intercepted UI
+  commands** (`ChatView::handle_ui_command`, never reach the controller): `/chatters`|`/viewers`,
+  `/usercard <user>`|`/user` (opens on the target platform; uses a seen message's identity, else a
+  bare card the stats fetch fills), `/unpin` (the target platform's active pin).
+  `/pin [duration] <message>` is twitch.tv's semantics — it **sends your message and pins it**
+  (leading duration optional, validated 30s–30m; a bare number is **minutes** — "/pin 20 hi" =
+  20m, unlike /timeout's seconds; none = until the stream ends): the send goes
+  through Helix `POST /chat/messages` (`TwitchActions::send_and_pin`) because that returns the
+  real message id to pin (IRC gives a sent message no id; the message still lands in chat via the
+  read connection), so it's Twitch-only — pinning *others'* messages stays on the hover 📌, whose
+  confirm dialog has **duration chips** (30s–30m + "Until stream ends"; the open-ended option is
+  Twitch-only since Kick's endpoint always wants a number — `pin_duration_chips`, selection on
+  `ChatView::pin_duration_choice`, reset to the 20m default per open; the dialog builder re-runs
+  on notify so the chips are live). Kick gets the shared command set only
+  (`ban/timeout/unban/unpin/usercard` — no chat-mode/announce/pin-command APIs).
 - **Twitch moderator feed** (EventSub, when logged in + mod/broadcaster of the channel): rich
   moderation notices with the acting moderator ("mod timed out user for 10m: reason" — also unbans,
   deletes, warns, chat-mode toggles, ...) replacing the generic "X was timed out / banned" line, and
   **AutoMod**: held messages appear as amber rows with **Allow/Deny** buttons, resolved in place when
   any mod acts. Single deleted messages (IRC `CLEARMSG`) strike just that row for everyone. Needs the
-  scopes added for it — an older login keeps working, the feed just stays off until the next `/login`.
+  scopes added for it — an older login keeps working, the feed just stays off until the next login.
   See the moderator-feed note below.
 - **Pinned messages (Twitch + Kick)**: a banner above the log shows each platform's active mod
   pin ("📌 Pinned by X" + the message rendered like a chat line), with an ✕ that dismisses *just
@@ -111,7 +145,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
   Refresh, and click-a-name → usercard. Data is Helix `GET /chat/chatters` (paginated,
   `crates/twitch/src/helix.rs::chatters`), which Twitch only serves to the **broadcaster +
   moderators** (`moderator:read:chatters`, added to `SCOPES` — a pre-existing login needs a
-  re-`/login`, surfaced as a 401 hint; a non-mod gets the explanatory 403 message). ⚠️ The
+  re-login, surfaced as a 401 hint; a non-mod gets the explanatory 403 message). ⚠️ The
   *anonymous* list twitch.tv itself shows rides the web GQL `chatters` field, which is behind
   Twitch's browser-integrity check (`IntegrityCheckFailed` for any third-party client — verified
   live; same reason Chatterino's viewer list is mod-only). **Kick has no chatters API at all**, so
@@ -517,10 +551,12 @@ connection (chat still flows; sending/mod disabled) and upgrades live on re-logi
 `Controller` (`app/src/controller.rs`) owns only this tab's Twitch source, channels, send target, and
 seen Kick chatters — it pulls actions/auth from the `Session` at send/connect time. The input box
 feeds `controller.handle_input` (routes `/commands` vs chat):
-- `/login` `/logout` `/kicklogin` `/kicklogout` → just call `Session` mutators; the subscription does
-  the rest. Twitch OAuth is implicit (browser + local server on `localhost:38276`).
+- Login/logout live in Settings → Account (`Controller::twitch_login`/`kick_login` → `Session`
+  mutators; the subscription does the rest — there are no `/login` slash commands anymore).
+  Twitch OAuth is implicit (browser + local server on `localhost:38276`).
 - plain text → `TwitchSource::send` (authed IRC) and/or Kick REST, per the tab's send target.
-  `/ban`/`/timeout`/`/unban`/`/delete` → `TwitchActions`/`KickActions` pulled from the `Session`.
+  `/ban`/`/timeout`/`/unban`/`/delete` + the Twitch-only command set (see the slash-commands
+  bullet) → `TwitchActions`/`KickActions` pulled from the `Session`.
 - **Ban fade + mod notices.** A ban/timeout emits `ChatEvent::ClearChat { platform, user }`, which
   strikes through + fades that user's *past* messages (`ChannelModel::mark_banned`); `/unban` does NOT
   restore them — struck stays struck. A single deleted message (IRC `CLEARMSG`) emits
@@ -544,7 +580,7 @@ logged in AND a moderator/broadcaster of the tab's Twitch channel, the feed subs
   clear, warn, slow/emote/followers/sub-only toggles, raids, mod/VIP grants, blocked/permitted terms,
   unban requests; `shared_chat_*` variants read like the plain ones). Needs the big read-scope set
   (see `SCOPES` in `auth/src/twitch.rs`) — **a token from before those scopes leaves the feed off
-  until the next `/login`** (logged as a hint, chat still works).
+  until the next login** (logged as a hint, chat still works).
 - **`automod.message.hold` / `.update` v2** (scope `moderator:manage:automod`) → `ChatEvent::
   AutoModHeld` renders an amber row (chatter, held text, reason, **Allow/Deny** chips →
   `Helix::manage_automod_message`); the `.update` resolves the row in place ("✔ allowed by mod").
@@ -661,7 +697,7 @@ when you can't see the window).
 CI auto-publishes the installer + update feed to GitHub Releases (`docs/RELEASING.md`).
 Never push `v*` tags by hand; the publish step creates them.
 
-**Twitch login (send/moderate):** type `/login`; `/logout` clears it. The app ships with a built-in
+**Twitch login (send/moderate):** Settings → Account. The app ships with a built-in
 Twitch Client ID (`DEFAULT_CLIENT_ID` in `crates/auth/src/twitch.rs`, redirect `http://localhost:38276`)
 — a Client ID is **not a secret**, so it's safe to embed (only the Client *Secret* is, and the
 implicit flow uses none). Override with `BKS_TWITCH_CLIENT_ID`. Token saved to the **OS keyring**
@@ -671,12 +707,12 @@ the fallback if the keyring errors, cleaned up on the next successful save). Flo
 `id.twitch.tv/oauth2/authorize`, validated at `/oauth2/validate`. Moderation uses Helix
 (`/helix/moderation/bans`, `/moderation/chat`).
 
-**Kick login (send/moderate):** type `/kicklogin`; `/kicklogout` clears it. Kick **requires a client
+**Kick login (send/moderate):** Settings → Account. Kick **requires a client
 secret** for its authorization-code + PKCE flow, which must not ship in the binary — so a small
 **Cloudflare Worker broker** (`worker/`) holds the secret and does the token exchange/refresh on the
 app's behalf. The desktop app does the browser login locally (PKCE proves it's legit), then calls the
 broker for the secret step. The broker URL is baked in (`DEFAULT_BROKER_URL` in
-`crates/auth/src/kick.rs`; not a secret — override with `BKS_KICK_BROKER_URL`), so `/kicklogin`
+`crates/auth/src/kick.rs`; not a secret — override with `BKS_KICK_BROKER_URL`), so the Kick login
 works out of the box. Tokens (access + refresh + the broker URL) saved to the **OS keyring** like
 Twitch's (same file fallback, `kick_credentials.json`).
 The Kick app id/secret live ONLY as Worker secrets — see `worker/README.md`.

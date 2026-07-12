@@ -72,6 +72,49 @@ pub enum Role {
     Vip,
 }
 
+/// A Twitch-only slash command beyond the shared ban family, parsed in
+/// [`Controller::handle_command`] and run against Helix by
+/// [`Controller::twitch_cmd`]. Chat-mode changes show up via ROOMSTATE (the
+/// mode bar) and announcements/clears in chat, so only the variants with no
+/// visible effect post a confirmation notice.
+enum TwitchCmd {
+    Announce {
+        message: String,
+        /// blue/green/orange/purple; `None` = the channel's accent color.
+        color: Option<&'static str>,
+    },
+    Warn {
+        user: String,
+        reason: String,
+    },
+    /// twitch.tv's `/pin`: send the message, then pin it for `duration_secs`
+    /// (`None` = until the stream ends).
+    Pin {
+        message: String,
+        duration_secs: Option<u32>,
+    },
+    Clear,
+    /// `Some(secs)` on (Twitch allows 3–120), `None` off.
+    Slow(Option<u32>),
+    /// `Some(minutes)` of minimum follow age on (0 = any follower), `None` off.
+    Followers(Option<u32>),
+    SubOnly(bool),
+    EmoteOnly(bool),
+    UniqueChat(bool),
+    Role {
+        role: Role,
+        grant: bool,
+        user: String,
+    },
+    Shoutout {
+        user: String,
+    },
+    Raid {
+        target: String,
+    },
+    Unraid,
+}
+
 /// The two native Twitch emote sets [`Controller::fetch_twitch_emotes`]
 /// returns: `personal` is everything the logged-in user can use (autocomplete
 /// draws only from these), `channel` is the viewed channel's remaining
@@ -239,6 +282,16 @@ impl Controller {
         self.session.login_state().twitch()
     }
 
+    /// Whether the logged-in Kick account owns this tab's Kick channel
+    /// (compared as slugs — the login is a display-style username). Twitch's
+    /// equivalent is `ChannelModel.twitch_broadcaster` (USERSTATE badge).
+    pub fn kick_is_broadcaster(&self) -> bool {
+        !self.kick_channel.is_empty()
+            && self.session.login_state().kick.is_some_and(|login| {
+                bks_kick::slugify(&login) == bks_kick::slugify(&self.kick_channel)
+            })
+    }
+
     /// Whether this tab has a Kick channel set (the toggle is only useful then).
     pub fn has_kick(&self) -> bool {
         !self.kick_channel.is_empty()
@@ -265,8 +318,14 @@ impl Controller {
     }
 
     /// Reports a user-facing error in this tab's feed (a copyable error row).
-    fn notice(&self, msg: impl Into<String>) {
+    pub(crate) fn notice(&self, msg: impl Into<String>) {
         let _ = self.events.try_send(ChatEvent::Error(msg.into()));
+    }
+
+    /// Posts a muted confirmation row (a successful command with no other
+    /// visible effect — warn/shoutout/raid). Errors go through [`Self::notice`].
+    fn confirm(&self, msg: impl Into<String>) {
+        let _ = self.events.try_send(ChatEvent::Notice(msg.into()));
     }
 
     /// The Twitch actions client, posting the "log in first" hint when logged
@@ -517,13 +576,15 @@ impl Controller {
         self.spawn_kick_mod(ModAction::Unban { user });
     }
 
-    /// Default pin duration (seconds) for the hover pin button — the web
-    /// clients' usual 20 minutes (Twitch allows 30–1800s, Kick sends 1200).
-    const PIN_DURATION_SECS: u32 = 1200;
+    /// Default pin duration (seconds) — the web clients' usual 20 minutes
+    /// (Twitch allows 30–1800s, Kick sends 1200). The pin dialog's chips and
+    /// `/pin`'s leading duration override it.
+    pub(crate) const PIN_DURATION_SECS: u32 = 1200;
 
-    /// Pins the Twitch message `message_id` in this tab's channel (per-row 📌
-    /// button; needs to moderate the channel — a 403 surfaces as the error row).
-    pub fn pin_twitch(&self, message_id: String) {
+    /// Pins the Twitch message `message_id` in this tab's channel for
+    /// `duration_secs` (`None` = until the stream ends) — the pin dialog's
+    /// choice. Needs to moderate the channel; a 403 surfaces as the error row.
+    pub fn pin_twitch(&self, message_id: String, duration_secs: Option<u32>) {
         let this = self.clone();
         self.rt.spawn(async move {
             let Some(actions) = this.twitch_actions_or_hint().await else {
@@ -533,11 +594,7 @@ impl Controller {
                 return;
             }
             if let Err(err) = actions
-                .pin_message(
-                    &this.twitch_channel,
-                    &message_id,
-                    Some(Self::PIN_DURATION_SECS),
-                )
+                .pin_message(&this.twitch_channel, &message_id, duration_secs)
                 .await
             {
                 this.notice(format!("{err:#}"));
@@ -564,10 +621,11 @@ impl Controller {
         });
     }
 
-    /// Pins a Kick message in this tab's channel (per-row 📌 button). `msg`
-    /// carries the original message's fields — Kick's pin endpoint wants the
-    /// whole message object back, not just an id.
-    pub fn pin_kick(&self, msg: bks_kick::PinnableMessage) {
+    /// Pins a Kick message in this tab's channel for `duration_secs` (Kick's
+    /// endpoint always wants a number — no open-ended pin). `msg` carries the
+    /// original message's fields — Kick's pin endpoint wants the whole message
+    /// object back, not just an id.
+    pub fn pin_kick(&self, msg: bks_kick::PinnableMessage, duration_secs: u32) {
         let this = self.clone();
         self.rt.spawn(async move {
             let Some(actions) = this.kick_actions_or_hint().await else {
@@ -577,7 +635,7 @@ impl Controller {
                 return;
             }
             if let Err(err) = actions
-                .pin_message(&this.kick_channel, &msg, Self::PIN_DURATION_SECS as u64)
+                .pin_message(&this.kick_channel, &msg, duration_secs as u64)
                 .await
             {
                 this.report_kick_error(&err);
@@ -631,9 +689,16 @@ impl Controller {
 
     fn handle_command(&self, rest: &str) {
         let mut parts = rest.split_whitespace();
-        let cmd = parts.next().unwrap_or("");
+        let cmd = parts.next().unwrap_or("").to_lowercase();
         let args: Vec<&str> = parts.collect();
-        match cmd {
+        // Commands act on ONE chat; in Both mode there's no unambiguous target.
+        if self.send_target() == SendTarget::Both {
+            return self.notice(
+                "commands don't work while sending to both platforms — \
+                 switch the send target to one",
+            );
+        }
+        match cmd.as_str() {
             "ban" => match args.split_first() {
                 Some((user, reason)) => self.moderate(ModAction::Ban {
                     user: user.to_string(),
@@ -666,8 +731,243 @@ impl Controller {
                 }),
                 None => self.notice("usage: /delete <message-id>"),
             },
+            "me" => match join(&args) {
+                Some(text) => self.send_me(text),
+                None => self.notice("usage: /me <message>"),
+            },
+            "announce" | "announceblue" | "announcegreen" | "announceorange"
+            | "announcepurple" => match join(&args) {
+                Some(message) => {
+                    // The suffix is the Helix color name ("" = channel accent).
+                    let color = match cmd.strip_prefix("announce").unwrap_or("") {
+                        "" => None,
+                        c => Some(match c {
+                            "blue" => "blue",
+                            "green" => "green",
+                            "orange" => "orange",
+                            _ => "purple",
+                        }),
+                    };
+                    self.twitch_cmd(&cmd, TwitchCmd::Announce { message, color });
+                }
+                None => self.notice(format!("usage: /{cmd} <message>")),
+            },
+            "warn" => match args.split_first() {
+                Some((user, reason)) if !reason.is_empty() => self.twitch_cmd(
+                    &cmd,
+                    TwitchCmd::Warn {
+                        user: user.to_string(),
+                        reason: reason.join(" "),
+                    },
+                ),
+                _ => self.notice("usage: /warn <user> <reason>"),
+            },
+            "pin" => {
+                // Optional leading duration ("/pin 10m message"); a bare
+                // number is MINUTES ("/pin 20 hi" = 20m — pins are minutes-
+                // scale, unlike /timeout's seconds); without one the pin
+                // stays until the stream ends. A first word that doesn't
+                // parse as a duration is just part of the message.
+                let (duration_secs, message_args) = match args.split_first() {
+                    Some((first, rest)) if !rest.is_empty() => {
+                        let parsed = if first.bytes().all(|b| b.is_ascii_digit()) {
+                            first.parse::<u64>().ok().and_then(|mins| mins.checked_mul(60))
+                        } else {
+                            bks_core::parse_duration(first)
+                        };
+                        match parsed.and_then(|secs| u32::try_from(secs).ok()) {
+                            Some(secs) if (30..=1800).contains(&secs) => (Some(secs), rest),
+                            Some(_) => {
+                                return self
+                                    .notice("pin duration must be between 30s and 30m");
+                            }
+                            None => (None, args.as_slice()),
+                        }
+                    }
+                    _ => (None, args.as_slice()),
+                };
+                match join(message_args) {
+                    Some(message) => self.twitch_cmd(
+                        &cmd,
+                        TwitchCmd::Pin {
+                            message,
+                            duration_secs,
+                        },
+                    ),
+                    None => self.notice(
+                        "usage: /pin [duration] <message> — sends your message and pins it \
+                         (no duration = until the stream ends)",
+                    ),
+                }
+            }
+            "clear" => self.twitch_cmd(&cmd, TwitchCmd::Clear),
+            "slow" => match args.first() {
+                // Twitch web's default wait time.
+                None => self.twitch_cmd(&cmd, TwitchCmd::Slow(Some(30))),
+                Some(arg) => match bks_core::parse_duration(arg)
+                    .and_then(|secs| u32::try_from(secs).ok())
+                {
+                    Some(secs) => self.twitch_cmd(&cmd, TwitchCmd::Slow(Some(secs))),
+                    None => self.notice("usage: /slow [seconds — 3 to 120]"),
+                },
+            },
+            "slowoff" => self.twitch_cmd(&cmd, TwitchCmd::Slow(None)),
+            "followers" => match args.first() {
+                // No minimum follow age — any follower can chat.
+                None => self.twitch_cmd(&cmd, TwitchCmd::Followers(Some(0))),
+                Some(arg) => match bks_core::parse_duration(arg) {
+                    Some(secs) => {
+                        let minutes = u32::try_from(secs.div_ceil(60)).unwrap_or(u32::MAX);
+                        self.twitch_cmd(&cmd, TwitchCmd::Followers(Some(minutes)));
+                    }
+                    None => self.notice("usage: /followers [duration — 10m, 1h, 30d]"),
+                },
+            },
+            "followersoff" => self.twitch_cmd(&cmd, TwitchCmd::Followers(None)),
+            "subscribers" => self.twitch_cmd(&cmd, TwitchCmd::SubOnly(true)),
+            "subscribersoff" => self.twitch_cmd(&cmd, TwitchCmd::SubOnly(false)),
+            "emoteonly" => self.twitch_cmd(&cmd, TwitchCmd::EmoteOnly(true)),
+            "emoteonlyoff" => self.twitch_cmd(&cmd, TwitchCmd::EmoteOnly(false)),
+            "uniquechat" => self.twitch_cmd(&cmd, TwitchCmd::UniqueChat(true)),
+            "uniquechatoff" => self.twitch_cmd(&cmd, TwitchCmd::UniqueChat(false)),
+            "mod" | "unmod" | "vip" | "unvip" => match args.first() {
+                Some(user) => self.twitch_cmd(
+                    &cmd,
+                    TwitchCmd::Role {
+                        role: if cmd.ends_with("vip") {
+                            Role::Vip
+                        } else {
+                            Role::Moderator
+                        },
+                        grant: !cmd.starts_with("un"),
+                        user: user.to_string(),
+                    },
+                ),
+                None => self.notice(format!("usage: /{cmd} <user>")),
+            },
+            "shoutout" => match args.first() {
+                Some(user) => self.twitch_cmd(
+                    &cmd,
+                    TwitchCmd::Shoutout {
+                        user: user.to_string(),
+                    },
+                ),
+                None => self.notice("usage: /shoutout <channel>"),
+            },
+            "raid" => match args.first() {
+                Some(target) => self.twitch_cmd(
+                    &cmd,
+                    TwitchCmd::Raid {
+                        target: target.to_string(),
+                    },
+                ),
+                None => self.notice("usage: /raid <channel>"),
+            },
+            "unraid" => self.twitch_cmd(&cmd, TwitchCmd::Unraid),
             other => self.notice(format!("unknown command: /{other}")),
         }
+    }
+
+    /// Runs a Twitch-only command against this tab's Twitch channel — refused
+    /// when the send target is Kick (the Both case is gated in
+    /// [`Self::handle_command`]).
+    fn twitch_cmd(&self, name: &str, cmd: TwitchCmd) {
+        if self.send_target() == SendTarget::Kick {
+            return self.notice(format!(
+                "/{name} is Twitch-only — switch the send target to Twitch"
+            ));
+        }
+        let this = self.clone();
+        self.rt.spawn(async move {
+            let Some(actions) = this.twitch_actions_or_hint().await else {
+                return;
+            };
+            if !this.require_twitch_channel() {
+                return;
+            }
+            let ch = &this.twitch_channel;
+            // Each command's Helix call, plus the confirmation for the ones
+            // whose success is otherwise invisible in chat.
+            let (result, done) = match cmd {
+                TwitchCmd::Announce { message, color } => {
+                    (actions.announce(ch, &message, color).await, None)
+                }
+                TwitchCmd::Warn { user, reason } => (
+                    actions.warn(ch, &user, &reason).await,
+                    Some(format!("warned {user}")),
+                ),
+                TwitchCmd::Pin {
+                    message,
+                    duration_secs,
+                } => (actions.send_and_pin(ch, &message, duration_secs).await, None),
+                TwitchCmd::Clear => (actions.clear_chat(ch).await, None),
+                TwitchCmd::Slow(secs) => (actions.set_slow_mode(ch, secs).await, None),
+                TwitchCmd::Followers(minutes) => {
+                    (actions.set_follower_mode(ch, minutes).await, None)
+                }
+                TwitchCmd::SubOnly(on) => (actions.set_sub_only(ch, on).await, None),
+                TwitchCmd::EmoteOnly(on) => (actions.set_emote_only(ch, on).await, None),
+                TwitchCmd::UniqueChat(on) => (actions.set_unique_chat(ch, on).await, None),
+                TwitchCmd::Role { role, grant, user } => {
+                    let result = match (role, grant) {
+                        (Role::Moderator, true) => actions.add_moderator(ch, &user).await,
+                        (Role::Moderator, false) => actions.remove_moderator(ch, &user).await,
+                        (Role::Vip, true) => actions.add_vip(ch, &user).await,
+                        (Role::Vip, false) => actions.remove_vip(ch, &user).await,
+                    };
+                    let verb = match (role, grant) {
+                        (Role::Moderator, true) => "modded",
+                        (Role::Moderator, false) => "unmodded",
+                        (Role::Vip, true) => "granted VIP to",
+                        (Role::Vip, false) => "removed VIP from",
+                    };
+                    (result, Some(format!("{verb} {user}")))
+                }
+                TwitchCmd::Shoutout { user } => (
+                    actions.shoutout(ch, &user).await,
+                    Some(format!("shouted out {user}")),
+                ),
+                TwitchCmd::Raid { target } => (
+                    actions.raid(ch, &target).await,
+                    Some(format!("raiding {target}")),
+                ),
+                TwitchCmd::Unraid => (actions.unraid(ch).await, Some("raid cancelled".into())),
+            };
+            match result {
+                Ok(()) => {
+                    if let Some(done) = done {
+                        this.confirm(done);
+                    }
+                }
+                Err(err) => this.notice(format!("{err:#}")),
+            }
+        });
+    }
+
+    /// Sends `/me text` as an action message on Twitch (the one slash command
+    /// Twitch IRC still interprets inside a PRIVMSG). Kick has no equivalent.
+    fn send_me(&self, text: String) {
+        if self.send_target() == SendTarget::Kick {
+            return self.notice("/me is Twitch-only — switch the send target to Twitch");
+        }
+        let this = self.clone();
+        self.rt.spawn(async move {
+            if !this.require_twitch_channel() {
+                return;
+            }
+            let src = this.state.lock().await.twitch.clone();
+            match src {
+                Some(src) => {
+                    if let Err(err) = src
+                        .send(&this.twitch_channel, &format!("/me {text}"), None)
+                        .await
+                    {
+                        this.notice(format!("twitch: {err:#}"));
+                    }
+                }
+                None => this.notice("log into Twitch first (Settings → Account)"),
+            }
+        });
     }
 
     fn send(&self, text: String) {

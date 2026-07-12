@@ -15,6 +15,7 @@ mod bridge;
 mod channel_store;
 mod chatview;
 mod child_window;
+mod commands;
 mod controller;
 mod emote_cache;
 mod image_cache;

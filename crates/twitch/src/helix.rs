@@ -114,6 +114,10 @@ impl Helix {
         self.request(reqwest::Method::DELETE, url)
     }
 
+    fn patch(&self, url: String) -> reqwest::RequestBuilder {
+        self.request(reqwest::Method::PATCH, url)
+    }
+
     /// Resolves a login to its numeric user id, cached after the first lookup
     /// (ids never change).
     pub async fn user_id(&self, login: &str) -> anyhow::Result<String> {
@@ -373,6 +377,47 @@ impl Helix {
         .await
     }
 
+    /// Sends `text` to `broadcaster`'s chat as the logged-in user via Helix
+    /// (`user:write:chat`), returning the new message's id — the send path for
+    /// `/pin`, which needs the real id to pin (IRC gives a sent message no id;
+    /// the message still arrives in chat through the read connection as a
+    /// normal PRIVMSG).
+    pub async fn send_message(&self, broadcaster: &str, text: &str) -> anyhow::Result<String> {
+        let broadcaster_id = self.user_id(broadcaster).await?;
+        let body = serde_json::json!({
+            "broadcaster_id": broadcaster_id,
+            "sender_id": self.moderator_id,
+            "message": text,
+        });
+        let url = format!("{HELIX}/chat/messages");
+        let resp = self
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .context("send request")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("send failed ({status}): {body}");
+        }
+        let resp: SendMessageResponse = resp.json().await.context("send response")?;
+        let sent = resp
+            .data
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("send returned no message"))?;
+        if !sent.is_sent {
+            let reason = sent
+                .drop_reason
+                .map(|r| r.message)
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| "message dropped".into());
+            anyhow::bail!("{reason}");
+        }
+        Ok(sent.message_id)
+    }
+
     /// Pins the message with `message_id` in `broadcaster`'s chat for
     /// `duration_secs` (Twitch clamps to 30–1800; `None` pins until the stream
     /// ends). One mod pin is active per channel — pinning replaces the current one.
@@ -495,6 +540,119 @@ impl Helix {
         let resp = self.delete(url).send().await.context("delete request")?;
         ensure_ok(resp, "delete").await
     }
+
+    /// Clears `broadcaster`'s entire chat (the same endpoint as
+    /// [`delete_message`](Self::delete_message), minus the message id).
+    pub async fn clear_chat(&self, broadcaster: &str) -> anyhow::Result<()> {
+        let broadcaster_id = self.user_id(broadcaster).await?;
+        let url = format!(
+            "{HELIX}/moderation/chat?broadcaster_id={broadcaster_id}&moderator_id={}",
+            self.moderator_id
+        );
+        let resp = self.delete(url).send().await.context("clear request")?;
+        ensure_ok(resp, "clear").await
+    }
+
+    /// Posts an announcement in `broadcaster`'s chat. `color` is one of
+    /// blue/green/orange/purple (`None` = the channel's accent color). Needs
+    /// `moderator:manage:announcements`.
+    pub async fn announce(
+        &self,
+        broadcaster: &str,
+        message: &str,
+        color: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let broadcaster_id = self.user_id(broadcaster).await?;
+        let mut body = serde_json::json!({ "message": message });
+        if let Some(color) = color {
+            body["color"] = serde_json::Value::String(color.to_string());
+        }
+        let url = format!(
+            "{HELIX}/chat/announcements?broadcaster_id={broadcaster_id}&moderator_id={}",
+            self.moderator_id
+        );
+        let resp = self
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .context("announce request")?;
+        ensure_ok(resp, "announce").await
+    }
+
+    /// Warns `target` in `broadcaster`'s chat with `reason` — the user must
+    /// acknowledge it before chatting again. Needs `moderator:manage:warnings`.
+    pub async fn warn(&self, broadcaster: &str, target: &str, reason: &str) -> anyhow::Result<()> {
+        let (broadcaster_id, target_id) = self.resolve_pair(broadcaster, target).await?;
+        let body = serde_json::json!({ "data": { "user_id": target_id, "reason": reason } });
+        let url = format!(
+            "{HELIX}/moderation/warnings?broadcaster_id={broadcaster_id}&moderator_id={}",
+            self.moderator_id
+        );
+        let resp = self
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .context("warn request")?;
+        ensure_ok(resp, "warn").await
+    }
+
+    /// Patches `broadcaster`'s chat settings with the given (partial) `settings`
+    /// body — only the fields present change. Needs
+    /// `moderator:manage:chat_settings`. The typed toggles live on
+    /// [`crate::TwitchActions`].
+    pub async fn update_chat_settings(
+        &self,
+        broadcaster: &str,
+        settings: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let broadcaster_id = self.user_id(broadcaster).await?;
+        let url = format!(
+            "{HELIX}/chat/settings?broadcaster_id={broadcaster_id}&moderator_id={}",
+            self.moderator_id
+        );
+        let resp = self
+            .patch(url)
+            .json(&settings)
+            .send()
+            .await
+            .context("chat-settings request")?;
+        ensure_ok(resp, "chat settings").await
+    }
+
+    /// Sends an official shoutout for `target` in `broadcaster`'s chat. Needs
+    /// `moderator:manage:shoutouts`; Twitch rate-limits these (surfaced as the
+    /// error body).
+    pub async fn shoutout(&self, broadcaster: &str, target: &str) -> anyhow::Result<()> {
+        let (broadcaster_id, target_id) = self.resolve_pair(broadcaster, target).await?;
+        let url = format!(
+            "{HELIX}/chat/shoutouts?from_broadcaster_id={broadcaster_id}\
+             &to_broadcaster_id={target_id}&moderator_id={}",
+            self.moderator_id
+        );
+        let resp = self.post(url).send().await.context("shoutout request")?;
+        ensure_ok(resp, "shoutout").await
+    }
+
+    /// Starts a raid from `broadcaster` to `target` (broadcaster token only —
+    /// `channel:manage:raids`).
+    pub async fn raid(&self, broadcaster: &str, target: &str) -> anyhow::Result<()> {
+        let (broadcaster_id, target_id) = self.resolve_pair(broadcaster, target).await?;
+        let url = format!(
+            "{HELIX}/raids?from_broadcaster_id={broadcaster_id}&to_broadcaster_id={target_id}"
+        );
+        let resp = self.post(url).send().await.context("raid request")?;
+        ensure_ok(resp, "raid").await
+    }
+
+    /// Cancels `broadcaster`'s pending raid (broadcaster token only).
+    pub async fn cancel_raid(&self, broadcaster: &str) -> anyhow::Result<()> {
+        let broadcaster_id = self.user_id(broadcaster).await?;
+        let url = format!("{HELIX}/raids?broadcaster_id={broadcaster_id}");
+        let resp = self.delete(url).send().await.context("unraid request")?;
+        ensure_ok(resp, "unraid").await
+    }
 }
 
 #[derive(Deserialize)]
@@ -524,6 +682,30 @@ pub struct Chatter {
 pub struct Chatters {
     pub total: u64,
     pub chatters: Vec<Chatter>,
+}
+
+#[derive(Deserialize)]
+struct SendMessageResponse {
+    #[serde(default)]
+    data: Vec<SentMessage>,
+}
+
+/// One entry of `POST /helix/chat/messages`: the sent message's id, or why it
+/// was dropped (AutoMod, chat modes, ...).
+#[derive(Default, Deserialize)]
+struct SentMessage {
+    #[serde(default)]
+    message_id: String,
+    #[serde(default)]
+    is_sent: bool,
+    #[serde(default)]
+    drop_reason: Option<DropReason>,
+}
+
+#[derive(Default, Deserialize)]
+struct DropReason {
+    #[serde(default)]
+    message: String,
 }
 
 #[derive(Deserialize)]

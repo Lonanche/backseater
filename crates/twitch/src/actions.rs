@@ -143,9 +143,108 @@ impl TwitchActions {
         self.helix.unpin_message(channel, message_id).await
     }
 
+    /// `/pin <message>` twitch.tv-style: sends `text` as the logged-in user
+    /// (via Helix, which returns the real message id — IRC doesn't) and pins
+    /// it for `duration_secs`.
+    pub async fn send_and_pin(
+        &self,
+        channel: &str,
+        text: &str,
+        duration_secs: Option<u32>,
+    ) -> anyhow::Result<()> {
+        let message_id = self.helix.send_message(channel, text).await?;
+        self.helix
+            .pin_message(channel, &message_id, duration_secs)
+            .await
+    }
+
     /// Allows (`true`) or denies a message AutoMod is holding for review, by the
     /// id the EventSub hold notification carried.
     pub async fn automod_message(&self, message_id: &str, allow: bool) -> anyhow::Result<()> {
         self.helix.manage_automod_message(message_id, allow).await
+    }
+
+    /// Clears `channel`'s entire chat.
+    pub async fn clear_chat(&self, channel: &str) -> anyhow::Result<()> {
+        self.helix.clear_chat(channel).await
+    }
+
+    /// Posts an announcement (`color` = blue/green/orange/purple, `None` = the
+    /// channel accent).
+    pub async fn announce(
+        &self,
+        channel: &str,
+        message: &str,
+        color: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.helix.announce(channel, message, color).await
+    }
+
+    /// Warns `user` with `reason`; they must acknowledge it before chatting again.
+    pub async fn warn(&self, channel: &str, user: &str, reason: &str) -> anyhow::Result<()> {
+        self.helix.warn(channel, user, reason).await
+    }
+
+    /// Slow mode: `Some(secs)` (Twitch allows 3–120) turns it on, `None` off.
+    pub async fn set_slow_mode(&self, channel: &str, secs: Option<u32>) -> anyhow::Result<()> {
+        let body = match secs {
+            Some(secs) => {
+                serde_json::json!({ "slow_mode": true, "slow_mode_wait_time": secs })
+            }
+            None => serde_json::json!({ "slow_mode": false }),
+        };
+        self.helix.update_chat_settings(channel, body).await
+    }
+
+    /// Followers-only: `Some(minutes)` of minimum follow age (0 = any follower,
+    /// Twitch caps at 3 months) turns it on, `None` off.
+    pub async fn set_follower_mode(
+        &self,
+        channel: &str,
+        minutes: Option<u32>,
+    ) -> anyhow::Result<()> {
+        let body = match minutes {
+            Some(minutes) => {
+                serde_json::json!({ "follower_mode": true, "follower_mode_duration": minutes })
+            }
+            None => serde_json::json!({ "follower_mode": false }),
+        };
+        self.helix.update_chat_settings(channel, body).await
+    }
+
+    /// Subscribers-only chat on/off.
+    pub async fn set_sub_only(&self, channel: &str, on: bool) -> anyhow::Result<()> {
+        self.helix
+            .update_chat_settings(channel, serde_json::json!({ "subscriber_mode": on }))
+            .await
+    }
+
+    /// Emote-only chat on/off.
+    pub async fn set_emote_only(&self, channel: &str, on: bool) -> anyhow::Result<()> {
+        self.helix
+            .update_chat_settings(channel, serde_json::json!({ "emote_mode": on }))
+            .await
+    }
+
+    /// Unique-chat (no duplicate messages) on/off.
+    pub async fn set_unique_chat(&self, channel: &str, on: bool) -> anyhow::Result<()> {
+        self.helix
+            .update_chat_settings(channel, serde_json::json!({ "unique_chat_mode": on }))
+            .await
+    }
+
+    /// Sends an official shoutout for `user` in `channel`.
+    pub async fn shoutout(&self, channel: &str, user: &str) -> anyhow::Result<()> {
+        self.helix.shoutout(channel, user).await
+    }
+
+    /// Starts a raid from `channel` to `target` (broadcaster only).
+    pub async fn raid(&self, channel: &str, target: &str) -> anyhow::Result<()> {
+        self.helix.raid(channel, target).await
+    }
+
+    /// Cancels `channel`'s pending raid (broadcaster only).
+    pub async fn unraid(&self, channel: &str) -> anyhow::Result<()> {
+        self.helix.cancel_raid(channel).await
     }
 }

@@ -226,6 +226,18 @@ impl ChannelModel {
         }
     }
 
+    /// Whether the logged-in user *owns* `platform`'s channel — a stricter tier
+    /// than [`can_moderate`](Self::can_moderate), gating broadcaster-only
+    /// actions (`/raid`, `/mod`, `/vip`). Twitch = the USERSTATE broadcaster
+    /// badge; Kick = the login matching the channel slug.
+    pub fn is_broadcaster(&self, platform: Platform) -> bool {
+        match platform {
+            Platform::Twitch => self.twitch_broadcaster,
+            Platform::Kick => self.controller.kick_is_broadcaster(),
+            _ => false,
+        }
+    }
+
     pub fn is_struck(&self, msg: &Message) -> bool {
         // Runs per visible row per frame; the nested maps let us probe with a
         // borrowed `&str`, so a struck channel costs no key allocation here.

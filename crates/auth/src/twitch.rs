@@ -26,14 +26,21 @@ const STORE_NAME: &str = "twitch_credentials";
 /// requires the whole read set below (each satisfied by read OR manage), and
 /// AutoMod hold/allow/deny needs `moderator:manage:automod`. The viewer list
 /// needs `moderator:read:chatters`; the personal emote set for the picker +
-/// autocomplete (cross-channel sub emotes) needs `user:read:emotes`. A token
-/// from before these were added keeps working for chat — the extra features
-/// just stay off until the next login.
+/// autocomplete (cross-channel sub emotes) needs `user:read:emotes`. The
+/// slash commands need their manage scopes: announcements (`/announce`),
+/// warnings (`/warn`), chat_settings (`/slow`, `/followers`, …), shoutouts
+/// (`/shoutout`), raids (`/raid`), and the broadcaster-only
+/// `channel:manage:moderators`/`vips` (`/mod`, `/vip` + the usercard buttons).
+/// A token from before these were added keeps working for chat — the extra
+/// features just stay off (401/403 with a hint) until the next login.
 const SCOPES: &str = "chat:read chat:edit user:write:chat user:read:emotes \
                       moderator:manage:banned_users moderator:manage:chat_messages \
-                      moderator:manage:automod \
-                      moderator:read:blocked_terms moderator:read:chat_settings \
-                      moderator:read:unban_requests moderator:read:warnings \
+                      moderator:manage:automod moderator:manage:announcements \
+                      moderator:manage:warnings moderator:manage:chat_settings \
+                      moderator:manage:shoutouts \
+                      channel:manage:raids channel:manage:moderators channel:manage:vips \
+                      moderator:read:blocked_terms \
+                      moderator:read:unban_requests \
                       moderator:read:moderators moderator:read:vips \
                       moderator:read:chatters";
 

@@ -269,16 +269,18 @@ struct Completion {
 
 /// The autocomplete popup over the input box: opens when the word at the
 /// cursor starts with `@` (chatter mentions — the broadcaster + most recent
-/// chatters, see [`ChatView::mention_candidates`]) or `:` (emotes from the
-/// send target's set(s), see [`ChatView::emote_popup_candidates`]). Up/Down/Tab
-/// cycle, Enter/click inserts, Escape dismisses; recomputed on every input
-/// change, so typing a space (the word no longer starts with the trigger)
-/// closes it naturally. An empty candidate list renders as a "No matches"
-/// notice rather than hiding, so the user can see why nothing completes.
+/// chatters, see [`ChatView::mention_candidates`]), `:` (emotes from the
+/// send target's set(s), see [`ChatView::emote_popup_candidates`]), or `/` at
+/// the start of the line (slash commands for the send target's platform, see
+/// [`ChatView::command_popup`]). Up/Down/Tab cycle, Enter/click inserts,
+/// Escape dismisses; recomputed on every input change, so typing a space (the
+/// word no longer starts with the trigger) closes it naturally. An empty
+/// candidate list renders as its `empty_text` notice rather than hiding, so
+/// the user can see why nothing completes.
 struct InputPopup {
     /// Byte offset of the trigger word's start in the input text.
     start: usize,
-    /// Every matching candidate. May be empty ("No matches").
+    /// Every matching candidate. May be empty (shows `empty_text`).
     items: Vec<PopupItem>,
     /// Index of the highlighted candidate.
     selected: usize,
@@ -286,6 +288,9 @@ struct InputPopup {
     /// [`POPUP_VISIBLE_ITEMS`]-row window onto `items` that follows the
     /// highlight (and the mouse wheel), with "more" hints past each edge.
     window_start: usize,
+    /// What an empty `items` renders as — "No matches", or the explanation why
+    /// commands are unavailable (Both send mode).
+    empty_text: SharedString,
 }
 
 /// One candidate in the input autocomplete popup.
@@ -294,6 +299,8 @@ enum PopupItem {
     Mention(String),
     /// An emote, its row showing the image; inserted as its bare name.
     Emote(bks_core::Emote),
+    /// A slash command, its row showing usage + description; inserted as `/name `.
+    Command(&'static crate::commands::CommandDef),
 }
 
 impl PopupItem {
@@ -302,6 +309,7 @@ impl PopupItem {
         match self {
             PopupItem::Mention(name) => format!("@{name}"),
             PopupItem::Emote(e) => e.name.clone(),
+            PopupItem::Command(c) => format!("/{}", c.name),
         }
     }
 }
@@ -567,6 +575,9 @@ pub(crate) struct ChatView {
     /// The input autocomplete popup, when the word at the cursor is an
     /// `@`-mention or a `:`-emote (see [`InputPopup`]).
     popup: Option<InputPopup>,
+    /// The duration selected in the open pin-confirmation dialog (`None` =
+    /// until the stream ends). Reset to the default on each dialog open.
+    pin_duration_choice: Option<u32>,
     /// Set once the personal Twitch emotes have been fetched, so we only hit
     /// Helix the first time the picker opens (not on every toggle).
     emotes_fetched: bool,
@@ -762,6 +773,7 @@ impl ChatView {
             picker_cells: HashMap::new(),
             completion: None,
             popup: None,
+            pin_duration_choice: Some(controller::Controller::PIN_DURATION_SECS),
             emotes_fetched: false,
             sent_history: Vec::new(),
             history_index: None,
@@ -1137,14 +1149,14 @@ impl ChatView {
         if let InputEvent::PressEnter { .. } = event {
             let text = state.read(cx).value().to_string();
             let trimmed = text.trim();
-            if trimmed.eq_ignore_ascii_case("/chatters") || trimmed.eq_ignore_ascii_case("/viewers")
-            {
-                // A UI command, not a chat line: opens the viewer-list window.
-                self.open_viewer_list(cx);
-            } else if !trimmed.is_empty() {
-                // A pending reply threads this line and is then cleared; a
-                // `/command` never replies (the controller ignores the target).
-                self.controller.handle_input(&text, self.replying_to.take());
+            if !trimmed.is_empty() {
+                // UI commands (viewer list, usercard, pin) act on view state and
+                // never reach the controller; everything else does. A pending
+                // reply threads a plain line and is then cleared; a `/command`
+                // never replies (the controller ignores the target).
+                if !self.handle_ui_command(trimmed, cx) {
+                    self.controller.handle_input(&text, self.replying_to.take());
+                }
                 self.record_sent(&text);
             }
             self.input.update(cx, |this, cx| {
@@ -1167,6 +1179,107 @@ impl ChatView {
         }
         self.sent_history.insert(0, text.to_string());
         self.sent_history.truncate(SENT_HISTORY_MAX);
+    }
+
+    /// Commands that act on this view rather than the chat APIs — the viewer
+    /// list, usercards, and unpin (which needs the pins map for the active
+    /// pin's id). Returns whether `line` was one of them (and was consumed);
+    /// everything else goes to the controller. The Both-mode gate matches the
+    /// controller's: commands act on ONE chat.
+    fn handle_ui_command(&mut self, line: &str, cx: &mut Context<Self>) -> bool {
+        let Some(rest) = line.strip_prefix('/') else {
+            return false;
+        };
+        let mut parts = rest.split_whitespace();
+        let cmd = parts.next().unwrap_or("").to_lowercase();
+        let args: Vec<&str> = parts.collect();
+        let both = self.controller.send_target() == controller::SendTarget::Both;
+        let both_notice = "commands don't work while sending to both platforms — \
+                           switch the send target to one";
+        match cmd.as_str() {
+            "chatters" | "viewers" => {
+                self.open_viewer_list(cx);
+                true
+            }
+            "usercard" | "user" => {
+                if both {
+                    self.controller.notice(both_notice);
+                } else {
+                    match args.first() {
+                        Some(name) => self.open_usercard_by_name(name, cx),
+                        None => self.controller.notice("usage: /usercard <user>"),
+                    }
+                }
+                true
+            }
+            "unpin" => {
+                if both {
+                    self.controller.notice(both_notice);
+                    return true;
+                }
+                let Some(&platform) = self.target_platforms().first() else {
+                    return true;
+                };
+                let pinned = self
+                    .channel
+                    .read(cx)
+                    .pins
+                    .get(&platform)
+                    .map(|pin| pin.message.id.clone());
+                match pinned {
+                    Some(id) => match platform {
+                        bks_core::Platform::Twitch => self.controller.unpin_twitch(id),
+                        bks_core::Platform::Kick => self.controller.unpin_kick(),
+                        _ => {}
+                    },
+                    None => self
+                        .controller
+                        .notice(format!("no pinned message on {}", platform.label())),
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Opens the usercard for `name` on the current target platform
+    /// (`/usercard <user>`). A message the chatter sent this session gives the
+    /// real login/id/color/badges; otherwise a bare card opens and the async
+    /// stats fetch fills in what it can.
+    fn open_usercard_by_name(&mut self, name: &str, cx: &mut Context<Self>) {
+        let Some(&platform) = self.target_platforms().first() else {
+            return;
+        };
+        let name = name.trim_start_matches('@');
+        let seen = self
+            .channel
+            .read(cx)
+            .rows
+            .iter()
+            .rev()
+            .find_map(|row| match row {
+                Row::Message { msg }
+                    if msg.platform == platform
+                        && (msg.author.login.eq_ignore_ascii_case(name)
+                            || msg.author.display_name.eq_ignore_ascii_case(name)) =>
+                {
+                    Some(msg.id.clone())
+                }
+                _ => None,
+            });
+        match seen {
+            Some(id) => self.open_usercard(&id, cx),
+            None => {
+                let card = usercard::UserCard::new(
+                    name.to_lowercase(),
+                    name.to_string(),
+                    String::new(),
+                    platform,
+                    None,
+                );
+                self.show_usercard(card, cx);
+            }
+        }
     }
 
     /// Recalls a previous/next sent line into the input while browsing history
@@ -1231,28 +1344,39 @@ impl ChatView {
     }
 
     /// Opens the pin confirmation dialog for message `msg_id`: the message is
-    /// shown as it will appear pinned, and only Pin actually pins it.
-    fn confirm_pin(&self, msg_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// shown as it will appear pinned, with duration chips (Twitch-web style —
+    /// timed, or "Until stream ends" where the platform supports it), and only
+    /// Pin actually pins it.
+    fn confirm_pin(&mut self, msg_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(msg) = self.message_by_id(msg_id, cx) else {
             return;
         };
+        self.pin_duration_choice = Some(controller::Controller::PIN_DURATION_SECS);
         let entity = cx.entity();
         let font_size = self.font_size;
         let id = msg.id.clone();
-        let label = msg.platform.label();
-        window.open_alert_dialog(cx, move |alert, _, _| {
+        let platform = msg.platform;
+        let label = platform.label();
+        window.open_alert_dialog(cx, move |alert, _, cx| {
             let entity = entity.clone();
             let id = id.clone();
+            let body = v_flex()
+                .gap_2()
+                .child(pin_dialog_preview(&msg, font_size))
+                .child(pin_duration_chips(&entity, platform, cx));
             alert
                 .title(format!("Pin to {label} chat?"))
-                .description(pin_dialog_preview(&msg, font_size))
+                .description(body)
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Pin")
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
-                    entity.update(cx, |this, cx| this.pin_message(&id, cx));
+                    entity.update(cx, |this, cx| {
+                        let duration = this.pin_duration_choice;
+                        this.pin_message(&id, duration, cx);
+                    });
                     true
                 })
         });
@@ -1313,15 +1437,16 @@ impl ChatView {
         });
     }
 
-    /// Pins `msg_id` on its platform. Twitch pins by message id (Helix); Kick's
-    /// endpoint wants the original message object back, rebuilt from our copy
-    /// of the row.
-    fn pin_message(&self, msg_id: &str, cx: &App) {
+    /// Pins `msg_id` on its platform for `duration` seconds (`None` = until
+    /// the stream ends — Twitch only; Kick always pins timed). Twitch pins by
+    /// message id (Helix); Kick's endpoint wants the original message object
+    /// back, rebuilt from our copy of the row.
+    fn pin_message(&self, msg_id: &str, duration: Option<u32>, cx: &App) {
         let Some(msg) = self.message_by_id(msg_id, cx) else {
             return;
         };
         match msg.platform {
-            bks_core::Platform::Twitch => self.controller.pin_twitch(msg.id.clone()),
+            bks_core::Platform::Twitch => self.controller.pin_twitch(msg.id.clone(), duration),
             bks_core::Platform::Kick => {
                 let pinnable = bks_kick::PinnableMessage {
                     id: msg.id.clone(),
@@ -1332,7 +1457,9 @@ impl ChatView {
                     content: msg.raw_text.clone(),
                     created_at: msg.timestamp,
                 };
-                self.controller.pin_kick(pinnable);
+                let secs =
+                    duration.unwrap_or(controller::Controller::PIN_DURATION_SECS);
+                self.controller.pin_kick(pinnable, secs);
             }
             _ => {}
         }
@@ -2477,8 +2604,8 @@ impl ChatView {
     }
 
     /// The popup state for the input's current text + cursor, or `None` when the
-    /// word at the cursor is neither an `@`-mention nor a `:`-emote (or this tab
-    /// has no platform to complete for).
+    /// word at the cursor is neither an `@`-mention, a `:`-emote, nor a leading
+    /// `/`-command (or this tab has no platform to complete for).
     fn popup_state(&self, cx: &Context<Self>) -> Option<InputPopup> {
         let state = self.input.read(cx);
         let text = state.value().to_string();
@@ -2493,6 +2620,10 @@ impl ChatView {
                 .into_iter()
                 .map(PopupItem::Mention)
                 .collect()
+        } else if start == 0 && word.starts_with('/') {
+            // A slash only triggers commands at the start of the line — "and/or"
+            // or a mid-sentence path stays plain text.
+            return Some(self.command_popup(&word[1..], cx));
         } else {
             let stem = word.strip_prefix(':')?;
             self.emote_popup_candidates(stem, cx)
@@ -2505,7 +2636,46 @@ impl ChatView {
             items,
             selected: 0,
             window_start: 0,
+            empty_text: "No matches".into(),
         })
+    }
+
+    /// The command-popup state for `stem` (the typed text after the leading
+    /// `/`): the send target platform's commands from the registry
+    /// ([`crate::commands`]), with mod-only commands hidden unless the user can
+    /// moderate that platform's channel and broadcaster-only ones (raid, role
+    /// grants) hidden unless they own it. In Both send mode commands have no
+    /// unambiguous target, so the popup is a single explanatory notice instead.
+    fn command_popup(&self, stem: &str, cx: &App) -> InputPopup {
+        let (items, empty_text) = if self.controller.send_target() == controller::SendTarget::Both {
+            (
+                Vec::new(),
+                "commands don't work while sending to both platforms — switch the send target",
+            )
+        } else {
+            let items = self
+                .target_platforms()
+                .first()
+                .map(|&platform| {
+                    let model = self.channel.read(cx);
+                    let can_mod = model.can_moderate(platform);
+                    let owner = model.is_broadcaster(platform);
+                    crate::commands::matching(platform, stem)
+                        .into_iter()
+                        .filter(|c| (can_mod || !c.mod_only) && (owner || !c.broadcaster_only))
+                        .map(PopupItem::Command)
+                        .collect()
+                })
+                .unwrap_or_default();
+            (items, "No matching commands")
+        };
+        InputPopup {
+            start: 0,
+            items,
+            selected: 0,
+            window_start: 0,
+            empty_text: empty_text.into(),
+        }
     }
 
     /// The platform(s) popup candidates are drawn from: the send target
@@ -2768,7 +2938,7 @@ impl ChatView {
                     .py_1()
                     .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from("No matches"))
+                    .child(popup.empty_text.clone())
                     .into_any_element(),
             );
         } else {
@@ -2802,6 +2972,17 @@ impl ChatView {
                                     .max_w(px(40.)),
                                 )
                                 .child(SharedString::from(e.name.clone()))
+                                .into_any_element(),
+                            PopupItem::Command(c) => v_flex()
+                                .child(SharedString::from(c.usage))
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .when(!selected, |d| {
+                                            d.text_color(cx.theme().muted_foreground)
+                                        })
+                                        .child(SharedString::from(c.description)),
+                                )
                                 .into_any_element(),
                         };
                         div()
@@ -4154,6 +4335,21 @@ impl ChatView {
                                         return;
                                     }
                                     let ix = popup.selected;
+                                    // Already fully typed (e.g. "/slow" with
+                                    // "/slow" highlighted): inserting again
+                                    // would just demand a second Enter — close
+                                    // the popup and let this one send.
+                                    if let Some(item) = popup.items.get(ix) {
+                                        let state = this.input.read(cx);
+                                        let text = state.value().to_string();
+                                        let cursor = state.cursor().min(text.len());
+                                        let word = &text[word_start(&text, cursor)..cursor];
+                                        if item.insert_text().eq_ignore_ascii_case(word) {
+                                            this.popup = None;
+                                            cx.notify();
+                                            return;
+                                        }
+                                    }
                                     this.popup_select(ix, window, cx);
                                     cx.stop_propagation();
                                 },
@@ -4315,6 +4511,70 @@ fn pin_click_for(entity: &Entity<ChatView>, msg: &Message) -> render::PinClick {
 /// The message preview inside the pin/unpin confirmation dialog: the message
 /// rendered like a chat line (badges, colored name, emotes inline) in the same
 /// tinted, accent-barred box it will occupy as a banner.
+/// The pin dialog's duration options: timed (Twitch's API takes 30s–30m) or
+/// "until the stream ends" (Helix with no duration param). Kick's pin endpoint
+/// always wants a number, so the open-ended option is Twitch-only.
+const PIN_DURATIONS: &[(&str, Option<u32>)] = &[
+    ("30s", Some(30)),
+    ("1m", Some(60)),
+    ("5m", Some(300)),
+    ("10m", Some(600)),
+    ("20m", Some(1200)),
+    ("30m", Some(1800)),
+    ("Until stream ends", None),
+];
+
+/// The pin dialog's clickable duration-chip row. A free fn: the dialog builder
+/// runs against the window root with a plain `App`, so it reads the current
+/// selection off the view entity and writes clicks back through it (the
+/// notify re-runs the dialog builder, updating the highlight).
+fn pin_duration_chips(
+    entity: &Entity<ChatView>,
+    platform: bks_core::Platform,
+    cx: &App,
+) -> impl IntoElement {
+    let selected = entity.read(cx).pin_duration_choice;
+    h_flex()
+        .gap_1()
+        .flex_wrap()
+        .items_center()
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(cx.theme().muted_foreground)
+                .child(SharedString::from("Pin for:")),
+        )
+        .children(
+            PIN_DURATIONS
+                .iter()
+                .filter(|(_, secs)| secs.is_some() || platform == bks_core::Platform::Twitch)
+                .map(|&(label, secs)| {
+                    let entity = entity.clone();
+                    div()
+                        .id(SharedString::from(label))
+                        .px_2()
+                        .py_0p5()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .text_size(px(12.))
+                        .cursor_pointer()
+                        .when(selected == secs, |d| {
+                            d.bg(cx.theme().accent)
+                                .text_color(cx.theme().accent_foreground)
+                        })
+                        .hover(|d| d.bg(cx.theme().accent.opacity(0.7)))
+                        .child(SharedString::from(label))
+                        .on_click(move |_, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.pin_duration_choice = secs;
+                                cx.notify();
+                            });
+                        })
+                }),
+        )
+}
+
 fn pin_dialog_preview(msg: &Message, font_size: f32) -> gpui::AnyElement {
     let selection = selectable::Selection::new();
     selection.begin_frame();
