@@ -849,7 +849,18 @@ fn gift_event_text(ev: &GiftedSubscriptionsEvent) -> Option<String> {
     let gifter = ev.gifter_username.as_deref().unwrap_or("An anonymous user");
     let n = ev.gifted_usernames.len();
     let subs = plural(n as u64, "subscription", "subscriptions");
-    let recipients = join_names(&ev.gifted_usernames);
+    // A gift bomb would otherwise put every recipient in one chat row (Kick
+    // sends the whole batch as one event) — name a few, count the rest. The
+    // events panel's collapsed row still reveals the full list.
+    let recipients = if n <= 3 {
+        join_names(&ev.gifted_usernames)
+    } else {
+        format!(
+            "{}, and {} others",
+            ev.gifted_usernames[..3].join(", "),
+            n - 3
+        )
+    };
     let mut text = format!("{gifter} gifted {n} {subs} to {recipients}.");
     if ev.gifter_total > 0 {
         let unit = plural(ev.gifter_total, "sub", "subs");
@@ -1055,6 +1066,19 @@ mod tests {
         assert_eq!(
             gift_event_text(&ev).unwrap(),
             "An anonymous user gifted 1 subscription to a."
+        );
+    }
+
+    #[test]
+    fn gift_text_caps_listed_recipients() {
+        let ev = GiftedSubscriptionsEvent {
+            gifter_username: Some("gifter".into()),
+            gifted_usernames: vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()],
+            gifter_total: 0,
+        };
+        assert_eq!(
+            gift_event_text(&ev).unwrap(),
+            "gifter gifted 5 subscriptions to a, b, c, and 2 others."
         );
     }
 
