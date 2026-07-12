@@ -54,28 +54,26 @@ macro_rules! app_icons {
 }
 
 const APP_ICONS: &[(&str, &[u8])] = app_icons![
-    "bell-off", "ban", "clock", "flag", "gavel", "shield", "trash-2", "zap",
+    "bell-off", "ban", "clock", "trash-2", "pin", "message-square-off",
 ];
 
 /// Mod-button icon names the settings editor offers and `render` resolves:
 /// short name → the SVG asset path (ours or the kit's). A [`ModButton::icon`]
 /// matching a name here draws the vector icon; anything else draws as text.
+/// One icon per mod action — ban / timeout / delete / warn / pin, plus
+/// monitor + restrict for when those commands exist. `clock`/`trash` keep
+/// their lucide names because seeded default buttons in saved settings
+/// reference them.
 pub const MOD_ICONS: &[(&str, &str)] = &[
     ("ban", "icons/ban.svg"),
     ("clock", "icons/clock.svg"),
     ("trash", "icons/trash-2.svg"),
-    ("gavel", "icons/gavel.svg"),
-    ("flag", "icons/flag.svg"),
-    ("shield", "icons/shield.svg"),
-    ("zap", "icons/zap.svg"),
-    // Kit-shipped (gpui-component-assets).
-    ("alert", "icons/triangle-alert.svg"),
-    ("eye-off", "icons/eye-off.svg"),
-    ("star", "icons/star.svg"),
-    ("heart", "icons/heart.svg"),
-    ("bell", "icons/bell.svg"),
-    ("circle-x", "icons/circle-x.svg"),
-    ("thumbs-down", "icons/thumbs-down.svg"),
+    // Kit-shipped SVG.
+    ("warn", "icons/triangle-alert.svg"),
+    ("pin", "icons/pin.svg"),
+    // Kit-shipped SVG.
+    ("monitor", "icons/eye.svg"),
+    ("restrict", "icons/message-square-off.svg"),
 ];
 
 /// The SVG asset path for a mod-button icon name, `None` when `name` isn't a

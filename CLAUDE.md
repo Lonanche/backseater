@@ -132,8 +132,8 @@ platform = implement one trait + one message builder, with zero UI changes**.
   becomes Save which replaces it in its slot — Cancel or closing the window changes nothing;
   `editing_mod_button`), or remove them like any custom one, with a **Reset to defaults**
   button. Each button (Settings → Mod Buttons): name
-  (= tooltip), icon (a curated lucide name — `assets::MOD_ICONS`,
-  bundled ban/clock/trash-2/gavel/flag/shield/zap + a few kit-shipped — or free text/emoji), a
+  (= tooltip), icon (a curated lucide name — `assets::MOD_ICONS`, one per mod action:
+  ban/clock/trash/warn/pin/monitor/restrict, bundled or kit-shipped — or free text/emoji), a
   **command template** (any slash command, or plain text sent to chat — bot commands work), and a
   platform scope (Twitch / Kick / Both). **Placeholders are optional for known commands**: a
   template without one gets the row's target injected right after the command name, derived from
