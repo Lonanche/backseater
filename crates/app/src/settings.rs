@@ -139,6 +139,15 @@ pub const MAX_FONT_SIZE: f32 = 28.0;
 /// Default chat font size (matches the previous hard-coded value).
 pub const DEFAULT_FONT_SIZE: f32 = 18.0;
 
+/// Default opacity of a suppressed (term-matched) message: barely visible so the
+/// eye skips it, still readable up close. User-adjustable in Highlights settings.
+pub const DEFAULT_SUPPRESSED_OPACITY: f32 = 0.18;
+
+/// Bounds the suppressed-opacity setting so it can never go fully invisible (0,
+/// which would make suppress indistinguishable from ignore) or fully opaque (1,
+/// which would make it do nothing).
+pub const SUPPRESSED_OPACITY_RANGE: std::ops::RangeInclusive<f32> = 0.05..=0.9;
+
 /// Persisted UI preferences.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
@@ -156,6 +165,15 @@ pub struct Settings {
     /// as a case-insensitive substring; a `re:`-prefixed entry is a regex.
     #[serde(default)]
     pub ignored_terms: Vec<String>,
+    /// Words/phrases whose messages stay in chat but render at very low opacity
+    /// (dimmed but readable) so the eye skips them. Same grammar as
+    /// `ignored_terms`; the middle tier between show and ignore.
+    #[serde(default)]
+    pub suppressed_terms: Vec<String>,
+    /// Opacity a suppressed message renders at (see `suppressed_terms`). Lower =
+    /// fainter/easier to skip. Clamped to [`SUPPRESSED_OPACITY_RANGE`] on apply.
+    #[serde(default = "default_suppressed_opacity")]
+    pub suppressed_opacity: f32,
     /// Whether to show 7TV name paints (gradient/solid name colors) and 7TV
     /// badges. On by default; toggled live in settings (no restart).
     #[serde(default = "default_true")]
@@ -234,6 +252,10 @@ fn default_font_size() -> f32 {
     DEFAULT_FONT_SIZE
 }
 
+fn default_suppressed_opacity() -> f32 {
+    DEFAULT_SUPPRESSED_OPACITY
+}
+
 fn default_true() -> bool {
     true
 }
@@ -245,6 +267,8 @@ impl Default for Settings {
             font_family: None,
             custom_mentions: Vec::new(),
             ignored_terms: Vec::new(),
+            suppressed_terms: Vec::new(),
+            suppressed_opacity: DEFAULT_SUPPRESSED_OPACITY,
             show_7tv_paints: true,
             theme: ThemeChoice::Dark,
             custom_themes: Vec::new(),
@@ -318,6 +342,10 @@ impl Settings {
         SHOW_TIMESTAMPS_CHAT.store(self.show_timestamps_chat, Ordering::Relaxed);
         SHOW_TIMESTAMPS_EVENTS.store(self.show_timestamps_events, Ordering::Relaxed);
         SHOW_TIMESTAMPS_MENTIONS.store(self.show_timestamps_mentions, Ordering::Relaxed);
+        let opacity = self
+            .suppressed_opacity
+            .clamp(*SUPPRESSED_OPACITY_RANGE.start(), *SUPPRESSED_OPACITY_RANGE.end());
+        SUPPRESSED_OPACITY.store(opacity.to_bits(), Ordering::Relaxed);
     }
 
     /// Pushes the mention-sound master + streamer-mute toggles into the
@@ -365,8 +393,18 @@ pub fn streamer_mute_sounds() -> bool {
 static MENTION_SOUND: AtomicBool = AtomicBool::new(false);
 static STREAMER_MUTE: AtomicBool = AtomicBool::new(true);
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
+
+/// Suppressed-message opacity, stored as `f32::to_bits` (an atomic float has no
+/// stable primitive). Seeded to the default until `apply_visibility_flags` runs.
+static SUPPRESSED_OPACITY: AtomicU32 = AtomicU32::new(DEFAULT_SUPPRESSED_OPACITY.to_bits());
+
+/// The opacity a suppressed message renders at (process-wide, like the theme
+/// flag). Read per row by `render::render_message`.
+pub fn suppressed_opacity() -> f32 {
+    f32::from_bits(SUPPRESSED_OPACITY.load(Ordering::Relaxed))
+}
 
 static SHOW_PINNED_TWITCH: AtomicBool = AtomicBool::new(true);
 static SHOW_PINNED_KICK: AtomicBool = AtomicBool::new(true);

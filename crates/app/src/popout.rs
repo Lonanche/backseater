@@ -67,6 +67,7 @@ pub struct PopoutParams {
     pub font_size: f32,
     pub mentions: bks_core::MentionMatcher,
     pub ignore: bks_core::IgnoreList,
+    pub suppress: bks_core::SuppressList,
     pub tab_id: u64,
     pub mention_store: Entity<MentionStore>,
 }
@@ -111,6 +112,7 @@ pub fn open(
                     params.font_size,
                     params.mentions,
                     params.ignore,
+                    params.suppress,
                     params.tab_id,
                     params.mention_store,
                     window,

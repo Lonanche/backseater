@@ -126,8 +126,10 @@ enum SettingsInput {
     YouTube,
     Mention,
     Ignore,
+    Suppress,
     TabMention,
     TabIgnore,
+    TabSuppress,
     MentionsTabName,
     ModName,
     ModIcon,
@@ -156,8 +158,10 @@ struct SettingsInputs {
     youtube: Entity<InputState>,
     mention: Entity<InputState>,
     ignore: Entity<InputState>,
+    suppress: Entity<InputState>,
     tab_mention: Entity<InputState>,
     tab_ignore: Entity<InputState>,
+    tab_suppress: Entity<InputState>,
     mentions_tab_name: Entity<InputState>,
     mod_name: Entity<InputState>,
     mod_icon: Entity<InputState>,
@@ -173,8 +177,10 @@ impl SettingsInputs {
             youtube: settings_input(SettingsInput::YouTube, window, cx),
             mention: settings_input(SettingsInput::Mention, window, cx),
             ignore: settings_input(SettingsInput::Ignore, window, cx),
+            suppress: settings_input(SettingsInput::Suppress, window, cx),
             tab_mention: settings_input(SettingsInput::TabMention, window, cx),
             tab_ignore: settings_input(SettingsInput::TabIgnore, window, cx),
+            tab_suppress: settings_input(SettingsInput::TabSuppress, window, cx),
             mentions_tab_name: settings_input(SettingsInput::MentionsTabName, window, cx),
             mod_name: settings_input(SettingsInput::ModName, window, cx),
             mod_icon: settings_input(SettingsInput::ModIcon, window, cx),
@@ -192,8 +198,10 @@ fn settings_input(which: SettingsInput, window: &mut Window, cx: &mut App) -> En
         SettingsInput::YouTube => "YouTube handle / URL (optional)",
         SettingsInput::Mention => "Add a term (e.g. mods)",
         SettingsInput::Ignore => "Word, phrase, or re:<regex>",
+        SettingsInput::Suppress => "Word, phrase, or re:<regex>",
         SettingsInput::TabMention => "Add a term for this tab",
         SettingsInput::TabIgnore => "Word, phrase, or re:<regex>",
+        SettingsInput::TabSuppress => "Word, phrase, or re:<regex>",
         SettingsInput::MentionsTabName => "Mentions",
         SettingsInput::ModName => "Button name (the tooltip)",
         SettingsInput::ModIcon => "Icon — pick below or type text/emoji",
@@ -368,11 +376,12 @@ impl ThemeColorField {
     }
 }
 
-/// Whether a term list is mention terms or ignore terms.
+/// Whether a term list is mention terms, ignore terms, or suppress terms.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TermKind {
     Mentions,
     Ignore,
+    Suppress,
 }
 
 /// Whether a term list edits the app-wide (global) terms or one tab's own terms.
@@ -409,8 +418,10 @@ impl TermList {
         match (self.kind, self.scope) {
             (TermKind::Mentions, TermScope::Global) => "Mentions",
             (TermKind::Ignore, TermScope::Global) => "Ignore",
+            (TermKind::Suppress, TermScope::Global) => "Suppress",
             (TermKind::Mentions, TermScope::Tab(_)) => "Extra mentions (this tab)",
             (TermKind::Ignore, TermScope::Tab(_)) => "Extra ignore (this tab)",
+            (TermKind::Suppress, TermScope::Tab(_)) => "Extra suppress (this tab)",
         }
     }
 
@@ -420,6 +431,7 @@ impl TermList {
         let kind = match self.kind {
             TermKind::Mentions => "mention",
             TermKind::Ignore => "ignore",
+            TermKind::Suppress => "suppress",
         };
         match self.scope {
             TermScope::Global => kind.to_string(),
@@ -438,6 +450,12 @@ impl TermList {
                  hides every message with that link. Prefix with re: for a \
                  regex — e.g. re:(twitch\\.)?facepunch\\.com or re:drops?"
             }
+            (TermKind::Suppress, TermScope::Global) => {
+                "Dim messages containing these instead of hiding them — the message \
+                 stays in chat at very low opacity so you can skip it but still read \
+                 it if you want. Same matching as ignore (substring, or re: for a \
+                 regex). If a term is in both lists, ignore wins."
+            }
             (TermKind::Mentions, TermScope::Tab(_)) => {
                 "Extra highlight terms for this tab only, added to your global mentions."
             }
@@ -445,6 +463,10 @@ impl TermList {
                 "Hide messages in this tab only (added to your global ignore). The \
                  message still shows in other tabs on the same channel. re: prefix \
                  for a regex."
+            }
+            (TermKind::Suppress, TermScope::Tab(_)) => {
+                "Dim (but keep visible) messages in this tab only, added to your \
+                 global suppress. re: prefix for a regex."
             }
         }
     }
@@ -739,12 +761,20 @@ impl BackseaterApp {
                     &settings.muted_mentions,
                 );
                 let ignore = bks_core::IgnoreList::new(config.ignored_terms.iter().cloned());
+                let suppress = bks_core::SuppressList::new(
+                    settings
+                        .suppressed_terms
+                        .iter()
+                        .chain(config.suppressed_terms.iter())
+                        .cloned(),
+                );
                 Self::make_tab(
                     &session,
                     config,
                     settings.font_size,
                     mentions,
                     ignore,
+                    suppress,
                     next_tab_id(),
                     &mention_store,
                     window,
@@ -978,6 +1008,7 @@ impl BackseaterApp {
         font_size: f32,
         mentions: bks_core::MentionMatcher,
         ignore: bks_core::IgnoreList,
+        suppress: bks_core::SuppressList,
         id: u64,
         mention_store: &Entity<MentionStore>,
         window: &mut Window,
@@ -993,6 +1024,7 @@ impl BackseaterApp {
                 font_size,
                 mentions,
                 ignore,
+                suppress,
                 id,
                 mention_store,
                 window,
@@ -1030,6 +1062,20 @@ impl BackseaterApp {
         bks_core::IgnoreList::new(config.ignored_terms.iter().cloned())
     }
 
+    /// One tab's effective suppress list: the global suppressed terms unioned
+    /// with that tab's own. Suppression is *never* dropped at ingest (the row
+    /// must still render, dimmed), so there is no global/per-tab split like
+    /// ignore has — both tiers resolve together at render, per view.
+    fn tab_suppress(&self, config: &TabConfig) -> bks_core::SuppressList {
+        bks_core::SuppressList::new(
+            self.settings
+                .suppressed_terms
+                .iter()
+                .chain(config.suppressed_terms.iter())
+                .cloned(),
+        )
+    }
+
     /// Pushes each tab its effective mention matcher (global + that tab's own
     /// terms) after a login, logout, or settings/tab-config edit.
     fn refresh_mentions(&mut self, cx: &mut Context<Self>) {
@@ -1051,6 +1097,20 @@ impl BackseaterApp {
                 // A global-ignore change also affects already-buffered rows'
                 // visibility indirectly (future messages), and per-tab changes
                 // affect rendering now — repaint the log.
+                view.refresh_log(cx);
+            });
+        }
+    }
+
+    /// Pushes each tab its effective suppress list (global + that tab's own) and
+    /// repaints the log so already-buffered rows re-dim. No `list_state` reset:
+    /// suppressed rows keep full height (only opacity changes), so a repaint
+    /// suffices — no re-measure like a font/pane change needs.
+    fn refresh_suppress(&mut self, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            let suppress = self.tab_suppress(&tab.config);
+            tab.view.update(cx, |view, cx| {
+                view.set_suppress(suppress);
                 view.refresh_log(cx);
             });
         }
@@ -1084,12 +1144,14 @@ impl BackseaterApp {
         let config = TabConfig::empty();
         let mentions = self.tab_mentions(&config);
         let ignore = self.tab_ignore(&config);
+        let suppress = self.tab_suppress(&config);
         let entry = Self::make_tab(
             &self.session,
             config,
             self.settings.font_size,
             mentions,
             ignore,
+            suppress,
             next_tab_id(),
             &self.mention_store,
             window,
@@ -1262,6 +1324,7 @@ impl BackseaterApp {
             session: self.session.clone(),
             mentions: self.tab_mentions(&config),
             ignore: self.tab_ignore(&config),
+            suppress: self.tab_suppress(&config),
             font_size: self.settings.font_size,
             tab_id: tab.id,
             mention_store: self.mention_store.clone(),
@@ -1521,6 +1584,7 @@ impl BackseaterApp {
             // subscriptions bind to the window they're created in.
             let mentions = self.tab_mentions(&config);
             let ignore = self.tab_ignore(&config);
+            let suppress = self.tab_suppress(&config);
             let session = self.session.clone();
             let font_size = self.settings.font_size;
             // The rebuilt view keeps the tab's id, so its recorded mentions
@@ -1529,7 +1593,7 @@ impl BackseaterApp {
             let store = self.mention_store.clone();
             let Ok(entry) = self.main_window.update(cx, |_, window, cx| {
                 Self::make_tab(
-                    &session, config, font_size, mentions, ignore, id, &store, window, cx,
+                    &session, config, font_size, mentions, ignore, suppress, id, &store, window, cx,
                 )
             }) else {
                 return; // Main window gone (app shutting down).
@@ -1678,7 +1742,9 @@ impl BackseaterApp {
                 .gap_5()
                 .child(self.term_list_section(TermList::global(TermKind::Mentions), cx))
                 .child(self.mentions_tab_section(cx))
-                .child(self.term_list_section(TermList::global(TermKind::Ignore), cx)),
+                .child(self.term_list_section(TermList::global(TermKind::Ignore), cx))
+                .child(self.term_list_section(TermList::global(TermKind::Suppress), cx))
+                .child(self.suppressed_opacity_section(cx)),
             SettingsCategory::ModButtons => {
                 v_flex().gap_5().child(self.mod_buttons_section(cx))
             }
@@ -1725,7 +1791,8 @@ impl BackseaterApp {
             TabSettingsCategory::Highlights => v_flex()
                 .gap_5()
                 .child(self.term_list_section(TermList::tab(TermKind::Mentions, ix), cx))
-                .child(self.term_list_section(TermList::tab(TermKind::Ignore, ix), cx)),
+                .child(self.term_list_section(TermList::tab(TermKind::Ignore, ix), cx))
+                .child(self.term_list_section(TermList::tab(TermKind::Suppress, ix), cx)),
         };
 
         settings_shell(
@@ -3229,8 +3296,10 @@ impl BackseaterApp {
         match (list.scope, list.kind) {
             (TermScope::Global, TermKind::Mentions) => &self.settings.custom_mentions,
             (TermScope::Global, TermKind::Ignore) => &self.settings.ignored_terms,
+            (TermScope::Global, TermKind::Suppress) => &self.settings.suppressed_terms,
             (TermScope::Tab(ix), TermKind::Mentions) => &self.tabs[ix].config.custom_mentions,
             (TermScope::Tab(ix), TermKind::Ignore) => &self.tabs[ix].config.ignored_terms,
+            (TermScope::Tab(ix), TermKind::Suppress) => &self.tabs[ix].config.suppressed_terms,
         }
     }
 
@@ -3238,8 +3307,12 @@ impl BackseaterApp {
         match (list.scope, list.kind) {
             (TermScope::Global, TermKind::Mentions) => &mut self.settings.custom_mentions,
             (TermScope::Global, TermKind::Ignore) => &mut self.settings.ignored_terms,
+            (TermScope::Global, TermKind::Suppress) => &mut self.settings.suppressed_terms,
             (TermScope::Tab(ix), TermKind::Mentions) => &mut self.tabs[ix].config.custom_mentions,
             (TermScope::Tab(ix), TermKind::Ignore) => &mut self.tabs[ix].config.ignored_terms,
+            (TermScope::Tab(ix), TermKind::Suppress) => {
+                &mut self.tabs[ix].config.suppressed_terms
+            }
         }
     }
 
@@ -3247,8 +3320,10 @@ impl BackseaterApp {
         match (list.scope, list.kind) {
             (TermScope::Global, TermKind::Mentions) => &self.settings_inputs.mention,
             (TermScope::Global, TermKind::Ignore) => &self.settings_inputs.ignore,
+            (TermScope::Global, TermKind::Suppress) => &self.settings_inputs.suppress,
             (TermScope::Tab(_), TermKind::Mentions) => &self.settings_inputs.tab_mention,
             (TermScope::Tab(_), TermKind::Ignore) => &self.settings_inputs.tab_ignore,
+            (TermScope::Tab(_), TermKind::Suppress) => &self.settings_inputs.tab_suppress,
         }
     }
 
@@ -3262,6 +3337,7 @@ impl BackseaterApp {
         match list.kind {
             TermKind::Mentions => self.refresh_mentions(cx),
             TermKind::Ignore => self.refresh_ignore(cx),
+            TermKind::Suppress => self.refresh_suppress(cx),
         }
     }
 
@@ -3315,6 +3391,70 @@ impl BackseaterApp {
         self.settings.save();
         for tab in &self.tabs {
             tab.view.update(cx, |view, cx| view.set_font_size(size, cx));
+        }
+        cx.notify();
+    }
+
+    /// The suppressed-message opacity control: a ±5% stepper shown under the
+    /// Suppress list, mirroring the chat-font-size stepper. Only useful once at
+    /// least one suppress term exists, but always shown so the value is
+    /// discoverable.
+    fn suppressed_opacity_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let pct = (self.settings.suppressed_opacity * 100.0).round() as i32;
+        let stepper = h_flex()
+            .items_center()
+            .gap_2()
+            .child(
+                Button::new("suppress-opacity-down")
+                    .label("–")
+                    .small()
+                    .outline()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.adjust_suppressed_opacity(-0.05, cx);
+                    })),
+            )
+            .child(
+                div()
+                    .w(px(44.))
+                    .text_center()
+                    .text_size(px(13.))
+                    .child(SharedString::from(format!("{pct}%"))),
+            )
+            .child(
+                Button::new("suppress-opacity-up")
+                    .label("+")
+                    .small()
+                    .outline()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.adjust_suppressed_opacity(0.05, cx);
+                    })),
+            );
+        v_flex()
+            .gap_2()
+            .child(setting_card().child(setting_row(
+                "Suppressed opacity",
+                Some("How faint suppressed messages appear. Lower = easier to skip."),
+                stepper.into_any_element(),
+            )))
+            .into_any_element()
+    }
+
+    /// Steps the suppressed-message opacity by `delta`, clamped to the allowed
+    /// range, then publishes the flag and repaints every log. No re-measure:
+    /// opacity doesn't change row height (unlike font size).
+    fn adjust_suppressed_opacity(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let opacity = (self.settings.suppressed_opacity + delta).clamp(
+            *settings::SUPPRESSED_OPACITY_RANGE.start(),
+            *settings::SUPPRESSED_OPACITY_RANGE.end(),
+        );
+        if opacity == self.settings.suppressed_opacity {
+            return;
+        }
+        self.settings.suppressed_opacity = opacity;
+        self.settings.save();
+        self.settings.apply_visibility_flags();
+        for tab in &self.tabs {
+            tab.view.update(cx, |view, cx| view.refresh_log(cx));
         }
         cx.notify();
     }

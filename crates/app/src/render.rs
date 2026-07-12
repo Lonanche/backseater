@@ -716,6 +716,7 @@ const LONG_WORD_CHARS: usize = 24;
 /// Opacity for backfilled chat-history rows, so they read as older than live chat.
 const HISTORY_OPACITY: f32 = 0.6;
 
+
 /// Horizontal padding a highlighted row's tinted pill gets (`px_2`, 8px), so its
 /// content has breathing room inside the rounded box. An equal *negative* margin
 /// cancels it, so the pill bleeds back to the row's content edge and the
@@ -1350,6 +1351,10 @@ pub struct RowFlags {
     /// timestamps" settings by the chat log and mentions panel; other surfaces
     /// (usercard, pin banner) leave it false and always show the time.
     pub hide_timestamp: bool,
+    /// The message matched a *suppress* term: render the whole row at very low
+    /// opacity (kept visible/readable, but easy to skip). Distinct from `struck`
+    /// (which also strikes through) and `historical` (a lighter fade).
+    pub suppressed: bool,
 }
 
 /// One chat message as a wrapping row: platform · time · name · tokens. When
@@ -1383,6 +1388,7 @@ pub fn render_message(
         mentioned,
         external_highlight,
         hide_timestamp,
+        suppressed,
     } = flags;
     let scale = Scale::new(font_size);
     let name_color = readable_color(
@@ -1697,6 +1703,11 @@ pub fn render_message(
         .min_w_0()
         // Backfilled history is dimmed to set it apart from live chat.
         .when(msg.historical, |row| row.opacity(HISTORY_OPACITY))
+        // A suppressed (term-matched) row is faded so the eye skips it, while
+        // staying readable on a closer look. The opacity is user-configurable.
+        .when(suppressed, |row| {
+            row.opacity(crate::settings::suppressed_opacity())
+        })
         // The tinted pill gets horizontal padding for the rounded look, with an
         // equal negative margin so the message content stays flush with normal
         // (un-highlighted) rows instead of being nudged right — the tint floats as

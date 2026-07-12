@@ -476,6 +476,10 @@ pub(crate) struct ChatView {
     /// Words/phrases (and regexes) whose messages are hidden from chat. Refreshed
     /// by the app when the ignore settings change.
     ignore: bks_core::IgnoreList,
+    /// Words/phrases (and regexes) whose messages are dimmed (kept visible at low
+    /// opacity) instead of hidden. Refreshed by the app when the suppress settings
+    /// change.
+    suppress: bks_core::SuppressList,
     /// Pins the user dismissed with the banner's ✕, keyed by `(platform,
     /// message id)` — dismissing hides *that one pin* for this session; the next
     /// pinned message shows again.
@@ -640,6 +644,7 @@ impl ChatView {
         font_size: f32,
         mentions: bks_core::MentionMatcher,
         ignore: bks_core::IgnoreList,
+        suppress: bks_core::SuppressList,
         tab_id: u64,
         mention_store: Entity<crate::mentions::MentionStore>,
         window: &mut Window,
@@ -758,6 +763,7 @@ impl ChatView {
             pending_mentions: Vec::new(),
             _mention_sub,
             ignore,
+            suppress,
             dismissed_pins: std::collections::HashSet::new(),
             expanded_gifts: std::collections::HashSet::new(),
             viewer_anims: HashMap::new(),
@@ -974,6 +980,13 @@ impl ChatView {
     /// messages only; already-shown rows are left as-is.
     pub(crate) fn set_ignore(&mut self, ignore: bks_core::IgnoreList) {
         self.ignore = ignore;
+    }
+
+    /// Updates the suppress list — matching messages render dimmed instead of
+    /// hidden. Unlike ignore this is purely a render concern, so a change
+    /// re-dims already-buffered rows too (the caller repaints the log).
+    pub(crate) fn set_suppress(&mut self, suppress: bks_core::SuppressList) {
+        self.suppress = suppress;
     }
 
     /// Switches the mentions panel between this tab's own mentions and the

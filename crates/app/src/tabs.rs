@@ -353,6 +353,11 @@ pub struct TabConfig {
     /// them). Empty by default.
     #[serde(default)]
     pub ignored_terms: Vec<String>,
+    /// This tab's own extra suppress terms, added to (union with) the global
+    /// `suppressed_terms` — messages matching them are dimmed (but still shown)
+    /// in this tab only. Empty by default.
+    #[serde(default)]
+    pub suppressed_terms: Vec<String>,
     /// The panel arrangement (chat/events/mentions grid). A config without one
     /// (or with a broken one) is repaired to defaults on load by
     /// [`Layout::sanitize`] — no migration of old formats.
@@ -376,6 +381,7 @@ impl TabConfig {
             mentions_all_tabs: false,
             custom_mentions: Vec::new(),
             ignored_terms: Vec::new(),
+            suppressed_terms: Vec::new(),
             layout: Layout::single_chat(),
         }
     }
