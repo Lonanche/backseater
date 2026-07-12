@@ -1785,17 +1785,19 @@ fn mod_button_chip(
             .child(SharedString::from(button.icon.clone()))
             .into_any_element(),
     };
-    let base = div()
-        .id(id)
-        .flex_none()
-        .min_w(px(size))
-        .h(px(size))
-        .px_0p5()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_sm()
-        .child(face);
+    let base = no_strike(
+        div()
+            .id(id)
+            .flex_none()
+            .min_w(px(size))
+            .h(px(size))
+            .px_0p5()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_sm()
+            .child(face),
+    );
     if ghost {
         return base.invisible().into_any_element();
     }
@@ -1810,6 +1812,18 @@ fn mod_button_chip(
         .into_any_element()
 }
 
+/// Cancels an inherited strikethrough on a row-embedded control: a struck
+/// row's `line_through` cascades into every text child, and a child refinement
+/// can't *unset* it (refine only copies `Some` values) — but a zero-thickness
+/// override draws nothing. Buttons stay readable on banned/deleted rows.
+fn no_strike<E: gpui::Styled>(mut el: E) -> E {
+    el.text_style().strikethrough = Some(gpui::StrikethroughStyle {
+        thickness: px(0.),
+        ..Default::default()
+    });
+    el
+}
+
 /// One action chip in a row's hover overlay ("↩ reply", "📌 pin"): highlighted
 /// on its own hover, firing `cb` on mouse-down (with propagation stopped so the
 /// same mouse-down doesn't refocus the log and steal focus back from the input).
@@ -1820,24 +1834,26 @@ fn hover_action(
     scale: Scale,
     cb: RowAction,
 ) -> gpui::AnyElement {
-    div()
-        .id(id)
-        .flex_none()
-        .px_1p5()
-        .rounded_sm()
-        .cursor_pointer()
-        .text_size(px(scale.small))
-        .text_color(rgb(palette().timestamp))
-        .hover(|s| {
-            s.bg(chrome_hover())
-                .text_color(rgb(palette().default_name))
-        })
-        .child(SharedString::from(label))
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            cb(window, cx);
-            cx.stop_propagation();
-        })
-        .into_any_element()
+    no_strike(
+        div()
+            .id(id)
+            .flex_none()
+            .px_1p5()
+            .rounded_sm()
+            .cursor_pointer()
+            .text_size(px(scale.small))
+            .text_color(rgb(palette().timestamp))
+            .hover(|s| {
+                s.bg(chrome_hover())
+                    .text_color(rgb(palette().default_name))
+            })
+            .child(SharedString::from(label)),
+    )
+    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+        cb(window, cx);
+        cx.stop_propagation();
+    })
+    .into_any_element()
 }
 
 /// Removes a leading `@<author>` reply mention (and the space after it) from a
