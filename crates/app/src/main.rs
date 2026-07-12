@@ -3792,115 +3792,144 @@ pub(crate) fn tip_platform_icon(platform: bks_core::Platform) -> gpui::AnyElemen
     }
 }
 
-/// Builds a tab chip's tooltip body from each set platform's live status —
-/// one compact section per platform: a header of [platform icon] + channel name
-/// (a click target that opens the channel page) with "● LIVE" / "○ offline" and,
-/// to the status's right, the uptime + category while live ("● LIVE 1h23m Rust")
-/// or "last seen 3h ago" while offline (since the last stream ended). Only a
-/// live stream adds its title under the header; offline stays a single line.
-/// Times are computed here (at show time) so they stay current. A platform with
-/// no channel set is omitted; with no channels at all the tooltip is a single
-/// "no channel set" line.
+/// Builds a tab chip's tooltip body — one compact stream card per set platform.
+/// Header: [platform icon] + channel name (a click target opening the stream /
+/// channel page, truncated when long) with a LIVE pill — or a muted
+/// "last seen 3h ago" — pinned to the right edge. A live stream adds its title
+/// (clamped to two lines) and a muted stats line (uptime · viewers · category,
+/// ellipsized — the category used to overflow the panel) underneath; offline
+/// stays a single header line. Times are computed here (at show time) so they
+/// stay current. A platform with no channel set is omitted; with no channels at
+/// all the tooltip is a single "no channel set" line. Multiple platforms get a
+/// hairline divider between cards.
 fn live_tooltip_content(platforms: &[TipPlatform]) -> gpui::Div {
     let now = chrono::Utc::now();
-    {
-        let mut col = v_flex().gap_2();
-        let set: Vec<&TipPlatform> = platforms.iter().filter(|p| !p.channel.is_empty()).collect();
-        if set.is_empty() {
-            return col.child(SharedString::from("no channel set"));
-        }
-        for p in set {
-            let live = matches!(&p.status, Some(info) if info.live);
-            let (status_text, status_color) = if live {
-                ("● LIVE", render::live_text())
-            } else {
-                ("○ offline", render::offline_text())
-            };
-            // The time beside the status: uptime while live; while offline, when
-            // the last stream ended (falling back to its start when the source
-            // reports no end — Twitch's IVR). No duration/title/category for
-            // offline — the header line is the whole story.
-            let time = if live {
-                p.status
-                    .as_ref()
-                    .and_then(|s| s.started_at)
-                    .map(|started| format_uptime(now - started))
-            } else {
-                p.status
-                    .as_ref()
-                    .and_then(|s| s.last_stream.as_ref())
-                    .map(|last| {
-                        let since = last.ended_at.unwrap_or(last.started_at);
-                        format!("last seen {} ago", format_uptime(now - since))
-                    })
-            };
-            // While live, the viewer count rides the header, right of the uptime.
-            let viewers = p
-                .viewers
-                .filter(|_| live)
-                .map(|n| format!("{} viewers", chatview::format_count(n)));
-            // While live, the category rides the header too, right of the uptime.
-            let game = p
-                .status
-                .as_ref()
-                .filter(|s| s.live)
-                .map(|s| s.game.trim())
-                .filter(|g| !g.is_empty())
-                .map(str::to_string);
-            // While live, prefer the stream's own watch link (YouTube's
-            // `watch?v=` — a specific video) over the channel page.
-            let url = p
-                .status
-                .as_ref()
-                .filter(|s| s.live)
-                .and_then(|s| s.link.clone())
-                .unwrap_or_else(|| p.platform.channel_url(&p.channel));
-            let mut section = v_flex().gap_0p5();
-            section = section.child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(tip_platform_icon(p.platform))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "tip-open-{}",
-                                p.platform.label()
-                            )))
-                            .font_weight(FontWeight::BOLD)
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(gpui::rgb(render::link_color())))
-                            .child(SharedString::from(p.channel.clone()))
-                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                cx.open_url(&url);
-                            }),
-                    )
-                    .child(
-                        div()
-                            .text_color(gpui::rgb(status_color))
-                            .child(SharedString::from(status_text)),
-                    )
-                    .children(time.map(|t| {
-                        div()
-                            .text_color(gpui::rgb(render::offline_text()))
-                            .child(SharedString::from(t))
-                    }))
-                    .children(viewers.map(|v| {
-                        div()
-                            .text_color(gpui::rgb(render::offline_text()))
-                            .child(SharedString::from(v))
-                    }))
-                    .children(game.map(SharedString::from)),
-            );
-            if let Some(info) = p.status.as_ref().filter(|s| s.live) {
-                if !info.title.trim().is_empty() {
-                    section = section.child(SharedString::from(info.title.clone()));
-                }
-            }
-            col = col.child(section);
-        }
-        col
+    let mut col = v_flex().gap_2();
+    let set: Vec<&TipPlatform> = platforms.iter().filter(|p| !p.channel.is_empty()).collect();
+    if set.is_empty() {
+        return col.child(SharedString::from("no channel set"));
     }
+    for (idx, p) in set.into_iter().enumerate() {
+        if idx > 0 {
+            col = col.child(div().h(px(1.)).w_full().bg(gpui::rgb(render::panel_border())));
+        }
+        let live = matches!(&p.status, Some(info) if info.live);
+        // While live, prefer the stream's own watch link (YouTube's
+        // `watch?v=` — a specific video) over the channel page.
+        let url = p
+            .status
+            .as_ref()
+            .filter(|s| s.live)
+            .and_then(|s| s.link.clone())
+            .unwrap_or_else(|| p.platform.channel_url(&p.channel));
+        let mut header = h_flex()
+            .gap_2()
+            .items_center()
+            .child(tip_platform_icon(p.platform))
+            .child(
+                div()
+                    .id(SharedString::from(format!(
+                        "tip-open-{}",
+                        p.platform.label()
+                    )))
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(FontWeight::BOLD)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(gpui::rgb(render::link_color())))
+                    .child(SharedString::from(p.channel.clone()))
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        cx.open_url(&url);
+                    }),
+            )
+            .child(div().flex_1());
+        if live {
+            let (pill_bg, _) = render::highlight_live(true);
+            header = header.child(
+                h_flex()
+                    .flex_none()
+                    .gap_1()
+                    .items_center()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_full()
+                    .bg(gpui::rgb(pill_bg))
+                    .child(
+                        div()
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(gpui::rgb(render::live_text())),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(gpui::rgb(render::live_text()))
+                            .child("LIVE"),
+                    ),
+            );
+        } else {
+            // Offline: when the last stream's end is known that's the whole
+            // story (falling back to its start when the source reports no end
+            // — Twitch's IVR); otherwise a plain "offline".
+            let last_seen = p
+                .status
+                .as_ref()
+                .and_then(|s| s.last_stream.as_ref())
+                .map(|last| {
+                    let since = last.ended_at.unwrap_or(last.started_at);
+                    format!("last seen {} ago", format_uptime(now - since))
+                })
+                .unwrap_or_else(|| "offline".to_string());
+            header = header.child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.))
+                    .text_color(gpui::rgb(render::offline_text()))
+                    .child(SharedString::from(last_seen)),
+            );
+        }
+        let mut section = v_flex().gap_1().child(header);
+        if let Some(info) = p.status.as_ref().filter(|s| s.live) {
+            let title = info.title.trim();
+            if !title.is_empty() {
+                section = section.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .line_clamp(2)
+                        .text_size(px(12.))
+                        .child(SharedString::from(title.to_string())),
+                );
+            }
+            // Stats line: uptime · viewers · category. Category goes last so a
+            // long name ellipsizes without eating the numbers.
+            let mut stats: Vec<String> = Vec::new();
+            if let Some(started) = info.started_at {
+                stats.push(format_uptime(now - started));
+            }
+            if let Some(n) = p.viewers {
+                stats.push(format!("{} viewers", chatview::format_count(n)));
+            }
+            let game = info.game.trim();
+            if !game.is_empty() {
+                stats.push(game.to_string());
+            }
+            if !stats.is_empty() {
+                section = section.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.))
+                        .text_color(gpui::rgb(render::offline_text()))
+                        .child(SharedString::from(stats.join(" · "))),
+                );
+            }
+        }
+        col = col.child(section);
+    }
+    col
 }
 
 /// The hand-rolled tab-chip tooltip: [`live_tooltip_content`] in a popover-styled
@@ -3932,16 +3961,17 @@ fn chip_tooltip(
                             }
                         }))
                         .mt_1()
-                        .p_2()
-                        .min_w(px(220.))
-                        .max_w(px(420.))
-                        .rounded_md()
+                        .px_3()
+                        .py_2()
+                        .min_w(px(240.))
+                        .max_w(px(380.))
+                        .rounded_lg()
                         .border_1()
                         .border_color(cx.theme().border)
                         .bg(cx.theme().popover)
                         .text_color(cx.theme().popover_foreground)
                         .text_size(px(13.))
-                        .shadow_md()
+                        .shadow_lg()
                         .child(live_tooltip_content(&platforms)),
                 ),
             ),
