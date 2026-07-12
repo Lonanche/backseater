@@ -760,11 +760,11 @@ impl ChatView {
     ) {
         use crate::channel_store::ChannelEvent;
         match event {
-            ChannelEvent::Appended { index } | ChannelEvent::Inserted { index } => {
+            ChannelEvent::Appended { index, msg } | ChannelEvent::Inserted { index, msg } => {
                 self.list_state.splice(*index..*index, 1);
-                // A new row may be a mention (for our terms) or a filter-passing
-                // event — flag the aux panels to tail.
-                self.note_new_row(*index, cx);
+                // A new row may be a mention (for our terms) — flag the mentions
+                // panel to tail + feed the all-tabs store.
+                self.note_new_row(msg.as_deref());
             }
             ChannelEvent::RemovedFront => {
                 self.list_state.splice(0..1, 0);
@@ -831,21 +831,20 @@ impl ChatView {
         cx.notify();
     }
 
-    /// A newly-added row at `index`: if it's a message that mentions us, tail the
-    /// mentions panel + feed the all-tabs store. (The events panel follows the
-    /// model's `EventAppended` instead — its list tails natively.)
-    fn note_new_row(&mut self, index: usize, cx: &mut Context<Self>) {
-        let model = self.channel.read(cx);
-        let Some(row) = model.rows.get(index) else {
+    /// A newly-added message row (carried on its `Appended`/`Inserted` event —
+    /// by delivery time a ring trim may have shifted it, so it must not be
+    /// looked up by index): if it mentions us, tail the mentions panel + feed
+    /// the all-tabs store. (The events panel follows the model's
+    /// `EventAppended` instead — its list tails natively.)
+    fn note_new_row(&mut self, msg: Option<&Message>) {
+        let Some(msg) = msg else {
             return;
         };
-        if let Row::Message { msg } = row {
-            if self.mentions.matches(&msg.raw_text) {
-                self.mentions_new = true;
-                if !msg.historical {
-                    let sound = self.mentions.sound_for(&msg.raw_text);
-                    self.pending_mentions.push(((**msg).clone(), sound));
-                }
+        if self.mentions.matches(&msg.raw_text) {
+            self.mentions_new = true;
+            if !msg.historical {
+                let sound = self.mentions.sound_for(&msg.raw_text);
+                self.pending_mentions.push((msg.clone(), sound));
             }
         }
     }

@@ -86,10 +86,21 @@ impl ChannelKey {
 /// lockstep with `rows` for the virtualized log).
 #[derive(Clone)]
 pub enum ChannelEvent {
-    /// A row was appended at the end (index = its position).
-    Appended { index: usize },
-    /// A row was inserted at `index` (history backfill placement).
-    Inserted { index: usize },
+    /// A row was appended at the end (index = its position at emit time; valid
+    /// for `ListState` splicing since views apply events in emit order). For a
+    /// message row the message rides along — subscribers run only after the
+    /// whole update burst, when a ring trim may already have shifted (or
+    /// dropped) the row, so they must not look it up by index.
+    Appended {
+        index: usize,
+        msg: Option<std::sync::Arc<Message>>,
+    },
+    /// A row was inserted at `index` (history backfill placement). Same
+    /// stale-index caveat as [`Appended`](Self::Appended).
+    Inserted {
+        index: usize,
+        msg: Option<std::sync::Arc<Message>>,
+    },
     /// The front row was dropped (ring-buffer trim past `MAX_ROWS`).
     RemovedFront,
     /// A retained event was appended to the [`events`](ChannelModel::events)
@@ -262,16 +273,18 @@ impl ChannelModel {
             return;
         }
         let ix = self.rows.len();
+        let msg = row_message(&row);
         self.rows.push_back(row);
-        cx.emit(ChannelEvent::Appended { index: ix });
+        cx.emit(ChannelEvent::Appended { index: ix, msg });
     }
 
     fn row_insert(&mut self, ix: usize, row: Row, cx: &mut Context<Self>) {
         if !self.note_row_key(&row) {
             return;
         }
+        let msg = row_message(&row);
         self.rows.insert(ix, row);
-        cx.emit(ChannelEvent::Inserted { index: ix });
+        cx.emit(ChannelEvent::Inserted { index: ix, msg });
     }
 
     fn row_pop_front(&mut self, cx: &mut Context<Self>) {
@@ -644,6 +657,15 @@ impl ChannelModel {
             self.row_pop_front(cx);
         }
         cx.notify();
+    }
+}
+
+/// The message of a message row, cloned (an `Arc` bump) to ride its
+/// `Appended`/`Inserted` event; `None` for every other row kind.
+fn row_message(row: &Row) -> Option<std::sync::Arc<Message>> {
+    match row {
+        Row::Message { msg } => Some(msg.clone()),
+        _ => None,
     }
 }
 
