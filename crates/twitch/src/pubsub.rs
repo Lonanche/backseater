@@ -343,7 +343,7 @@ fn pin_event(data: PinData) -> Option<ChatEvent> {
             color: None,
         });
     }
-    let elements = bks_core::linkify(elements);
+    let elements = bks_core::mentionize(bks_core::linkify(elements));
     let ends_at = pin_time(msg.ends_at);
     let message = Message {
         id: msg.id,

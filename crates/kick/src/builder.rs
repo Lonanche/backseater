@@ -174,7 +174,7 @@ pub fn parse_content(content: &str, text_color: Option<Color>) -> Vec<MessageEle
     }
     push_text(&mut elements, rest);
 
-    bks_core::linkify(elements)
+    bks_core::mentionize(bks_core::linkify(elements))
 }
 
 /// The subscriber badge image for `months` of tenure: the highest tier whose

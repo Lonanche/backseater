@@ -1,13 +1,19 @@
-//! Turns bare URLs inside [`Text`] runs into [`Link`] elements.
+//! Turns bare URLs inside [`Text`] runs into [`Link`] elements, and `@name`
+//! words into [`Mention`] elements.
 //!
-//! Connectors call [`linkify`] on their element stream *before* emote
-//! resolution, so the emote resolver only ever sees the remaining text runs and
-//! never splits a URL. A run is scanned word-by-word (whitespace separated): a
-//! word starting with `http://`, `https://`, or `www.` becomes a [`Link`], with
-//! trailing punctuation peeled off so `(see https://x.com).` links just the URL.
+//! Connectors call [`linkify`] + [`mentionize`] on their element stream
+//! *before* emote resolution, so the emote resolver only ever sees the
+//! remaining text runs and never splits a URL. A run is scanned word-by-word
+//! (whitespace separated): a word starting with `http://`, `https://`, or
+//! `www.` becomes a [`Link`], with trailing punctuation peeled off so
+//! `(see https://x.com).` links just the URL; a word starting with `@` becomes
+//! a [`Mention`] the same way. Whether an `@name` is a *real* user is
+//! unknowable from the text alone (any word is a legal username shape), so
+//! every one is tokenized — the UI's usercard lookup answers it on click.
 //!
 //! [`Text`]: MessageElement::Text
 //! [`Link`]: MessageElement::Link
+//! [`Mention`]: MessageElement::Mention
 
 use crate::message::MessageElement;
 
@@ -145,6 +151,90 @@ fn split_text_run(text: &str, color: Option<crate::message::Color>, out: &mut Ve
     flush(&mut pending, out);
 }
 
+/// Characters that can appear in a chat username (letters, digits, underscore —
+/// the same word shape [`crate::MentionMatcher`] splits on).
+fn is_name_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Rewrites the element stream, splitting each [`Text`] run's `@name` words
+/// into [`Mention`] elements while preserving order and the run's color.
+/// Non-text elements pass through untouched. A mention must *start* its word
+/// (after leading wrappers like `(`), so `email@x.com` stays plain text;
+/// trailing punctuation is peeled off as prose, so `@alice,` mentions `alice`.
+///
+/// [`Text`]: MessageElement::Text
+/// [`Mention`]: MessageElement::Mention
+pub fn mentionize(elements: Vec<MessageElement>) -> Vec<MessageElement> {
+    let mut out = Vec::with_capacity(elements.len());
+    for element in elements {
+        let MessageElement::Text { text, color } = element else {
+            out.push(element);
+            continue;
+        };
+        if !text.contains('@') {
+            out.push(MessageElement::Text { text, color });
+            continue;
+        }
+        split_mention_run(&text, color, &mut out);
+    }
+    out
+}
+
+/// Walks one text run, emitting alternating `Text` and `Mention` elements —
+/// the same whitespace-preserving word walk as [`split_text_run`].
+fn split_mention_run(
+    text: &str,
+    color: Option<crate::message::Color>,
+    out: &mut Vec<MessageElement>,
+) {
+    let mut pending = String::new();
+    let flush = |pending: &mut String, out: &mut Vec<MessageElement>| {
+        if !pending.is_empty() {
+            out.push(MessageElement::Text {
+                text: std::mem::take(pending),
+                color,
+            });
+        }
+    };
+
+    let mut rest = text;
+    while !rest.is_empty() {
+        let ws_end = rest
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(rest.len());
+        if ws_end > 0 {
+            pending.push_str(&rest[..ws_end]);
+            rest = &rest[ws_end..];
+            continue;
+        }
+        let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..word_end];
+        rest = &rest[word_end..];
+
+        // Peel leading wrappers like `(` so `(@alice)` still mentions.
+        let lead = leading_len(word);
+        if let Some(name) = word[lead..].strip_prefix('@') {
+            let name_len: usize = name
+                .chars()
+                .take_while(|&c| is_name_char(c))
+                .map(char::len_utf8)
+                .sum();
+            if name_len > 0 {
+                pending.push_str(&word[..lead]); // leading punctuation as prose
+                flush(&mut pending, out);
+                out.push(MessageElement::Mention {
+                    login: name[..name_len].to_string(),
+                });
+                pending.push_str(&name[name_len..]); // trailing punctuation as prose
+                continue;
+            }
+        }
+        pending.push_str(word);
+    }
+    flush(&mut pending, out);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +253,7 @@ mod tests {
                 MessageElement::Text { text, .. } => format!("T:{text}"),
                 MessageElement::Link { url, .. } => format!("L:{url}"),
                 MessageElement::Emote(em) => format!("E:{}", em.name),
+                MessageElement::Mention { login } => format!("M:{login}"),
                 _ => "?".into(),
             })
             .collect()
@@ -232,6 +323,68 @@ mod tests {
             MessageElement::Text { color, .. } => assert_eq!(*color, red),
             _ => panic!("expected text first"),
         }
-        assert_eq!(describe(&out), vec!["T:look ", "L:https://x.com", "?"]);
+        assert_eq!(describe(&out), vec!["T:look ", "L:https://x.com", "M:bob"]);
+    }
+
+    #[test]
+    fn mention_mid_sentence() {
+        let out = mentionize(vec![text("hey @alice how are you")]);
+        assert_eq!(describe(&out), vec!["T:hey ", "M:alice", "T: how are you"]);
+    }
+
+    #[test]
+    fn mention_trailing_punctuation_is_prose() {
+        let out = mentionize(vec![text("@alice, hi")]);
+        assert_eq!(describe(&out), vec!["M:alice", "T:, hi"]);
+    }
+
+    #[test]
+    fn mention_wrapped_in_parens() {
+        let out = mentionize(vec![text("(@alice)")]);
+        assert_eq!(describe(&out), vec!["T:(", "M:alice", "T:)"]);
+    }
+
+    #[test]
+    fn email_is_not_a_mention() {
+        let out = mentionize(vec![text("mail me at bob@example.com")]);
+        assert_eq!(describe(&out), vec!["T:mail me at bob@example.com"]);
+    }
+
+    #[test]
+    fn bare_at_is_not_a_mention() {
+        let out = mentionize(vec![text("just @ nothing @@ here")]);
+        assert_eq!(describe(&out), vec!["T:just @ nothing @@ here"]);
+    }
+
+    #[test]
+    fn mention_keeps_typed_case_and_underscores() {
+        let out = mentionize(vec![text("yo @Some_User42!")]);
+        assert_eq!(describe(&out), vec!["T:yo ", "M:Some_User42", "T:!"]);
+    }
+
+    #[test]
+    fn multiple_mentions() {
+        let out = mentionize(vec![text("@a and @b")]);
+        assert_eq!(describe(&out), vec!["M:a", "T: and ", "M:b"]);
+    }
+
+    #[test]
+    fn mention_preserves_color_and_non_text_elements() {
+        let red = Some(Color::rgb(255, 0, 0));
+        let out = mentionize(vec![
+            MessageElement::Text {
+                text: "hi @bob".into(),
+                color: red,
+            },
+            MessageElement::Link {
+                url: "https://x.com".into(),
+                text: "https://x.com".into(),
+            },
+        ]);
+        match &out[0] {
+            MessageElement::Text { color, .. } => assert_eq!(*color, red),
+            _ => panic!("expected text first"),
+        }
+        assert_eq!(describe(&out), vec!["T:hi ", "M:bob", "L:https://x.com"]);
     }
 }

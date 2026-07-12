@@ -16,7 +16,7 @@ mod time;
 
 pub use emote::{Emote, EmoteTooltip};
 pub use ignore::IgnoreList;
-pub use links::linkify;
+pub use links::{linkify, mentionize};
 pub use mention::{normalize_term, MentionMatcher};
 pub use message::{
     Author, Badge, ChannelId, Color, Message, MessageElement, NamePaint, PaintKind, PaintStop,

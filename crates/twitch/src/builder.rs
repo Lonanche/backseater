@@ -78,7 +78,7 @@ pub fn build_privmsg_elements(
     }
     push_text(&mut elements, &chars[cursor.min(chars.len())..]);
 
-    bks_core::linkify(elements)
+    bks_core::mentionize(bks_core::linkify(elements))
 }
 
 #[cfg(test)]

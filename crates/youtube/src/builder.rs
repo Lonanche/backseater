@@ -76,7 +76,7 @@ fn build_text_message(channel: &str, r: &Value) -> ParsedItem {
     });
 
     let mut elements = parse_message_runs(&r["message"], color);
-    elements = bks_core::linkify(elements);
+    elements = bks_core::mentionize(bks_core::linkify(elements));
 
     let badges = author_badges(r)
         .into_iter()

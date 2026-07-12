@@ -1385,13 +1385,24 @@ impl ChatView {
     }
 
     /// Opens the usercard for `name` on the current target platform
-    /// (`/usercard <user>`). A message the chatter sent this session gives the
-    /// real login/id/color/badges; otherwise a bare card opens and the async
-    /// stats fetch fills in what it can.
+    /// (`/usercard <user>`).
     fn open_usercard_by_name(&mut self, name: &str, cx: &mut Context<Self>) {
         let Some(&platform) = self.target_platforms().first() else {
             return;
         };
+        self.open_usercard_named(name, platform, cx);
+    }
+
+    /// Opens the usercard for `name` on `platform` (`/usercard`, mention
+    /// clicks). A message the chatter sent this session gives the real
+    /// login/id/color/badges; otherwise a bare card opens and the async stats
+    /// fetch fills in what it can — or shows it's not a real user.
+    pub(crate) fn open_usercard_named(
+        &mut self,
+        name: &str,
+        platform: bks_core::Platform,
+        cx: &mut Context<Self>,
+    ) {
         let name = name.trim_start_matches('@');
         let seen = self
             .channel
@@ -3822,6 +3833,7 @@ impl ChatView {
                             &mut ordinal,
                             render::RowHandlers {
                                 name_click: Some(name_click_for(&entity, msg)),
+                                mention_click: Some(mention_click_for(&entity, msg)),
                                 ..Default::default()
                             },
                         )
@@ -4841,6 +4853,21 @@ fn name_click_for(entity: &Entity<ChatView>, msg: &Message) -> render::NameClick
     Box::new(move |_window: &mut Window, cx: &mut App| {
         entity.update(cx, |this, cx| {
             this.open_usercard(&msg_id, cx);
+            cx.notify();
+        });
+    })
+}
+
+/// Builds the mention-click callback for one message: clicking an `@name` in the
+/// body opens that user's usercard on the row's platform (not the send target —
+/// a mention in a Kick message opens a Kick card). Captures only the view handle
+/// and the platform; the name arrives from the clicked token.
+fn mention_click_for(entity: &Entity<ChatView>, msg: &Message) -> render::MentionClick {
+    let entity = entity.clone();
+    let platform = msg.platform;
+    std::rc::Rc::new(move |login: &str, _window: &mut Window, cx: &mut App| {
+        entity.update(cx, |this, cx| {
+            this.open_usercard_named(login, platform, cx);
             cx.notify();
         });
     })

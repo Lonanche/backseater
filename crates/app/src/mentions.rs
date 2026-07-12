@@ -114,6 +114,17 @@ pub fn feed_rows(store: &Entity<MentionStore>, font_size: f32, cx: &App) -> Vec<
                     });
                 })
             };
+            let mention_click: render::MentionClick = {
+                let view = entry.view.clone();
+                let platform = entry.msg.platform;
+                std::rc::Rc::new(move |login: &str, _window, cx| {
+                    cx.stop_propagation();
+                    let _ = view.update(cx, |this, cx| {
+                        this.open_usercard_named(login, platform, cx);
+                        cx.notify();
+                    });
+                })
+            };
             let row = render::render_message(
                 &entry.msg,
                 render::RowFlags {
@@ -127,6 +138,7 @@ pub fn feed_rows(store: &Entity<MentionStore>, font_size: f32, cx: &App) -> Vec<
                 &mut ordinal,
                 render::RowHandlers {
                     name_click: Some(name_click),
+                    mention_click: Some(mention_click),
                     ..Default::default()
                 },
             );

@@ -1268,6 +1268,13 @@ pub type EmoteClick = std::rc::Rc<dyn Fn(&Emote, gpui::Point<gpui::Pixels>, &mut
 pub type SeventvLinkClick =
     std::rc::Rc<dyn Fn(&str, gpui::Point<gpui::Pixels>, &mut Window, &mut App)>;
 
+/// A callback run when an `@name` mention in a message body is clicked, with the
+/// mentioned name: opens that user's usercard on the row's platform. Whether the
+/// name is a real user is unknowable from the text (any word is a legal username
+/// shape), so every mention is clickable and the card's stats lookup answers it.
+/// Shared by all mentions in the row; `None` outside the live log.
+pub type MentionClick = std::rc::Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
 /// A callback run when a row's reply button is clicked: starts a reply to that
 /// message. Built per-row by the view, capturing the message's reply identity.
 /// `None` outside the live log (and on non-message rows).
@@ -1310,6 +1317,7 @@ pub struct ModStrip {
 #[derive(Default)]
 pub struct RowHandlers {
     pub name_click: Option<NameClick>,
+    pub mention_click: Option<MentionClick>,
     pub link_hover: Option<LinkHover>,
     pub emote_click: Option<EmoteClick>,
     pub seventv_link_click: Option<SeventvLinkClick>,
@@ -1364,6 +1372,7 @@ pub fn render_message(
 ) -> impl IntoElement {
     let RowHandlers {
         name_click,
+        mention_click,
         link_hover,
         emote_click,
         seventv_link_click,
@@ -1413,16 +1422,33 @@ pub fn render_message(
     // Twitch prepends `@ParentName ` to a reply's body (Kick doesn't). With the
     // "replying to" line shown above, that prefix is redundant — strip it from
     // the first text run. Matched against the known parent author so we only ever
-    // remove the actual reply mention, never text the user typed.
+    // remove the actual reply mention, never text the user typed. The mention
+    // tokenizer usually turns that prefix into a leading `Mention` element, so
+    // skip that form too (and the separator space it leaves on the next run).
     let reply_prefix = msg.reply.as_ref().map(|r| r.author.as_str());
+    let mut elements = msg.elements.as_slice();
+    let mut trim_reply_gap = false;
+    if let (Some(parent), Some(MessageElement::Mention { login })) =
+        (reply_prefix, elements.first())
+    {
+        if login.eq_ignore_ascii_case(parent.trim_start_matches('@')) {
+            elements = &elements[1..];
+            trim_reply_gap = true;
+        }
+    }
     let mut first_text = true;
 
     let mut emote_index = 0usize;
-    for element in &msg.elements {
+    for element in elements {
         match element {
             MessageElement::Text { text, color } => {
                 let shown = if first_text {
-                    strip_reply_prefix(text, reply_prefix)
+                    let stripped = strip_reply_prefix(text, reply_prefix);
+                    if trim_reply_gap {
+                        stripped.trim_start().to_string()
+                    } else {
+                        stripped
+                    }
                 } else {
                     text.clone()
                 };
@@ -1498,14 +1524,36 @@ pub fn render_message(
                 );
             }
             MessageElement::Mention { login } => {
-                tokens.push(text_token(
-                    &ctx,
-                    ordinal,
-                    format!("@{login}"),
-                    None,
-                    true,
-                    false,
-                ));
+                // Clickable when the view supplies the handler: opens the
+                // mentioned user's usercard (a bare card + async lookup when
+                // they haven't chatted). Guarded like the other click targets
+                // so the click ending a drag-select doesn't fire.
+                let ord = *ordinal;
+                let token = text_token(&ctx, ordinal, format!("@{login}"), None, true, false);
+                match &mention_click {
+                    Some(cb) => {
+                        let cb = cb.clone();
+                        let login = login.clone();
+                        let sel = selection.clone();
+                        tokens.push(
+                            div()
+                                .id(ids.token(ord))
+                                .cursor_pointer()
+                                .hover(|s| s.underline())
+                                .on_mouse_up(
+                                    MouseButton::Left,
+                                    move |_, window, cx| {
+                                        if !sel.has_selection() {
+                                            cb(&login, window, cx);
+                                        }
+                                    },
+                                )
+                                .child(token)
+                                .into_any_element(),
+                        );
+                    }
+                    None => tokens.push(token),
+                }
             }
             MessageElement::Link { url, text } => {
                 push_link(&mut tokens, &ctx, ordinal, url, text, link_hover.as_ref());

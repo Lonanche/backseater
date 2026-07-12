@@ -819,7 +819,7 @@ impl PinnedChat {
                 user_id: self.sender_user_id.clone(),
             },
             raw_text: self.message.text.clone(),
-            elements: bks_core::linkify(elements),
+            elements: bks_core::mentionize(bks_core::linkify(elements)),
             reply: None,
             first_message: false,
             historical: false,
