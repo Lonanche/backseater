@@ -47,17 +47,39 @@ impl TwitchActions {
         })
     }
 
-    /// The emotes the logged-in user can use, for the emote picker.
-    pub async fn user_emotes(&self) -> anyhow::Result<Vec<bks_core::Emote>> {
-        self.helix.user_emotes().await
+    /// The logged-in user's own id (keys per-account caches).
+    pub fn own_user_id(&self) -> &str {
+        self.helix.own_user_id()
     }
 
-    /// A channel's own native emotes (sub/follower/bits) by channel login, for
-    /// the picker — includes emotes the user can't use (shown like web). Resolves
-    /// the login to a broadcaster id first.
-    pub async fn channel_emotes(&self, channel: &str) -> anyhow::Result<Vec<bks_core::Emote>> {
-        let broadcaster_id = self.helix.user_id(channel).await?;
-        self.helix.channel_emotes(&broadcaster_id).await
+    /// Both native emote sets for the picker + autocomplete, fetched
+    /// concurrently after ONE shared login→id resolve (each listing resolving
+    /// its own raced the id cache and sent a duplicate `/users` request):
+    /// the emotes the logged-in user can use (passing the channel guarantees
+    /// its follower emotes are in the set) and the channel's own set
+    /// (sub/follower/bits, including emotes the user can't use — shown locked
+    /// in the picker like web). A failed resolve just omits the
+    /// channel-dependent parts (the personal listing still runs).
+    pub async fn native_emotes(
+        &self,
+        channel: Option<&str>,
+    ) -> (
+        anyhow::Result<Vec<bks_core::Emote>>,
+        anyhow::Result<Vec<bks_core::Emote>>,
+    ) {
+        let broadcaster_id = match channel {
+            Some(c) => self.helix.user_id(c).await.ok(),
+            None => None,
+        };
+        tokio::join!(
+            self.helix.user_emotes(broadcaster_id.as_deref()),
+            async {
+                match &broadcaster_id {
+                    Some(id) => self.helix.channel_emotes(id).await,
+                    None => Ok(Vec::new()),
+                }
+            }
+        )
     }
 
     /// The users currently in `channel`'s chat (broadcaster/moderator only —

@@ -20,6 +20,7 @@ use bks_twitch::{TwitchActions, TwitchSource, TwitchUserCard};
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
+use crate::emote_cache;
 use crate::session::{self, Session};
 
 /// The message a pending reply points at: which platform + the parent's id, plus
@@ -69,6 +70,19 @@ enum ModAction {
 pub enum Role {
     Moderator,
     Vip,
+}
+
+/// The two native Twitch emote sets [`Controller::fetch_twitch_emotes`]
+/// returns: `personal` is everything the logged-in user can use (autocomplete
+/// draws only from these), `channel` is the viewed channel's remaining
+/// (locked) emotes, shown in the picker only. Serde so the last fetch can be
+/// disk-cached for a warm start (see [`crate::emote_cache`]).
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct TwitchEmotes {
+    #[serde(default)]
+    pub personal: Vec<bks_core::Emote>,
+    #[serde(default)]
+    pub channel: Vec<bks_core::Emote>,
 }
 
 /// This tab's mutable connection state. Behind a mutex so the GPUI side and
@@ -405,43 +419,74 @@ impl Controller {
         });
     }
 
-    /// Fetches the logged-in user's personal Twitch emotes (sub/follower/global)
-    /// for the emote picker, delivering the result over `reply`. Sends an empty
-    /// list when not logged into Twitch (the picker then shows only 7TV emotes).
-    pub fn fetch_twitch_emotes(&self, reply: smol::channel::Sender<Vec<bks_core::Emote>>) {
+    /// Fetches the logged-in user's native Twitch emotes for the picker +
+    /// autocomplete, delivering both sets over `reply`: the emotes the user can
+    /// actually use (sub/follower/global — autocomplete draws only from these)
+    /// and the viewed channel's own set with the usable ones removed (picker
+    /// display only — a locked sub emote shows there like Twitch web, but must
+    /// never autocomplete into a message that would send as plain text).
+    /// Sends empty sets when not logged into Twitch.
+    ///
+    /// May send **twice**: last session's disk-cached sets first (instant warm
+    /// start at launch), then the fresh fetch, which also re-persists the
+    /// cache. The receiver just applies whatever arrives, in order.
+    pub fn fetch_twitch_emotes(&self, reply: smol::channel::Sender<TwitchEmotes>) {
         let this = self.clone();
         self.rt.spawn(async move {
-            let emotes = match this.session.twitch_actions().await {
-                Some(actions) => {
-                    // The user's own usable emotes plus the viewed channel's native
-                    // set (sub/follower/bits) — the latter so channel emotes like a
-                    // sub emote show in the picker even when we're not subscribed
-                    // (native emotes bypass the 3rd-party registry, so they're not
-                    // in the bridge's Emotes payload). Fetched concurrently; a
-                    // failure of either just yields fewer emotes.
-                    let channel = this.twitch_channel.clone();
-                    let (personal, channel_emotes) = tokio::join!(
-                        actions.user_emotes(),
-                        async {
-                            if channel.is_empty() {
-                                Ok(Vec::new())
-                            } else {
-                                actions.channel_emotes(&channel).await
-                            }
-                        }
-                    );
-                    let mut emotes = personal.unwrap_or_default();
-                    let mut seen: std::collections::HashSet<String> =
-                        emotes.iter().map(|e| e.name.clone()).collect();
-                    for e in channel_emotes.unwrap_or_default() {
-                        if seen.insert(e.name.clone()) {
-                            emotes.push(e);
-                        }
-                    }
-                    emotes
-                }
-                None => Vec::new(),
+            let Some(actions) = this.session.twitch_actions().await else {
+                let _ = reply.send(TwitchEmotes::default()).await;
+                return;
             };
+            let channel = this.twitch_channel.clone();
+            let had_cache = match emote_cache::load(actions.own_user_id(), &channel) {
+                Some(cached) => reply.send(cached).await.is_ok(),
+                None => false,
+            };
+            // Fetched concurrently; a failure of either just yields fewer
+            // emotes. The channel makes its follower emotes part of the
+            // usable set too.
+            let channel = (!channel.is_empty()).then_some(channel);
+            let (personal, channel_emotes) = actions.native_emotes(channel.as_deref()).await;
+            let personal = match personal {
+                Ok(p) => p,
+                Err(e) => {
+                    // Most likely an old token without `user:read:emotes` —
+                    // cross-channel sub emotes stay out of the picker +
+                    // autocomplete until the next /login.
+                    tracing::warn!(
+                        "fetching personal Twitch emotes failed ({e:#}); \
+                         log out and back in if your token predates the \
+                         user:read:emotes scope"
+                    );
+                    if had_cache {
+                        // Keep showing the cached sets rather than clobbering
+                        // them with an empty fetch.
+                        return;
+                    }
+                    Vec::new()
+                }
+            };
+            let usable: std::collections::HashSet<&str> =
+                personal.iter().map(|e| e.name.as_str()).collect();
+            let channel_ok = channel_emotes.is_ok();
+            let channel_set: Vec<bks_core::Emote> = channel_emotes
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|e| !usable.contains(e.name.as_str()))
+                .collect();
+            let emotes = TwitchEmotes {
+                personal,
+                channel: channel_set,
+            };
+            // A failed channel listing keeps the previous cache entry (the
+            // fresh send below still updates the screen with what we got).
+            if channel_ok {
+                emote_cache::save(
+                    actions.own_user_id(),
+                    &this.twitch_channel,
+                    &emotes,
+                );
+            }
             let _ = reply.send(emotes).await;
         });
     }

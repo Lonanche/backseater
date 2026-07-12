@@ -25,9 +25,11 @@ const STORE_NAME: &str = "twitch_credentials";
 /// Chat + moderation, plus the EventSub moderator feed: `channel.moderate` v2
 /// requires the whole read set below (each satisfied by read OR manage), and
 /// AutoMod hold/allow/deny needs `moderator:manage:automod`. The viewer list
-/// needs `moderator:read:chatters`. A token from before these were added keeps
-/// working for chat — the extra features just stay off until the next login.
-const SCOPES: &str = "chat:read chat:edit user:write:chat \
+/// needs `moderator:read:chatters`; the personal emote set for the picker +
+/// autocomplete (cross-channel sub emotes) needs `user:read:emotes`. A token
+/// from before these were added keeps working for chat — the extra features
+/// just stay off until the next login.
+const SCOPES: &str = "chat:read chat:edit user:write:chat user:read:emotes \
                       moderator:manage:banned_users moderator:manage:chat_messages \
                       moderator:manage:automod \
                       moderator:read:blocked_terms moderator:read:chat_settings \

@@ -16,6 +16,7 @@ mod channel_store;
 mod chatview;
 mod child_window;
 mod controller;
+mod emote_cache;
 mod image_cache;
 mod mentions;
 mod popout;
@@ -755,9 +756,15 @@ impl BackseaterApp {
         let mut rx = session.subscribe();
         let _login_watch = cx.spawn(async move |weak, cx| {
             while rx.changed().await.is_ok() {
-                // Login names feed mention highlighting, so refresh it too.
+                // Login names feed mention highlighting, so refresh it too, and
+                // the personal Twitch emote set (cross-channel sub emotes) is
+                // per-account — drop it so the next picker/`:` refetches.
                 let ok = weak.update(cx, |this, cx| {
                     this.refresh_mentions(cx);
+                    for tab in &this.tabs {
+                        tab.view
+                            .update(cx, |view, cx| view.refresh_personal_emotes(cx));
+                    }
                     cx.notify();
                 });
                 if ok.is_err() {

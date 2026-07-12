@@ -137,27 +137,29 @@ impl Render for EmoteCell {
 }
 
 impl ChatView {
-    /// Toggles the emote picker. On the first open, kicks off the one-time fetch
-    /// of the user's personal + viewed-channel Twitch emotes (7TV/etc. already
-    /// arrive via the bridge); they merge in when the fetch returns.
+    /// Toggles the emote picker. The native Twitch sets are already fetched
+    /// eagerly (view construction / login / channel changes), so opening just
+    /// refreshes the grid to the current sets.
     fn toggle_picker(&mut self, cx: &mut Context<Self>) {
         self.picker_open = !self.picker_open;
         if self.picker_open {
             // Show the current set right away (it may have changed since last open).
             self.refresh_picker_filter(cx);
-            self.ensure_personal_emotes(cx);
         }
         cx.notify();
     }
 
     /// Fetches the logged-in user's personal Twitch emotes plus the viewed
-    /// channel's native set (sub/follower/bits) once, merging them into
-    /// [`personal_emotes`](ChatView::personal_emotes) so both the picker and the
-    /// `:`-autocomplete popup see them. Native Twitch emotes bypass the 3rd-party
-    /// registry (they come off the IRC tag), so without this they'd only ever
-    /// render in chat, never complete. Idempotent via `emotes_fetched`; a no-op
-    /// when logged out (the fetch returns empty). Called on first picker open and
-    /// on the first `:` typed, whichever comes first.
+    /// channel's native set (sub/follower/bits) once: the usable set lands in
+    /// [`personal_emotes`](ChatView::personal_emotes) (picker + autocomplete),
+    /// the channel's locked remainder in
+    /// [`channel_native_emotes`](ChatView::channel_native_emotes) (picker
+    /// display only). Native Twitch emotes bypass the 3rd-party registry (they
+    /// come off the IRC tag), so without this they'd only ever render in chat,
+    /// never complete. Idempotent via `emotes_fetched`; a no-op when logged out
+    /// (the fetch returns empty). Fetched eagerly: at view construction, and
+    /// via [`refresh_personal_emotes`](Self::refresh_personal_emotes) on login
+    /// and channel changes.
     pub(super) fn ensure_personal_emotes(&mut self, cx: &mut Context<Self>) {
         if self.emotes_fetched {
             return;
@@ -166,21 +168,38 @@ impl ChatView {
         let (tx, rx) = smol::channel::bounded(1);
         self.controller.fetch_twitch_emotes(tx);
         cx.spawn(async move |weak, cx| {
-            if let Ok(emotes) = rx.recv().await {
-                let _ = weak.update(cx, |this, cx| {
-                    this.personal_emotes = emotes;
+            // Up to two results arrive: the disk-cached warm start, then the
+            // fresh fetch replacing it (see `fetch_twitch_emotes`).
+            while let Ok(emotes) = rx.recv().await {
+                let ok = weak.update(cx, |this, cx| {
+                    this.personal_emotes = emotes.personal;
+                    this.channel_native_emotes = emotes.channel;
                     if this.picker_open {
                         this.refresh_picker_filter(cx);
                     }
-                    // If a `:`-emote popup is already open (the fetch was triggered
-                    // by typing `:`), recompute it now that the emotes landed —
-                    // otherwise it'd stay empty until the next keystroke.
+                    // If a `:`-emote popup is open, recompute it so the sets
+                    // that just landed show without another keystroke.
                     this.refresh_emote_popup(cx);
                     cx.notify();
                 });
+                if ok.is_err() {
+                    break;
+                }
             }
         })
         .detach();
+    }
+
+    /// Drops and immediately refetches the personal + channel-native Twitch
+    /// emote sets. Called on login changes: the personal set (cross-channel
+    /// sub emotes) is per-account, so a login, logout, or account switch
+    /// invalidates it — and refetching right away keeps autocomplete ready
+    /// without waiting for the next `:`/picker open.
+    pub fn refresh_personal_emotes(&mut self, cx: &mut Context<Self>) {
+        self.emotes_fetched = false;
+        self.personal_emotes = Vec::new();
+        self.channel_native_emotes = Vec::new();
+        self.ensure_personal_emotes(cx);
     }
 
     /// The current emote-picker search text (lowercased), or empty for "show all".
@@ -190,8 +209,8 @@ impl ChatView {
 
     /// The emotes for the picker's currently selected platform tab: the channel
     /// emotes (from the shared model) followed (on the Twitch tab) by the user's
-    /// personal Twitch emotes. Cloned out (cheap `Arc` string data) so no model
-    /// borrow is held.
+    /// personal Twitch emotes and the viewed channel's locked natives. Cloned
+    /// out (cheap `Arc` string data) so no model borrow is held.
     fn picker_tab_emotes(&self, cx: &App) -> Vec<bks_core::Emote> {
         let model = self.channel.read(cx);
         match self.picker_tab {
@@ -201,6 +220,7 @@ impl ChatView {
                 .emotes_twitch
                 .iter()
                 .chain(self.personal_emotes.iter())
+                .chain(self.channel_native_emotes.iter())
                 .cloned()
                 .collect(),
         }

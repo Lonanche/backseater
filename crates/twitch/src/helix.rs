@@ -132,6 +132,12 @@ impl Helix {
         Ok((b?, t?))
     }
 
+    /// The logged-in user's own id (the `user_id`/`moderator_id` every call
+    /// acts as).
+    pub fn own_user_id(&self) -> &str {
+        &self.moderator_id
+    }
+
     /// Fetches public account info (id, display name, avatar, creation date) for
     /// the usercard. Works with the logged-in user's token (no extra scope).
     pub async fn user_info(&self, login: &str) -> anyhow::Result<UserInfo> {
@@ -166,13 +172,15 @@ impl Helix {
     /// Fetches the emotes the logged-in user can use (channel subs, follower
     /// emotes, global Twitch emotes, ...), following pagination. Each becomes a
     /// renderable [`Emote`] with a CDN url; animated ones are flagged so the
-    /// picker (and rendering) can pick the right variant.
-    pub async fn user_emotes(&self) -> anyhow::Result<Vec<Emote>> {
-        self.emote_pages(
-            format!("{HELIX}/chat/emotes/user?user_id={}", self.moderator_id),
-            "listing user emotes",
-        )
-        .await
+    /// picker (and rendering) can pick the right variant. Passing the viewed
+    /// channel's `broadcaster_id` guarantees that channel's follower emotes are
+    /// included (Twitch only promises them with the param).
+    pub async fn user_emotes(&self, broadcaster_id: Option<&str>) -> anyhow::Result<Vec<Emote>> {
+        let mut url = format!("{HELIX}/chat/emotes/user?user_id={}", self.moderator_id);
+        if let Some(b) = broadcaster_id {
+            url.push_str(&format!("&broadcaster_id={b}"));
+        }
+        self.emote_pages(url, "listing user emotes").await
     }
 
     /// Fetches a channel's own emote set (sub tiers, follower, bits) by numeric

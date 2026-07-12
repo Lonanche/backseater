@@ -535,9 +535,14 @@ pub(crate) struct ChatView {
     mentions_scroll: gpui::ScrollHandle,
     /// Set when a new mention arrived; the mentions panel tails on next render.
     mentions_new: bool,
-    /// The logged-in user's personal Twitch emotes (sub/follower/global), fetched
-    /// lazily the first time the picker opens. Shown on the Twitch tab.
+    /// The logged-in user's personal Twitch emotes (sub/follower/global) —
+    /// everything they can actually use, fetched lazily on the first picker
+    /// open or `:`/Tab completion. Feeds the picker AND autocomplete.
     personal_emotes: Vec<bks_core::Emote>,
+    /// The viewed Twitch channel's remaining native emotes (ones the user
+    /// can't use — not subscribed), shown locked-style in the picker like
+    /// Twitch web but deliberately NOT autocompleted (they'd send as text).
+    channel_native_emotes: Vec<bks_core::Emote>,
     /// Whether the emote picker panel is open (toggled by its input-bar button).
     picker_open: bool,
     /// Which platform's emotes the picker is currently showing (its tab).
@@ -706,7 +711,7 @@ impl ChatView {
         })
         .detach();
 
-        Self {
+        let mut this = Self {
             channel,
             channel_key,
             _channel_sub,
@@ -748,6 +753,7 @@ impl ChatView {
             mentions_scroll: gpui::ScrollHandle::new(),
             mentions_new: false,
             personal_emotes: Vec::new(),
+            channel_native_emotes: Vec::new(),
             picker_open: false,
             picker_tab,
             picker_search,
@@ -765,7 +771,12 @@ impl ChatView {
             log_view,
             _input_sub,
             _picker_search_sub,
-        }
+        };
+        // Fetch the personal Twitch emote set right away (saved logins load
+        // before tabs are built) so autocomplete has cross-channel sub emotes
+        // from the start, not on the first `:`/picker open.
+        this.ensure_personal_emotes(cx);
+        this
     }
 
     /// Handles a change to the shared channel model: reconcile our own
@@ -895,6 +906,9 @@ impl ChatView {
         self._channel_sub = cx.subscribe(&channel, Self::on_channel_event);
         self.channel_key = key;
         self.channel = channel;
+        // The native-emote sets are per-channel (the viewed channel's locked
+        // set + its follower emotes) — refetch them for the new one.
+        self.refresh_personal_emotes(cx);
         self.rebuild_events_shown(cx);
         self.refresh_log(cx);
         cx.notify();
@@ -2353,12 +2367,6 @@ impl ChatView {
     /// ending at the cursor starts with `@` or `:`, so typing a space after the
     /// completed word dismisses it without special-casing.
     fn update_input_popup(&mut self, cx: &mut Context<Self>) {
-        // Typing a `:`-emote stem needs the personal + channel native emote set,
-        // which is otherwise fetched lazily on first picker open — fetch it here
-        // too so autocomplete works without opening the picker first.
-        if self.emote_stem_active(cx) {
-            self.ensure_personal_emotes(cx);
-        }
         let next = self.popup_state(cx);
         if next.is_some() || self.popup.is_some() {
             self.popup = next;
@@ -2374,16 +2382,6 @@ impl ChatView {
             self.popup = self.popup_state(cx);
             cx.notify();
         }
-    }
-
-    /// Whether the word ending at the input cursor is a `:`-emote stem (so the
-    /// emote autocomplete is what would show). Cheap; used to trigger the one-time
-    /// native-emote fetch.
-    fn emote_stem_active(&self, cx: &Context<Self>) -> bool {
-        let state = self.input.read(cx);
-        let text = state.value().to_string();
-        let cursor = state.cursor().min(text.len());
-        text[word_start(&text, cursor)..cursor].starts_with(':')
     }
 
     /// The popup state for the input's current text + cursor, or `None` when the
