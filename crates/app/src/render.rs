@@ -2131,15 +2131,20 @@ pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElem
         _ => content.children(words(ev.text, false)),
     };
     if ev.expandable {
+        // A visible affordance, not a bare glyph: a small tinted chip in the
+        // kind's accent color (the row itself is the click target).
         content = content.child(
             div()
-                .ml_1()
+                .ml_1p5()
+                .px_1()
+                .rounded_sm()
+                .bg(chrome_hover())
                 .text_size(px(scale.small))
-                .text_color(rgb(p.timestamp))
+                .text_color(rgb(event_kind_color(ev.kind)))
                 .child(SharedString::from(if ev.expanded_names.is_some() {
-                    "▾"
+                    "▾ hide"
                 } else {
-                    "▸"
+                    "▸ show"
                 })),
         );
     }

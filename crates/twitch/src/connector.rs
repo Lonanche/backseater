@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use bks_core::{Author, Badge, Color, Message, MessageElement, Platform, ReplyParent};
+use bks_core::{plural, Author, Badge, Color, Message, MessageElement, Platform, ReplyParent};
 use bks_platform::{ChannelMeta, ChatEvent, ChatSource, ChatStream, EventDetails, EventKind};
 use std::sync::Mutex;
 use tokio::sync::mpsc;
@@ -199,6 +199,27 @@ const ANON_GIFTER: &str = "ananonymousgifter";
 fn usernotice_details(un: &tmi::msg::UserNotice<'_>) -> EventDetails {
     use tmi::msg::user_notice::Event;
     let actor = un.sender().map(|s| s.name().to_string());
+    if un.event_id() == "viewermilestone" {
+        // tmi has no structured watch-streak variant (it parses as
+        // `Event::Unknown`, which tmi treats as anonymous — `sender()` is
+        // None), so both the chatter and the streak length come out of the
+        // system text ("viewer watched 7 consecutive streams this month and
+        // sparked a watch streak!"): the leading token is the name, the first
+        // number the length. No number → the panel falls back to that full
+        // text.
+        let sys = un.system_message().unwrap_or_default();
+        let compact = first_number(&sys)
+            .map(|n| format!("watch streak · {n} {}", plural(n, "stream", "streams")));
+        let actor = compact
+            .is_some()
+            .then(|| sys.split_whitespace().next().map(str::to_string))
+            .flatten();
+        return EventDetails {
+            actor,
+            compact,
+            ..Default::default()
+        };
+    }
     let gifter_key = || {
         Some(
             un.sender()
@@ -284,6 +305,14 @@ fn usernotice_details(un: &tmi::msg::UserNotice<'_>) -> EventDetails {
             ..Default::default()
         },
     }
+}
+
+/// The first run of ASCII digits in `text`, as a number.
+fn first_number(text: &str) -> Option<u64> {
+    text.split(|c: char| !c.is_ascii_digit())
+        .find(|s| !s.is_empty())?
+        .parse()
+        .ok()
 }
 
 /// " · Tier N" / " · Prime" for a `msg-param-sub-plan` value, empty when
@@ -604,6 +633,20 @@ mod tests {
             }
             other => panic!("expected a message-less event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn watch_streak_details_are_condensed() {
+        let raw = "@badge-info=subscriber/3;badges=subscriber/3;color=;\
+                   display-name=viewer;emotes=;flags=;id=abc;login=viewer;mod=0;\
+                   msg-id=viewermilestone;msg-param-category=watch-streak;\
+                   msg-param-value=7;msg-param-id=xyz;room-id=11148817;subscriber=1;\
+                   system-msg=viewer\\swatched\\s7\\sconsecutive\\sstreams\\sthis\\smonth\\sand\\ssparked\\sa\\swatch\\sstreak!;\
+                   tmi-sent-ts=1594555275886;user-id=40286300;user-type= \
+                   :tmi.twitch.tv USERNOTICE #posty :hi";
+        let details = usernotice_details(&parse_usernotice(raw));
+        assert_eq!(details.actor.as_deref(), Some("viewer"));
+        assert_eq!(details.compact.as_deref(), Some("watch streak · 7 streams"));
     }
 
     #[test]
