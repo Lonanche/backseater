@@ -100,6 +100,16 @@ const USERCARD_MIN_SIZE: gpui::Size<Pixels> = gpui::Size {
     height: px(300.),
 };
 
+/// The longest timeout each platform accepts: Helix rejects durations over
+/// 1,209,600s (2 weeks); Kick's ban API takes minutes capped at 7 days. Gates
+/// which preset chips show and what the custom box allows.
+fn max_timeout_secs(platform: bks_core::Platform) -> u32 {
+    match platform {
+        bks_core::Platform::Kick => 604_800,
+        _ => 1_209_600,
+    }
+}
+
 /// Default size of the viewer-list child window (a narrow name column).
 const VIEWERLIST_WINDOW_SIZE: gpui::Size<Pixels> = gpui::Size {
     width: px(320.),
@@ -470,6 +480,14 @@ pub(crate) struct ChatView {
     /// The open chatter usercard's data, if any. Opened by clicking a name in
     /// chat (see [`open_usercard`]); shown in its own OS window.
     usercard: Option<usercard::UserCard>,
+    /// Custom timeout duration box on the usercard ("90s", "10m", "1h30m", …).
+    /// Window-bound like all kit inputs, so it's created against the usercard
+    /// window when that opens (`None` while no window is up).
+    usercard_timeout_input: Option<Entity<InputState>>,
+    _usercard_timeout_sub: Option<gpui::Subscription>,
+    /// Inline error under the custom timeout box (bad duration / over the
+    /// platform's cap); cleared on a successful apply or a new card.
+    usercard_timeout_error: Option<String>,
     /// The child OS window hosting the usercard, when open. Clicking another
     /// name re-points (and refocuses) the same window instead of opening more.
     usercard_window: Option<gpui::AnyWindowHandle>,
@@ -712,6 +730,9 @@ impl ChatView {
             viewer_anims: HashMap::new(),
             viewer_anim_tick_pending: false,
             usercard: None,
+            usercard_timeout_input: None,
+            _usercard_timeout_sub: None,
+            usercard_timeout_error: None,
             usercard_window: None,
             viewer_list: None,
             viewer_list_window: None,
@@ -1721,6 +1742,8 @@ impl ChatView {
         let login = card.login.clone();
         let platform = card.platform;
         self.usercard = Some(card);
+        // A stale custom-timeout error would misread as being about the new card.
+        self.usercard_timeout_error = None;
 
         // Show the card's OS window. Deferred to a task because opening a window
         // draws it synchronously, and that draw re-enters this entity for the
@@ -1794,13 +1817,24 @@ impl ChatView {
         };
         if let Some(handle) = view.read(cx).usercard_window {
             if child_window::focus_existing(handle, Some(&title), cx) {
+                // The same window now shows a different chatter: a leftover
+                // half-typed duration would apply to the wrong person.
+                let _ = handle.update(cx, |_, window, cx| {
+                    view.update(cx, |this, cx| {
+                        if let Some(input) = &this.usercard_timeout_input {
+                            input.update(cx, |state, cx| state.set_value("", window, cx));
+                        }
+                    });
+                });
                 return;
             }
             // The window closed under us — fall through and open a fresh one.
         }
 
         // Always opens centered over the chat window; drag it away from there.
-        let opened = child_window::open_centered(
+        // Bare (no built-in scroll surface): the header + mod actions stay put
+        // and only the recent-messages section scrolls.
+        let opened = child_window::open_centered_bare(
             &title,
             USERCARD_WINDOW_SIZE,
             USERCARD_MIN_SIZE,
@@ -1812,19 +1846,80 @@ impl ChatView {
         let Ok((handle, content)) = opened else {
             return;
         };
-        view.update(cx, |this, cx| {
-            this.usercard_window = Some(handle);
-            // The user closing the window (OS ✕) releases its content view;
-            // drop the card then — unless a newer window replaced it.
-            cx.observe_release(&content, move |this, _, cx| {
-                if this.usercard_window == Some(handle) {
-                    this.usercard_window = None;
-                    this.usercard = None;
-                }
+        let _ = handle.update(cx, |_, window, cx| {
+            view.update(cx, |this, cx| {
+                // The custom-timeout box is window-bound like all kit inputs, so
+                // it's created against this window (same rule as the viewer-list
+                // search); Enter applies it.
+                let input = cx.new(|cx| InputState::new(window, cx).placeholder("90s, 10m, 1h30m…"));
+                this._usercard_timeout_sub =
+                    Some(cx.subscribe_in(&input, window, Self::on_usercard_timeout_event));
+                this.usercard_timeout_input = Some(input);
+                this.usercard_window = Some(handle);
+                // The user closing the window (OS ✕) releases its content view;
+                // drop the card then — unless a newer window replaced it.
+                cx.observe_release(&content, move |this, _, cx| {
+                    if this.usercard_window == Some(handle) {
+                        this.usercard_window = None;
+                        this.usercard = None;
+                        this.usercard_timeout_input = None;
+                        this._usercard_timeout_sub = None;
+                        this.usercard_timeout_error = None;
+                    }
+                    cx.notify();
+                })
+                .detach();
                 cx.notify();
-            })
-            .detach();
+            });
         });
+    }
+
+    /// Applies the custom-timeout box on Enter.
+    fn on_usercard_timeout_event(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let InputEvent::PressEnter { .. } = event {
+            self.apply_custom_timeout(window, cx);
+        }
+    }
+
+    /// Parses the custom-timeout box and times the card's chatter out for that
+    /// long, or leaves an inline error under the box (unparseable, or over the
+    /// platform's cap — 2 weeks on Twitch, 7 days on Kick).
+    fn apply_custom_timeout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(card), Some(input)) = (&self.usercard, self.usercard_timeout_input.clone())
+        else {
+            return;
+        };
+        let platform = card.platform;
+        let login = card.login.clone();
+        let text = input.read(cx).value().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let max = max_timeout_secs(platform);
+        match bks_core::parse_duration(&text) {
+            None => {
+                self.usercard_timeout_error =
+                    Some(format!("Can't read \"{text}\" — try 90s, 10m, 1h30m, or 3d"));
+            }
+            Some(secs) if secs > max as u64 => {
+                self.usercard_timeout_error = Some(match platform {
+                    bks_core::Platform::Kick => "Kick timeouts max out at 7 days".to_string(),
+                    _ => "Twitch timeouts max out at 2 weeks".to_string(),
+                });
+            }
+            Some(secs) => {
+                self.usercard_moderate(platform, Mod::Timeout(secs as u32), &login);
+                self.usercard_timeout_error = None;
+                input.update(cx, |state, cx| state.set_value("", window, cx));
+            }
+        }
+        cx.notify();
     }
 
     /// Opens (or refreshes + refocuses) the Twitch viewer-list window for this
@@ -3487,7 +3582,11 @@ impl ChatView {
         let header = card.header(reveal, cx);
         let actions = self.usercard_actions(cx);
         let messages = self.usercard_message_list(cx);
+        // The window is bare (no built-in scroll surface): header + actions stay
+        // fixed and the recent-messages section fills and scrolls the rest.
         v_flex()
+            .size_full()
+            .p_4()
             .gap_3()
             .child(header)
             .child(actions)
@@ -3517,36 +3616,76 @@ impl ChatView {
         let is_broadcaster = card.is_broadcaster;
         let show_ban_timeout = !is_broadcaster && !card.is_moderator;
         let show_roles = !is_broadcaster && self.channel.read(cx).twitch_broadcaster;
+        if !show_ban_timeout && !show_roles {
+            return div().into_any_element();
+        }
         let login = card.login.clone();
 
-        // (label, seconds) timeout presets. Trimmed to the common spread so the
-        // chip row stays compact at the card's default width.
+        // (label, seconds) timeout presets — Chatterino's spread, through the
+        // full 2-week Twitch cap; presets over the platform's cap are dropped
+        // (Kick tops out at 7 days).
         const PRESETS: &[(&str, u32)] = &[
             ("1s", 1),
             ("1m", 60),
-            ("5m", 300),
             ("10m", 600),
             ("30m", 1800),
             ("1h", 3600),
+            ("4h", 14400),
             ("1d", 86400),
+            ("3d", 259_200),
+            ("1w", 604_800),
+            ("2w", 1_209_600),
         ];
+        let max = max_timeout_secs(platform);
 
         let timeout_chips = h_flex()
             .w_full()
             .flex_wrap()
             .gap_1()
-            .children(PRESETS.iter().map(|(label, secs)| {
-                let secs = *secs;
-                let to_login = login.clone();
-                Button::new(SharedString::from(format!("usercard-to-{label}")))
-                    .label(*label)
-                    .outline()
-                    .xsmall()
-                    .compact()
-                    .on_click(cx.listener(move |this, _, _, _| {
-                        this.usercard_moderate(platform, Mod::Timeout(secs), &to_login);
-                    }))
-            }));
+            .children(
+                PRESETS
+                    .iter()
+                    .filter(|(_, secs)| *secs <= max)
+                    .map(|(label, secs)| {
+                        let secs = *secs;
+                        let to_login = login.clone();
+                        Button::new(SharedString::from(format!("usercard-to-{label}")))
+                            .label(*label)
+                            .outline()
+                            .xsmall()
+                            .compact()
+                            .on_click(cx.listener(move |this, _, _, _| {
+                                this.usercard_moderate(platform, Mod::Timeout(secs), &to_login);
+                            }))
+                    }),
+            );
+
+        // The custom-duration row: a small parse-anything box ("90s", "1h30m",
+        // "3d") applied by Enter or its button. The input only exists while the
+        // usercard window is open (it's bound to it).
+        let custom_row = self.usercard_timeout_input.as_ref().map(|input| {
+            h_flex()
+                .w_full()
+                .gap_1()
+                .items_center()
+                .child(div().flex_1().child(Input::new(input).small()))
+                .child(
+                    Button::new("usercard-to-custom")
+                        .label("Timeout")
+                        .outline()
+                        .small()
+                        .compact()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.apply_custom_timeout(window, cx);
+                        })),
+                )
+        });
+        let custom_error = self.usercard_timeout_error.as_ref().map(|err| {
+            div()
+                .text_size(px(12.))
+                .text_color(cx.theme().danger)
+                .child(SharedString::from(err.clone()))
+        });
 
         // Ban + Unban, always present for both platforms.
         let ban_login = login.clone();
@@ -3620,8 +3759,9 @@ impl ChatView {
                 ))
         });
 
-        // A compact, sectioned layout: a "Timeout" chip row, a Ban/Unban row, and
-        // (Twitch only) a "Role" row with explicit Mod/Unmod/VIP/Unvip buttons.
+        // A compact, sectioned panel: the timeout chips + custom-duration row,
+        // a Ban/Unban row, and (Twitch broadcaster only) a "Role" row with
+        // explicit Mod/Unmod/VIP/Unvip buttons.
         let section_label = |text: &'static str| {
             div()
                 .text_size(px(11.))
@@ -3632,13 +3772,18 @@ impl ChatView {
         v_flex()
             .w_full()
             .gap_2()
+            .p_3()
+            .rounded_md()
+            .bg(cx.theme().secondary)
             .when(show_ban_timeout, |col| {
                 col.child(
                     v_flex()
                         .w_full()
                         .gap_1()
                         .child(section_label("Timeout"))
-                        .child(timeout_chips),
+                        .child(timeout_chips)
+                        .when_some(custom_row, |col, row| col.child(row))
+                        .when_some(custom_error, |col, err| col.child(err)),
                 )
                 .child(
                     h_flex()
@@ -3686,42 +3831,63 @@ impl ChatView {
         };
         let login = card.login.clone();
         let msgs = self.usercard_messages(&login, cx);
-        if msgs.is_empty() {
-            return div()
+
+        let content = if msgs.is_empty() {
+            div()
                 .text_size(px(13.))
                 .text_color(cx.theme().muted_foreground)
                 .child(SharedString::from("No recent messages in this channel."))
-                .into_any_element();
-        }
-        // A throwaway selection + ordinal: the card's messages aren't part of the
-        // log's drag-select, so they get their own (unused) selection context.
-        let selection = selectable::Selection::new();
-        selection.begin_frame();
-        let mut ordinal = 0usize;
-        let rows: Vec<gpui::AnyElement> = msgs
-            .iter()
-            .map(|msg| {
-                render::render_message(
-                    msg,
-                    render::RowFlags::default(),
-                    self.font_size,
-                    &selection,
-                    &mut ordinal,
-                    render::RowHandlers::default(),
-                )
                 .into_any_element()
-            })
-            .collect();
+        } else {
+            // A throwaway selection + ordinal: the card's messages aren't part of
+            // the log's drag-select, so they get their own (unused) selection
+            // context.
+            let selection = selectable::Selection::new();
+            selection.begin_frame();
+            let mut ordinal = 0usize;
+            let rows: Vec<gpui::AnyElement> = msgs
+                .iter()
+                .map(|msg| {
+                    render::render_message(
+                        msg,
+                        render::RowFlags::default(),
+                        self.font_size,
+                        &selection,
+                        &mut ordinal,
+                        render::RowHandlers::default(),
+                    )
+                    .into_any_element()
+                })
+                .collect();
+            div()
+                .id("usercard-messages")
+                .flex_1()
+                .min_h(px(0.))
+                .overflow_y_scroll()
+                .child(v_flex().gap_1().children(rows))
+                .into_any_element()
+        };
 
+        // Fills whatever height the window leaves under the header + actions;
+        // only this section scrolls.
         v_flex()
-            .id("usercard-messages")
+            .flex_1()
+            .min_h(px(0.))
             .gap_1()
             .pt_2()
             .border_t_1()
             .border_color(cx.theme().border)
-            .max_h(px(280.))
-            .overflow_y_scroll()
-            .children(rows)
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(format!(
+                        "Recent messages ({})",
+                        msgs.len()
+                    ))),
+            )
+            .child(content)
             .into_any_element()
     }
 }

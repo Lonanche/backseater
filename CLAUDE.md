@@ -233,6 +233,13 @@ platform = implement one trait + one message builder, with zero UI changes**.
   silently swaps them for that display's big `default_bounds()` when the bounds' center is
   elsewhere, which broke opening over a chat window on a secondary monitor.
   Closing the main window quits the app (`on_window_closed` → `quit`) so child windows don't orphan.
+  The **usercard** window is bare (`open_centered_bare`): header + moderation panel stay fixed and only
+  the recent-messages section scrolls. Its moderation panel has Chatterino-style preset timeout chips
+  (1s → 2w, filtered to the platform's cap — Helix rejects > 2 weeks, Kick's ban API > 7 days;
+  `chatview.rs::max_timeout_secs`) plus a **custom-duration box** (a window-bound `InputState` like the
+  viewer-list search, created in `show_usercard_window`; Enter or its Timeout button applies, bad input /
+  over-cap shows an inline error). Durations parse via `bks_core::parse_duration` ("600", "90s",
+  "1h30m", "3d", "1w"); `/timeout` accepts the same strings.
 - The **active tab is persisted** (`tabs::save_active`/`load_active`, a separate `active_tab` store) and
   restored on launch, clamped in case that tab is gone.
 - **7TV / BTTV / FFZ** emotes on Twitch (all three providers registered in `bridge.rs::providers()`),
@@ -280,7 +287,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
   back onto the next stable. CI runs in ~5 min warm (`rust-cache`, `shared-key: build`); a
   version bump rewrites Cargo.lock → cache re-key → that one run takes ~15 min (expected, once
   per release).
-- 224 passing unit tests (`cargo test`).
+- 236 passing unit tests (`cargo test`).
 
 **Not done yet (designed for, not built):**
 - TikTok connector.

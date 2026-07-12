@@ -11,7 +11,8 @@ use bks_kick::KickUserInfo;
 use bks_twitch::{SubAge, TwitchUserCard};
 use gpui::prelude::*;
 use gpui::{div, img, px, rgb, FontWeight, SharedString};
-use gpui_component::{h_flex, v_flex, ActiveTheme};
+use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::{h_flex, v_flex, ActiveTheme, Sizable};
 
 /// Async-loaded account stats for the card header.
 pub enum Stats {
@@ -107,15 +108,50 @@ impl UserCard {
         let name_color = self.color.unwrap_or(0x9147ff);
 
         let mut lines = v_flex().gap_1();
+        // Name row: the colored display name with the platform's logo after it.
         lines = lines.child(
-            div()
-                .font_weight(FontWeight::BOLD)
-                .text_size(px(18.))
-                .text_color(rgb(name_color))
-                .child(SharedString::from(self.display_name.clone())),
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(18.))
+                        .text_color(rgb(name_color))
+                        .child(SharedString::from(self.display_name.clone())),
+                )
+                .child(crate::platform_icon(self.platform, 14.)),
         );
-        if !self.user_id.is_empty() {
-            lines = lines.child(stat_line(cx, &format!("ID: {}", self.user_id)));
+        // Identity line: the login when it differs from the display name
+        // (localized Twitch names), and the numeric id with a copy button.
+        {
+            let mut parts = Vec::new();
+            if !self.login.is_empty() && !self.login.eq_ignore_ascii_case(&self.display_name) {
+                parts.push(self.login.clone());
+            }
+            if !self.user_id.is_empty() {
+                parts.push(format!("ID: {}", self.user_id));
+            }
+            if !parts.is_empty() {
+                let mut row = h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(stat_line(cx, &parts.join(" · ")));
+                if !self.user_id.is_empty() {
+                    let id = self.user_id.clone();
+                    row = row.child(
+                        Button::new("usercard-copy-id")
+                            .label("⧉")
+                            .ghost()
+                            .xsmall()
+                            .compact()
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(id.clone()));
+                            }),
+                    );
+                }
+                lines = lines.child(row);
+            }
         }
 
         let avatar_url = match &self.stats {
@@ -178,7 +214,7 @@ impl UserCard {
         let avatar = if crate::streamer_mode::is_active() && !self.avatar_revealed {
             div()
                 .id("usercard-avatar-hidden")
-                .size(px(56.))
+                .size(px(AVATAR_SIZE))
                 .rounded_md()
                 .bg(cx.theme().secondary)
                 .flex_shrink_0()
@@ -203,7 +239,7 @@ impl UserCard {
                 .into_any_element()
         } else {
             div()
-                .size(px(56.))
+                .size(px(AVATAR_SIZE))
                 .rounded_md()
                 .bg(cx.theme().secondary)
                 .flex_shrink_0()
@@ -211,7 +247,7 @@ impl UserCard {
                     slot.child(
                         img(SharedString::from(url))
                             .id("usercard-avatar")
-                            .size(px(56.))
+                            .size(px(AVATAR_SIZE))
                             .rounded_md(),
                     )
                 })
@@ -230,7 +266,10 @@ impl UserCard {
 
 /// Minimum header height (px), sized to the fully-loaded stat-line count so the
 /// header keeps a constant height from the loading state through to loaded.
-const HEADER_MIN_HEIGHT: f32 = 110.0;
+const HEADER_MIN_HEIGHT: f32 = 112.0;
+
+/// Avatar edge length (px) in the header.
+const AVATAR_SIZE: f32 = 64.0;
 
 /// A muted single-line stat in the header.
 fn stat_line(cx: &mut gpui::App, text: &str) -> gpui::AnyElement {

@@ -598,14 +598,16 @@ impl Controller {
             },
             // Timeout is in seconds here; converted to minutes for Kick downstream.
             "timeout" => match args.as_slice() {
-                [user, secs, ..] => match secs.parse::<u32>() {
-                    Ok(secs) => self.moderate(ModAction::Timeout {
+                [user, duration, ..] => match bks_core::parse_duration(duration)
+                    .and_then(|secs| u32::try_from(secs).ok())
+                {
+                    Some(secs) => self.moderate(ModAction::Timeout {
                         user: user.to_string(),
                         secs,
                     }),
-                    Err(_) => self.notice("usage: /timeout <user> <seconds>"),
+                    None => self.notice("usage: /timeout <user> <duration — 600, 30m, 1h, 3d, 1w>"),
                 },
-                _ => self.notice("usage: /timeout <user> <seconds>"),
+                _ => self.notice("usage: /timeout <user> <duration — 600, 30m, 1h, 3d, 1w>"),
             },
             "unban" | "untimeout" => match args.first() {
                 Some(user) => self.moderate(ModAction::Unban {
