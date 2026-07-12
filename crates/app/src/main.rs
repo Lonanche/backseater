@@ -442,6 +442,20 @@ struct TabEntry {
     view: Entity<ChatView>,
 }
 
+/// Compiles mention terms into a matcher with the per-term mute flags applied
+/// (`muted` holds normalized terms). Every matcher build goes through this so
+/// no path can drop the mute list — startup restore once built with
+/// `MentionMatcher::new` (all-loud) and muted terms rang again after a relaunch.
+fn mention_matcher(
+    terms: impl IntoIterator<Item = String>,
+    muted: &[String],
+) -> bks_core::MentionMatcher {
+    bks_core::MentionMatcher::with_sound(terms.into_iter().map(|t| {
+        let sound = !muted.contains(&bks_core::normalize_term(&t));
+        (t, sound)
+    }))
+}
+
 /// Allocates a [`TabEntry::id`]. A process-wide counter so every path that
 /// creates a tab yields a unique id.
 fn next_tab_id() -> u64 {
@@ -690,11 +704,12 @@ impl BackseaterApp {
             .into_iter()
             .map(|config| {
                 // This tab's matcher/filter = globals ∪ this tab's own terms.
-                let mentions = bks_core::MentionMatcher::new(
+                let mentions = mention_matcher(
                     global_mention_terms
                         .iter()
                         .cloned()
                         .chain(config.custom_mentions.iter().cloned()),
+                    &settings.muted_mentions,
                 );
                 let ignore = bks_core::IgnoreList::new(config.ignored_terms.iter().cloned());
                 Self::make_tab(
@@ -954,18 +969,13 @@ impl BackseaterApp {
     /// (union). Built fresh so it tracks login + settings + tab-config changes.
     fn tab_mentions(&self, config: &TabConfig) -> bks_core::MentionMatcher {
         let state = self.session.login_state();
-        let muted = &self.settings.muted_mentions;
         let terms = state
             .twitch
             .into_iter()
             .chain(state.kick)
             .chain(self.settings.custom_mentions.iter().cloned())
-            .chain(config.custom_mentions.iter().cloned())
-            .map(|t| {
-                let sound = !muted.contains(&bks_core::normalize_term(&t));
-                (t, sound)
-            });
-        bks_core::MentionMatcher::with_sound(terms)
+            .chain(config.custom_mentions.iter().cloned());
+        mention_matcher(terms, &self.settings.muted_mentions)
     }
 
     /// The **global** ignore list, compiled from the app-wide ignored terms. This
