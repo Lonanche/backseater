@@ -62,15 +62,21 @@ impl Platform {
     /// aspects center inside equal space, so the timestamp after the icon
     /// starts at the same x on every row no matter the platform.
     pub fn icon_slot_width(nominal: f32) -> f32 {
-        [
-            Platform::Twitch,
-            Platform::Kick,
-            Platform::YouTube,
-            Platform::TikTok,
-        ]
-        .into_iter()
-        .map(|p| p.icon_size(nominal).0)
-        .fold(0.0, f32::max)
+        // icon_size is linear in `nominal`, so the widest platform's factor is
+        // a constant — computed once, not re-folded per chat row per frame.
+        static FACTOR: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+        nominal
+            * FACTOR.get_or_init(|| {
+                [
+                    Platform::Twitch,
+                    Platform::Kick,
+                    Platform::YouTube,
+                    Platform::TikTok,
+                ]
+                .into_iter()
+                .map(|p| p.icon_size(1.0).0)
+                .fold(0.0, f32::max)
+            })
     }
 
     /// A single-character glyph marking a message's source. Used as the icon when

@@ -340,11 +340,28 @@ pub fn panel_bg() -> u32 {
     palette().panel_bg
 }
 
+/// Whether the chat background is dark, memoized on the bg value: the hover
+/// tints and panel border ask this per visible row per frame, and `luminance`'s
+/// three `powf`s are the expensive part. The packed color and verdict share one
+/// atomic so a theme change atomically re-keys the cache.
+fn chat_bg_is_dark() -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CACHE: AtomicU64 = AtomicU64::new(u64::MAX);
+    let bg = chat_bg();
+    let cached = CACHE.load(Ordering::Relaxed);
+    if cached != u64::MAX && (cached >> 32) as u32 == bg {
+        return cached & 1 == 1;
+    }
+    let dark = luminance(bg) < 0.5;
+    CACHE.store((u64::from(bg) << 32) | u64::from(dark), Ordering::Relaxed);
+    dark
+}
+
 /// The subtle full-width tint a chat row gets while hovered. A translucent
 /// overlay (not a palette field) so it adapts to any custom theme: a touch of
 /// white on a dark log, a touch of black on a light one.
 pub(crate) fn row_hover() -> gpui::Hsla {
-    if luminance(chat_bg()) < 0.5 {
+    if chat_bg_is_dark() {
         gpui::white().opacity(0.04)
     } else {
         gpui::black().opacity(0.04)
@@ -354,11 +371,20 @@ pub(crate) fn row_hover() -> gpui::Hsla {
 /// A hover tint for chrome (tab chips, small buttons) — like [`row_hover`] but a
 /// step stronger so it reads on the already-lifted chrome surfaces.
 pub fn chrome_hover() -> gpui::Hsla {
-    if luminance(chat_bg()) < 0.5 {
+    if chat_bg_is_dark() {
         gpui::white().opacity(0.07)
     } else {
         gpui::black().opacity(0.06)
     }
+}
+
+/// An opaque hover tone for chrome floating over the log (the collapsed-pin
+/// chip): the panel surface nudged toward the foreground. The translucent
+/// [`chrome_hover`] can't be used there — a hover style *replaces* the base
+/// background, so a see-through hover lets the occluded rows bleed through.
+pub(crate) fn panel_hover() -> u32 {
+    let toward = if chat_bg_is_dark() { 0xffffff } else { 0x000000 };
+    blend(palette().panel_bg, toward, 0.07)
 }
 
 /// The accent color for the active tab's indicator line, theme-aware.
@@ -411,11 +437,7 @@ pub(crate) fn highlight_automod() -> (u32, u32) {
 /// the panel surface nudged toward the foreground so the edge reads on both
 /// dark and light themes.
 pub(crate) fn panel_border() -> u32 {
-    let toward = if luminance(chat_bg()) < 0.5 {
-        0xffffff
-    } else {
-        0x000000
-    };
+    let toward = if chat_bg_is_dark() { 0xffffff } else { 0x000000 };
     blend(palette().panel_bg, toward, 0.14)
 }
 

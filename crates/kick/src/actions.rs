@@ -45,7 +45,7 @@ pub struct AuthExpired;
 
 impl std::fmt::Display for AuthExpired {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Kick login expired — please log in again (/kicklogin)")
+        f.write_str("Kick login expired — please log in again (Settings → Account)")
     }
 }
 

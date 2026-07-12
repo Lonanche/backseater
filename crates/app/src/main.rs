@@ -1785,21 +1785,7 @@ impl BackseaterApp {
                     .w(px(22.))
                     .flex()
                     .justify_center()
-                    .child(match platform.icon_url() {
-                        Some(url) => {
-                            let (w, h) = platform.icon_size(20.);
-                            img(SharedString::from(url))
-                                .h(px(h))
-                                .w(px(w))
-                                .flex_none()
-                                .into_any_element()
-                        }
-                        None => div()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(gpui::rgb(platform.color().to_u32()))
-                            .child(SharedString::from(platform.glyph()))
-                            .into_any_element(),
-                    }),
+                    .child(platform_icon(platform, 20.)),
             )
             .child(
                 v_flex()
@@ -3950,13 +3936,14 @@ struct TipPlatform {
     viewers: Option<u64>,
 }
 
-/// A small platform logo for the tooltip header and the chat status bar — the
-/// real logo when the platform ships one ([`Platform::icon_url`]), else its
-/// brand-colored glyph. Fixed 16px (chrome, not a font-scaled chat row).
-pub(crate) fn tip_platform_icon(platform: bks_core::Platform) -> gpui::AnyElement {
+/// A small platform logo for chrome (tooltip headers, the status bar, account
+/// rows) — the real logo when the platform ships one ([`Platform::icon_url`]),
+/// else its brand-colored glyph, at a fixed `size` (chrome, not a font-scaled
+/// chat row).
+pub(crate) fn platform_icon(platform: bks_core::Platform, size: f32) -> gpui::AnyElement {
     match platform.icon_url() {
         Some(url) => {
-            let (w, h) = platform.icon_size(16.);
+            let (w, h) = platform.icon_size(size);
             img(SharedString::from(url))
                 .h(px(h))
                 .w(px(w))
@@ -3991,7 +3978,7 @@ fn live_tooltip_content(platforms: &[TipPlatform]) -> gpui::Div {
     }
     for (idx, p) in set.into_iter().enumerate() {
         if idx > 0 {
-            col = col.child(div().h(px(1.)).w_full().bg(gpui::rgb(render::panel_border())));
+            col = col.child(card_divider());
         }
         let live = matches!(&p.status, Some(info) if info.live);
         // While live, prefer the stream's own watch link (YouTube's
@@ -4005,7 +3992,7 @@ fn live_tooltip_content(platforms: &[TipPlatform]) -> gpui::Div {
         let mut header = h_flex()
             .gap_2()
             .items_center()
-            .child(tip_platform_icon(p.platform))
+            .child(platform_icon(p.platform, 16.))
             .child(
                 div()
                     .id(SharedString::from(format!(

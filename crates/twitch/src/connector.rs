@@ -104,7 +104,7 @@ impl TwitchSource {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("not connected"))?;
         if self.auth.is_none() {
-            anyhow::bail!("not logged in (run /login first)");
+            anyhow::bail!("not logged in (log in via Settings → Account)");
         }
         reg.send(text.to_string(), reply_parent_id);
         Ok(())

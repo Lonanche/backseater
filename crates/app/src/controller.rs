@@ -673,7 +673,7 @@ impl Controller {
                                 this.notice(format!("twitch: {err:#}"));
                             }
                         }
-                        None => this.notice("log into Twitch to reply: /login"),
+                        None => this.notice("log into Twitch to reply (Settings → Account)"),
                     }
                 }
                 bks_core::Platform::Kick => match this.session.kick_actions().await {
@@ -681,7 +681,7 @@ impl Controller {
                         this.send_kick(&actions, &text, Some(&reply.message_id))
                             .await
                     }
-                    None => this.notice("log into Kick to reply: /kicklogin"),
+                    None => this.notice("log into Kick to reply (Settings → Account)"),
                 },
                 _ => this.notice("replies aren't supported on this platform"),
             }

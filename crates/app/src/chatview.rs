@@ -791,6 +791,19 @@ impl ChatView {
             // Re-measure so a changed row's new height is picked up (rare event).
             ChannelEvent::Changed => {
                 self.list_state.reset(self.channel.read(cx).len());
+                // Pins may have changed: drop dismissals whose pin is gone
+                // (unpinned/replaced/expired) so the restore chip only ever
+                // represents — and restores — pins that are still active.
+                if !self.dismissed_pins.is_empty() {
+                    let active: Vec<(bks_core::Platform, String)> = self
+                        .channel
+                        .read(cx)
+                        .pins
+                        .iter()
+                        .map(|(p, pin)| (*p, pin.message.id.clone()))
+                        .collect();
+                    self.dismissed_pins.retain(|key| active.contains(key));
+                }
             }
             // A viewer count moved: only the status bar (chrome outside the
             // cached log) reads it — repaint without touching the log's
@@ -1164,11 +1177,6 @@ impl ChatView {
         cx.notify();
     }
 
-
-
-    /// Handles a row's 📌 button: pins that message on its platform. Twitch pins
-    /// by message id (Helix); Kick's endpoint wants the original message object
-    /// back, rebuilt from our copy of the row.
     /// Opens the pin confirmation dialog for message `msg_id`: the message is
     /// shown as it will appear pinned, and only Pin actually pins it.
     fn confirm_pin(&self, msg_id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1224,16 +1232,37 @@ impl ChatView {
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
-                    entity.update(cx, |this, _| match platform {
-                        bks_core::Platform::Twitch => this.controller.unpin_twitch(id.clone()),
-                        bks_core::Platform::Kick => this.controller.unpin_kick(),
-                        _ => {}
+                    entity.update(cx, |this, cx| {
+                        // The pin can be replaced while the dialog is open (a
+                        // new PinMessage overwrites the platform's slot): only
+                        // unpin if the previewed message is still the active
+                        // pin, else the confirm would remove a pin the user
+                        // never saw.
+                        let still_active = this
+                            .channel
+                            .read(cx)
+                            .pins
+                            .get(&platform)
+                            .is_some_and(|pin| pin.message.id == id);
+                        if !still_active {
+                            return;
+                        }
+                        match platform {
+                            bks_core::Platform::Twitch => {
+                                this.controller.unpin_twitch(id.clone())
+                            }
+                            bks_core::Platform::Kick => this.controller.unpin_kick(),
+                            _ => {}
+                        }
                     });
                     true
                 })
         });
     }
 
+    /// Pins `msg_id` on its platform. Twitch pins by message id (Helix); Kick's
+    /// endpoint wants the original message object back, rebuilt from our copy
+    /// of the row.
     fn pin_message(&self, msg_id: &str, cx: &App) {
         let Some(msg) = self.message_by_id(msg_id, cx) else {
             return;
@@ -1382,7 +1411,7 @@ impl ChatView {
                     h_flex()
                         .gap_1p5()
                         .items_center()
-                        .child(crate::tip_platform_icon(platform))
+                        .child(crate::platform_icon(platform, 16.))
                         .child(div().font_weight(FontWeight::BOLD).child(channel))
                         // A real dot (not the ● glyph, whose size and vertical
                         // position drift with the chat font).
@@ -1510,7 +1539,10 @@ impl ChatView {
                         .shadow_sm()
                         .text_size(px(self.font_size * 0.8))
                         .cursor_pointer()
-                        .hover(|s| s.bg(render::chrome_hover()))
+                        // Opaque — a hover style replaces the base bg, and the
+                        // translucent chrome_hover would let the rows this chip
+                        // occludes bleed through.
+                        .hover(|s| s.bg(gpui::rgb(render::panel_hover())))
                         .tooltip(|window, cx| {
                             Tooltip::new("Show the pinned message").build(window, cx)
                         })
@@ -2863,7 +2895,8 @@ impl ChatView {
                     return div().into_any_element();
                 };
                 // Per-row gap + the horizontal inset the old rows container
-                // carried (event pills render `flush` — see `render_event`).
+                // carried (`panel = true`: each pill draws its own tint — see
+                // `render_event`).
                 div()
                     .w_full()
                     .min_w_0()
