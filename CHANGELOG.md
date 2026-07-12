@@ -3,6 +3,33 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.3.0-beta.1
+
+- Redesigned chat surface: deeper dark/light palettes, full-width accent-bar highlights
+  for mentions / first messages / events / going-live, a "FIRST MESSAGE" pill,
+  browser-style tab chips, and auto-hiding scrollbars.
+- The message box moved inside the chat panel, with the send-target toggle and emote
+  button built into it; the viewer-list button moved to the new status bar.
+- New live status bar above chat: each live platform's icon, channel, and viewer count
+  (animated rolling number, plus a Total when more than one platform is live). Toggle
+  it in Appearance settings.
+- Redesigned settings window: an icon category rail, grouped setting cards with
+  switches, and platform-logo account rows. Tab settings got the same layout
+  (Channels / Panels / Highlights pages).
+- Logging in and out moved to Settings → Account; the /login, /logout, /kicklogin,
+  and /kicklogout commands were removed.
+- Redesigned events panel: compact rows (kind-colored dot, timestamp, platform logo,
+  bold actor + condensed detail), Twitch mass-gift recipients collapsed under one
+  expandable announcement, condensed watch-streak rows, gifters' lifetime gift totals
+  on mass-gift rows, and per-tab "Hide sub messages" / "Collapse gift batches"
+  switches. Kick gift bombs in chat name at most three recipients plus "and N others".
+- Pinned messages: floating collapsible banner cards, and pinning/unpinning now
+  confirms with a message preview (in popout windows too).
+- The tab live tooltip is a compact stream card, so long category names no longer
+  overflow it.
+- The global Mentions tab can be renamed in Highlights settings.
+- Fixed: muted mention terms played the alert sound again after an app restart.
+
 ## v0.2.2
 
 - New app logo (window, taskbar, installer, and shortcuts).
