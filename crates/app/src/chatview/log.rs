@@ -165,6 +165,11 @@ impl Render for LogView {
             // so a selection's endpoints stay valid as the visible window
             // shifts; the stride leaves room for every token in a row.
             let mut ordinal = ix * ORDINAL_STRIDE;
+            // Special rows carry a `(tint, accent bar)` pair the wrapper below
+            // paints full-bleed across the log's width; the row content itself
+            // renders bare (see `RowFlags::external_highlight` / the renderers'
+            // panel modes).
+            let mut highlight: Option<(u32, u32)> = None;
             let inner = match row {
                 Row::Message { msg } => {
                     // This view's own filters (shared buffer, per-view display):
@@ -175,6 +180,13 @@ impl Render for LogView {
                         return div().into_any_element();
                     }
                     let mentioned = this.mentions.matches(&msg.raw_text);
+                    highlight = if mentioned {
+                        Some(render::highlight_mention())
+                    } else if msg.first_message {
+                        Some(render::highlight_first_message())
+                    } else {
+                        None
+                    };
                     let name_click = name_click_for(&render_entity, msg);
                     let reply_click = reply_click_for(&render_entity, msg);
                     // The 📌 button only renders for rows the user can moderate and
@@ -191,6 +203,7 @@ impl Render for LogView {
                         render::RowFlags {
                             struck,
                             mentioned,
+                            external_highlight: true,
                         },
                         font_size,
                         &this.selection,
@@ -208,6 +221,7 @@ impl Render for LogView {
                 }
                 Row::System(text) => render::render_system(text, font_size).into_any_element(),
                 Row::Error(text) => {
+                    highlight = Some(render::highlight_error());
                     render::render_error(text, font_size, &this.selection, &mut ordinal)
                         .into_any_element()
                 }
@@ -218,56 +232,82 @@ impl Render for LogView {
                     text,
                     message,
                     ..
-                } => render::render_event(
-                    *platform,
-                    *kind,
-                    text,
-                    None,
-                    message.as_deref(),
-                    font_size,
-                    false,
-                )
-                .into_any_element(),
+                } => {
+                    highlight = Some(render::highlight_event(*kind));
+                    render::render_event(
+                        *platform,
+                        *kind,
+                        text,
+                        None,
+                        message.as_deref(),
+                        font_size,
+                        false,
+                    )
+                    .into_any_element()
+                }
                 Row::Live {
                     platform,
                     live,
                     title,
-                } => render::render_live(*platform, *live, title, font_size).into_any_element(),
+                } => {
+                    highlight = Some(render::highlight_live(*live));
+                    render::render_live(*platform, *live, title, font_size).into_any_element()
+                }
                 Row::AutoMod {
                     message_id,
                     user,
                     text,
                     reason,
                     resolved,
-                } => render::render_automod(
-                    message_id,
-                    user,
-                    text,
-                    reason,
-                    resolved.as_ref().map(|(s, m)| (*s, m.as_str())),
-                    font_size,
-                    &this.selection,
-                    &mut ordinal,
-                    automod_click.clone(),
-                )
-                .into_any_element(),
+                } => {
+                    highlight = Some(render::highlight_automod());
+                    render::render_automod(
+                        message_id,
+                        user,
+                        text,
+                        reason,
+                        resolved.as_ref().map(|(s, m)| (*s, m.as_str())),
+                        font_size,
+                        &this.selection,
+                        &mut ordinal,
+                        automod_click.clone(),
+                    )
+                    .into_any_element()
+                }
             };
             // Per-row bottom gap (the list lays rows back-to-back; it has no
-            // flex `gap`). Width is given by the list; `min_w_0` lets rows wrap.
-            // A uniform left inset (`pl_2`) gives every row breathing room from
-            // the edge and is the shared content-left-edge that highlighted rows
-            // align to (their tinted pill bleeds back to here with a negative
-            // margin, so its text still lines up with normal rows). `pr` is
-            // applied per row (not on the list, where `Auto` sizing would clip
-            // rather than reflow) so the right gutter narrows each row's content
-            // and the reply button clears the thumb.
+            // flex `gap`), kept *outside* the tinted box so highlights hug their
+            // row. The inner box owns the shared insets: every row carries the
+            // left accent border (transparent when un-highlighted, so text never
+            // shifts) and the right gutter that keeps content clear of the
+            // scrollbar thumb — while a highlight's tint spans the wrapper's
+            // full width, edge-to-edge under the thumb. `pr` is applied per row
+            // (not on the list, where `Auto` sizing would clip rather than
+            // reflow).
             div()
                 .w_full()
                 .min_w_0()
                 .pb_1()
-                .pl_2()
-                .pr(px(SCROLLBAR_WIDTH))
-                .child(inner)
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .pl(px(10.))
+                        .pr(px(SCROLLBAR_WIDTH))
+                        .border_l_2()
+                        .border_color(gpui::transparent_black())
+                        .map(|row| match highlight {
+                            Some((bg, accent)) => row
+                                .py_0p5()
+                                .bg(gpui::rgb(bg))
+                                .border_color(gpui::rgb(accent)),
+                            // A whisper of tint while the pointer is over the
+                            // row, so the row under the cursor (and its hover
+                            // actions) reads at a glance.
+                            None => row.hover(|s| s.bg(render::row_hover())),
+                        })
+                        .child(inner),
+                )
                 .into_any_element()
         })
         // `Auto` sizing lays the list out with a bare default style, so it must be
@@ -291,10 +331,9 @@ impl Render for LogView {
             .min_w_0()
             .min_h_0()
             .relative() // anchors the absolutely-positioned "jump to latest" pill.
-            // Pad every side except the right: the right side is reserved for the
-            // overlay scrollbar (the list adds `pr` so rows clear the thumb), so the
-            // thumb can sit flush at the panel's right edge.
-            .pl_2()
+            // Vertical padding only: each row owns its horizontal insets (see the
+            // list closure), so a highlighted row's tint can bleed edge-to-edge —
+            // the right side stays clear for the overlay scrollbar the same way.
             .pt_2()
             .pb_2()
             // Slightly lighter than the window background so dark usernames (also

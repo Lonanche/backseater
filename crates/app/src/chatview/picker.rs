@@ -506,8 +506,11 @@ impl ChatView {
             .py_1()
             .rounded_md()
             .cursor_pointer()
-            .bg(cx.theme().background)
-            .hover(|s| s.bg(cx.theme().secondary))
+            .text_color(cx.theme().muted_foreground)
+            .hover(|s| {
+                s.bg(crate::render::chrome_hover())
+                    .text_color(cx.theme().foreground)
+            })
             .child(SharedString::from("☺"))
             .on_mouse_down(
                 MouseButton::Left,

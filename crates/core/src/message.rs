@@ -39,6 +39,22 @@ impl Platform {
         }
     }
 
+    /// The logo's display size `(w, h)` for a nominal square icon size: each
+    /// bundled asset keeps its natural aspect instead of being stretched into a
+    /// square (Twitch is 55×64, YouTube's play button 57×41), and the wide
+    /// YouTube logo is optically balanced a touch shorter so its visual mass
+    /// matches the square-ish ones.
+    pub fn icon_size(self, nominal: f32) -> (f32, f32) {
+        match self {
+            Platform::Twitch => (nominal * 55.0 / 64.0, nominal),
+            Platform::YouTube => {
+                let h = nominal * 0.84;
+                (h * 57.0 / 41.0, h)
+            }
+            _ => (nominal, nominal),
+        }
+    }
+
     /// A single-character glyph marking a message's source. Used as the icon when
     /// [`icon_url`](Self::icon_url) has no logo. Kept here (not in the UI) so each
     /// platform defines its own indicator.

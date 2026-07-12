@@ -416,22 +416,19 @@ struct DraggedTab {
 impl Render for DraggedTab {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Mirror the chip in `tab_strip` so it looks like you're carrying the tab.
-        let bg = if self.selected {
-            gpui::rgb(render::tab_active_bg())
-        } else {
-            gpui::rgb(render::tab_inactive_bg())
-        };
         h_flex()
             .px_3()
-            .py_2()
+            .py_1p5()
             .gap_2()
             .items_center()
-            .bg(bg)
+            .rounded_md()
+            .bg(gpui::rgb(render::panel_bg()))
             // The drag overlay doesn't inherit the themed text color (the label
             // otherwise renders in the gpui default, near-invisible on the chip).
             .text_color(cx.theme().foreground)
             .border_1()
             .border_color(cx.theme().border)
+            .shadow_md()
             .when(self.selected, |this| this.font_weight(FontWeight::BOLD))
             .child(self.label.clone())
             .child(
@@ -2805,9 +2802,9 @@ impl BackseaterApp {
             .py_1()
             .gap_2()
             .items_center()
-            .bg(cx.theme().warning.opacity(0.15))
-            .border_b_1()
-            .border_color(cx.theme().border)
+            .bg(cx.theme().warning.opacity(0.12))
+            .border_l_2()
+            .border_color(cx.theme().warning)
             .text_size(px(13.))
             .child(SharedString::from("🕶"))
             .child(div().flex_1().min_w_0().child(SharedString::from(label)))
@@ -2890,9 +2887,9 @@ impl BackseaterApp {
             .py_1()
             .gap_2()
             .items_center()
-            .bg(cx.theme().info.opacity(0.15))
-            .border_b_1()
-            .border_color(cx.theme().border)
+            .bg(cx.theme().info.opacity(0.12))
+            .border_l_2()
+            .border_color(cx.theme().info)
             .text_size(px(13.))
             .child(SharedString::from("⭳"))
             .child(div().flex_1().min_w_0().child(SharedString::from(label)))
@@ -2946,9 +2943,9 @@ impl BackseaterApp {
             .py_1()
             .gap_2()
             .items_center()
-            .bg(cx.theme().success.opacity(0.15))
-            .border_b_1()
-            .border_color(cx.theme().border)
+            .bg(cx.theme().success.opacity(0.12))
+            .border_l_2()
+            .border_color(cx.theme().success)
             .text_size(px(13.))
             .child(div().flex_1().min_w_0().child(SharedString::from(format!(
                 "Updated to v{version}"
@@ -2988,21 +2985,27 @@ impl BackseaterApp {
     /// unchecks the setting) and a right-click "Open in new window"; no drag, no
     /// per-tab settings.
     fn mentions_tab_chip(&self, selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let bg = if selected {
-            gpui::rgb(render::tab_active_bg())
-        } else {
-            gpui::rgb(render::tab_inactive_bg())
-        };
         h_flex()
             .id("mentions-tab")
             .flex_none()
             .px_3()
-            .py_2()
+            .py_1p5()
+            .mt_1()
+            .mr_0p5()
             .gap_2()
             .items_center()
-            .bg(bg)
-            .border_r_1()
-            .border_color(cx.theme().border)
+            .rounded_t_md()
+            .border_t_2()
+            .map(|chip| {
+                if selected {
+                    chip.bg(gpui::rgb(render::tab_active_bg()))
+                        .border_color(gpui::rgb(render::accent()))
+                } else {
+                    chip.border_color(gpui::transparent_black())
+                        .text_color(cx.theme().muted_foreground)
+                        .hover(|s| s.bg(render::chrome_hover()))
+                }
+            })
             .cursor_pointer()
             .when(selected, |this| this.font_weight(FontWeight::BOLD))
             .child(SharedString::from("@ Mentions"))
@@ -3015,7 +3018,12 @@ impl BackseaterApp {
                 div()
                     .id("mentions-tab-close")
                     .px_1()
+                    .rounded_sm()
                     .text_color(cx.theme().muted_foreground)
+                    .hover(|s| {
+                        s.bg(render::chrome_hover())
+                            .text_color(cx.theme().foreground)
+                    })
                     .child(SharedString::from("✕"))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -3098,14 +3106,6 @@ impl BackseaterApp {
             .enumerate()
             .map(|(ix, tab)| {
                 let selected = ix == active && !mentions_selected;
-                // Theme-aware tab colors: the active chip matches the chat surface
-                // below it (so it reads as the front tab), the rest are recessed —
-                // instead of the kit's near-black `background` that looked like a hole.
-                let bg = if selected {
-                    gpui::rgb(render::tab_active_bg())
-                } else {
-                    gpui::rgb(render::tab_inactive_bg())
-                };
                 let label = SharedString::from(tab.config.display_name());
                 let being_dragged = self.dragging == Some(ix);
                 // Snapshot each set platform's latest live status for the hover
@@ -3138,15 +3138,32 @@ impl BackseaterApp {
                 let any_live = tip_platforms
                     .iter()
                     .any(|p| !p.channel.is_empty() && p.status.as_ref().is_some_and(|s| s.live));
+                // Browser-style chip: rounded top corners, flush to the content
+                // below. The active chip takes the chat surface's color (so it
+                // reads as the front tab, connected to the log) plus a 2px accent
+                // line on top; inactive chips sit flat on the bar and lift on
+                // hover. Every chip carries the top border (transparent when
+                // unselected) so selection doesn't shift the text down 2px.
                 h_flex()
                     .id(("tab", ix))
                     .px_3()
-                    .py_2()
+                    .py_1p5()
+                    .mt_1()
+                    .mr_0p5()
                     .gap_2()
                     .items_center()
-                    .bg(bg)
-                    .border_r_1()
-                    .border_color(cx.theme().border)
+                    .rounded_t_md()
+                    .border_t_2()
+                    .map(|chip| {
+                        if selected {
+                            chip.bg(gpui::rgb(render::tab_active_bg()))
+                                .border_color(gpui::rgb(render::accent()))
+                        } else {
+                            chip.border_color(gpui::transparent_black())
+                                .text_color(cx.theme().muted_foreground)
+                                .hover(|s| s.bg(render::chrome_hover()))
+                        }
+                    })
                     .cursor_pointer()
                     // Anchor for the tooltip overlay (absolute, just below the chip).
                     .relative()
@@ -3230,7 +3247,12 @@ impl BackseaterApp {
                         div()
                             .id(("close", ix))
                             .px_1()
+                            .rounded_sm()
                             .text_color(cx.theme().muted_foreground)
+                            .hover(|s| {
+                                s.bg(render::chrome_hover())
+                                    .text_color(cx.theme().foreground)
+                            })
                             .child(SharedString::from("✕"))
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -3295,10 +3317,6 @@ impl BackseaterApp {
         let can_left = offset_x < px(-1.);
         let can_right = offset_x > -max_x + px(1.);
         let bg = gpui::rgb(render::tab_bar_bg());
-        // A distinctly darker chip with bright text so the scroll arrows stand
-        // out against the strip instead of blending into it like the muted gear.
-        let arrow_bg = cx.theme().muted;
-        let arrow_color = cx.theme().foreground;
 
         // One "page" worth of horizontal scroll per arrow click: most of the
         // visible width, leaving a sliver of overlap for orientation.
@@ -3309,12 +3327,16 @@ impl BackseaterApp {
                 .id(if dir_left { "tab-left" } else { "tab-right" })
                 .flex_none()
                 .px_2()
-                .py_2()
-                .bg(arrow_bg)
+                .py_1()
+                .my_1()
                 .rounded_md()
                 .cursor_pointer()
                 .font_weight(FontWeight::BOLD)
-                .text_color(arrow_color)
+                .text_color(cx.theme().muted_foreground)
+                .hover(|s| {
+                    s.bg(render::chrome_hover())
+                        .text_color(cx.theme().foreground)
+                })
                 .child(SharedString::from(if dir_left { "‹" } else { "›" }))
                 .on_mouse_down(
                     MouseButton::Left,
@@ -3329,12 +3351,15 @@ impl BackseaterApp {
                 )
         };
 
+        // No hard border under the strip: the bar sits one elevation step above
+        // the chat surface, and that contrast is the separation; the active chip
+        // (chat-surface colored, flush to the bottom) visually connects to the
+        // content below.
         h_flex()
             .w_full()
+            .px_1()
             .bg(bg)
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .items_center()
+            .items_end()
             // The global Mentions pseudo-tab, pinned ahead of the scrolling
             // strip so it's always reachable. Enabled in Highlights settings.
             .when(self.settings.mentions_tab, |this| {
@@ -3353,7 +3378,7 @@ impl BackseaterApp {
                     .id("tab-strip-scroll")
                     .flex_1()
                     .min_w_0()
-                    .items_center()
+                    .items_end()
                     // `track_scroll` stays on so the strip is always measured (it
                     // fills `max_offset` regardless of overflow style); scrolling is
                     // only engaged when the chips actually overflow, so a fitting
@@ -3365,10 +3390,16 @@ impl BackseaterApp {
                         div()
                             .id("add-tab")
                             .flex_none()
-                            .px_3()
-                            .py_2()
+                            .px_2p5()
+                            .py_1()
+                            .my_1()
+                            .rounded_md()
                             .cursor_pointer()
                             .text_color(cx.theme().muted_foreground)
+                            .hover(|s| {
+                                s.bg(render::chrome_hover())
+                                    .text_color(cx.theme().foreground)
+                            })
                             .child(SharedString::from("+"))
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -3381,10 +3412,17 @@ impl BackseaterApp {
             .child(
                 div()
                     .id("app-settings")
-                    .px_3()
-                    .py_2()
+                    .px_2p5()
+                    .py_1()
+                    .my_1()
+                    .mr_1()
+                    .rounded_md()
                     .cursor_pointer()
                     .text_color(cx.theme().muted_foreground)
+                    .hover(|s| {
+                        s.bg(render::chrome_hover())
+                            .text_color(cx.theme().foreground)
+                    })
                     .child(SharedString::from("⚙"))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -3523,10 +3561,10 @@ fn apply_theme_surfaces(settings: &settings::Settings, cx: &mut App) {
     theme.tokens.title_bar = bar.into();
     theme.tokens.tab_bar = bar.into();
 
-    // Re-assert the always-visible scrollbar preference so a theme switch doesn't
-    // revert it (the chat log tail-follows, so the default "only while scrolling"
-    // leaves the bar hidden almost always).
-    theme.scrollbar_show = gpui_component::scroll::ScrollbarShow::Always;
+    // Re-assert the scrollbar preference so a theme switch doesn't revert it:
+    // visible only while scrolling (fades out when idle) — the log keeps a
+    // right gutter for the thumb, so nothing shifts when it appears.
+    theme.scrollbar_show = gpui_component::scroll::ScrollbarShow::Scrolling;
 }
 
 /// Applies the chosen font family to the kit theme; the kit `Root` element sets
@@ -3657,11 +3695,10 @@ fn main() {
         gpui_component::init(cx);
         // gpui_component::init defaults to light; switch to a dark theme.
         gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
-        // Keep scrollbars always visible: the chat log tail-follows (its scroll
-        // offset rarely changes on its own), so the default "show only while
-        // scrolling" mode would leave the bar hidden almost all the time.
+        // Scrollbars show only while scrolling and fade out when idle, keeping
+        // the chat chrome clean while the log tail-follows.
         gpui_component::Theme::global_mut(cx).scrollbar_show =
-            gpui_component::scroll::ScrollbarShow::Always;
+            gpui_component::scroll::ScrollbarShow::Scrolling;
 
         // Required so `img(<https url>)` can fetch remote emote images.
         let http = reqwest_client::ReqwestClient::user_agent("backseater/0.1")
@@ -3738,11 +3775,14 @@ struct TipPlatform {
 /// brand-colored glyph. Fixed 16px (chrome, not a font-scaled chat row).
 pub(crate) fn tip_platform_icon(platform: bks_core::Platform) -> gpui::AnyElement {
     match platform.icon_url() {
-        Some(url) => img(SharedString::from(url))
-            .h(px(16.))
-            .w(px(16.))
-            .flex_none()
-            .into_any_element(),
+        Some(url) => {
+            let (w, h) = platform.icon_size(16.);
+            img(SharedString::from(url))
+                .h(px(h))
+                .w(px(w))
+                .flex_none()
+                .into_any_element()
+        }
         None => div()
             .flex_none()
             .font_weight(FontWeight::BOLD)

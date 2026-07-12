@@ -33,8 +33,10 @@ pub(crate) struct Palette {
     reply: u32,
     /// Default username color when a chatter has none.
     default_name: u32,
-    /// Background tint for a message that mentions the user.
+    /// Background tint for a message that mentions the user, plus the accent
+    /// bar color drawn on the row's left edge.
     mention_bg: u32,
+    mention_accent: u32,
     /// Background tint + label color for a chatter's first message.
     first_message_bg: u32,
     first_message_label: u32,
@@ -72,65 +74,72 @@ pub(crate) struct Palette {
     panel_bg: u32,
 }
 
-/// The dark palette (the original look).
+/// The dark palette: deep neutral with deliberate elevation steps — the log is
+/// the darkest surface, chrome (tab bar, input) sits one step lifted above it,
+/// panels/popovers another step up. Row-tint colors are kept subtle (the accent
+/// bar carries the identity); `*_text` tones are chromatic enough to double as
+/// those accent-bar colors.
 const DARK: Palette = Palette {
-    chat_bg: 0x1a1a1d,
-    link: 0x4a9eff,
-    timestamp: 0x8a8a8a,
-    system: 0x6a9955,
-    reply: 0x8a8a8a,
-    default_name: 0x9147ff,
-    mention_bg: 0x3a2e1a,
-    first_message_bg: 0x1c3a36,
-    first_message_label: 0xc792ea,
-    event_bg: 0x322a44,
-    event_text: 0xefe9ff,
-    streak_bg: 0x3a3320,
-    streak_text: 0xf6e7b0,
-    live_bg: 0x1c3a24,
-    live_text: 0x8af2a8,
-    offline_bg: 0x2a2a2e,
-    offline_text: 0x9a9a9a,
-    error_bg: 0x3a1f22,
-    error_text: 0xff8a8a,
-    automod_bg: 0x3a2a1c,
-    automod_text: 0xf2c078,
-    automod_allow: 0x8af2a8,
-    automod_deny: 0xff8a8a,
-    tab_bar_bg: 0x101013,
-    tab_active_bg: 0x1a1a1d,
-    tab_inactive_bg: 0x141417,
-    panel_bg: 0x202024,
+    chat_bg: 0x121214,
+    link: 0x58a6ff,
+    timestamp: 0x6e6e78,
+    system: 0x84a878,
+    reply: 0x6e6e78,
+    default_name: 0xa06bff,
+    mention_bg: 0x2b2310,
+    mention_accent: 0xf2b84a,
+    first_message_bg: 0x122824,
+    first_message_label: 0x3ecfb2,
+    event_bg: 0x221e30,
+    event_text: 0xc4b5fd,
+    streak_bg: 0x2b2413,
+    streak_text: 0xe8c56a,
+    live_bg: 0x122718,
+    live_text: 0x57d98a,
+    offline_bg: 0x1e1e22,
+    offline_text: 0x8d8d96,
+    error_bg: 0x2d191c,
+    error_text: 0xf28b8b,
+    automod_bg: 0x2c2113,
+    automod_text: 0xe8b366,
+    automod_allow: 0x57d98a,
+    automod_deny: 0xf28b8b,
+    tab_bar_bg: 0x1b1b1f,
+    tab_active_bg: 0x121214,
+    tab_inactive_bg: 0x1b1b1f,
+    panel_bg: 0x222228,
 };
 
-/// The light palette (a brighter look).
+/// The light palette: white log, chrome one step darker, same accent scheme as
+/// dark (bar colors deep enough to read on the pale tints).
 const LIGHT: Palette = Palette {
-    chat_bg: 0xf7f7f8,
-    link: 0x1f6feb,
-    timestamp: 0x6e6e74,
-    system: 0x2f7d32,
-    reply: 0x6e6e74,
-    default_name: 0x772ce8,
-    mention_bg: 0xfff3d1,
-    first_message_bg: 0xd6f3ec,
-    first_message_label: 0x8250df,
-    event_bg: 0xece5ff,
-    event_text: 0x432c91,
-    streak_bg: 0xfff1c9,
-    streak_text: 0x7a5a12,
-    live_bg: 0xd9f5e1,
-    live_text: 0x1c6b32,
-    offline_bg: 0xececed,
-    offline_text: 0x67676d,
-    error_bg: 0xfde3e3,
-    error_text: 0xb42318,
-    automod_bg: 0xfdeed3,
-    automod_text: 0x8a5a10,
-    automod_allow: 0x1c6b32,
-    automod_deny: 0xb42318,
-    tab_bar_bg: 0xe6e6ea,
-    tab_active_bg: 0xf7f7f8,
-    tab_inactive_bg: 0xeaeaee,
+    chat_bg: 0xffffff,
+    link: 0x0969da,
+    timestamp: 0x84848e,
+    system: 0x557d47,
+    reply: 0x84848e,
+    default_name: 0x7c3aed,
+    mention_bg: 0xfff4d6,
+    mention_accent: 0xc77d0a,
+    first_message_bg: 0xe0f5f0,
+    first_message_label: 0x0f8570,
+    event_bg: 0xf1ecfe,
+    event_text: 0x6d4fc4,
+    streak_bg: 0xfcf0cf,
+    streak_text: 0x8a6410,
+    live_bg: 0xe1f6e7,
+    live_text: 0x188038,
+    offline_bg: 0xefeff1,
+    offline_text: 0x71717a,
+    error_bg: 0xfdebeb,
+    error_text: 0xc22e2e,
+    automod_bg: 0xfdf1dc,
+    automod_text: 0x9a6209,
+    automod_allow: 0x188038,
+    automod_deny: 0xc22e2e,
+    tab_bar_bg: 0xe9e9ec,
+    tab_active_bg: 0xffffff,
+    tab_inactive_bg: 0xe9e9ec,
     panel_bg: 0xffffff,
 };
 
@@ -228,6 +237,7 @@ impl Palette {
             reply: base.reply,
             default_name: c.default_name,
             mention_bg: c.mention,
+            mention_accent: fg(c.mention, c.mention),
             first_message_bg: c.first_message,
             first_message_label: fg(c.first_message, c.first_message),
             event_bg: c.event,
@@ -328,6 +338,85 @@ pub fn tab_inactive_bg() -> u32 {
 /// panel reads as raised, not the kit's flat near-black `background`.
 pub fn panel_bg() -> u32 {
     palette().panel_bg
+}
+
+/// The subtle full-width tint a chat row gets while hovered. A translucent
+/// overlay (not a palette field) so it adapts to any custom theme: a touch of
+/// white on a dark log, a touch of black on a light one.
+pub(crate) fn row_hover() -> gpui::Hsla {
+    if luminance(chat_bg()) < 0.5 {
+        gpui::white().opacity(0.04)
+    } else {
+        gpui::black().opacity(0.04)
+    }
+}
+
+/// A hover tint for chrome (tab chips, small buttons) — like [`row_hover`] but a
+/// step stronger so it reads on the already-lifted chrome surfaces.
+pub fn chrome_hover() -> gpui::Hsla {
+    if luminance(chat_bg()) < 0.5 {
+        gpui::white().opacity(0.07)
+    } else {
+        gpui::black().opacity(0.06)
+    }
+}
+
+/// The accent color for the active tab's indicator line, theme-aware.
+pub fn accent() -> u32 {
+    palette().default_name
+}
+
+/// The `(background tint, accent bar)` color pairs for the log's highlighted
+/// rows. The chat log paints these on its full-width row wrapper (so the tint
+/// bleeds edge-to-edge); panel contexts use the same pairs for their
+/// self-contained pills.
+pub(crate) fn highlight_mention() -> (u32, u32) {
+    let p = palette();
+    (p.mention_bg, p.mention_accent)
+}
+
+pub(crate) fn highlight_first_message() -> (u32, u32) {
+    let p = palette();
+    (p.first_message_bg, p.first_message_label)
+}
+
+pub(crate) fn highlight_event(kind: EventKind) -> (u32, u32) {
+    let p = palette();
+    match kind {
+        EventKind::WatchStreak => (p.streak_bg, p.streak_text),
+        _ => (p.event_bg, p.event_text),
+    }
+}
+
+pub(crate) fn highlight_live(live: bool) -> (u32, u32) {
+    let p = palette();
+    if live {
+        (p.live_bg, p.live_text)
+    } else {
+        (p.offline_bg, p.offline_text)
+    }
+}
+
+pub(crate) fn highlight_error() -> (u32, u32) {
+    let p = palette();
+    (p.error_bg, p.error_text)
+}
+
+pub(crate) fn highlight_automod() -> (u32, u32) {
+    let p = palette();
+    (p.automod_bg, p.automod_text)
+}
+
+/// A hairline border tone for floating chrome (hover-action pill, overlays):
+/// the panel surface nudged toward the foreground so the edge reads on both
+/// dark and light themes.
+pub(crate) fn panel_border() -> u32 {
+    let toward = if luminance(chat_bg()) < 0.5 {
+        0xffffff
+    } else {
+        0x000000
+    };
+    blend(palette().panel_bg, toward, 0.14)
 }
 
 /// Minimum contrast ratio (WCAG-style, 1..21) a username must clear against the
@@ -520,12 +609,15 @@ fn image_line_box(scale: Scale, image_h: f32) -> gpui::Div {
 /// a brand-colored glyph. Sized from the row's [`Scale`] so it tracks the font.
 fn platform_badge(platform: Platform, scale: Scale) -> gpui::Div {
     match platform.icon_url() {
-        Some(url) => image_line_box(scale, scale.icon).child(
-            img(SharedString::from(url))
-                .id(SharedString::from(platform.label()))
-                .h(px(scale.icon))
-                .w(px(scale.icon)),
-        ),
+        Some(url) => {
+            let (w, h) = platform.icon_size(scale.icon);
+            image_line_box(scale, h).child(
+                img(SharedString::from(url))
+                    .id(SharedString::from(platform.label()))
+                    .h(px(h))
+                    .w(px(w)),
+            )
+        }
         None => line_box(scale).child(
             div()
                 .px_1()
@@ -1189,6 +1281,11 @@ pub struct RowFlags {
     pub struck: bool,
     /// The message mentions the user: tint its background.
     pub mentioned: bool,
+    /// The chat log paints highlights (mention/first-message tint + accent bar)
+    /// on its full-width row wrapper so they bleed edge-to-edge; it sets this so
+    /// the message doesn't also paint its own. Panels (mentions, pin banner)
+    /// leave it false and get the self-contained tint.
+    pub external_highlight: bool,
 }
 
 /// One chat message as a wrapping row: platform · time · name · tokens. When
@@ -1216,7 +1313,11 @@ pub fn render_message(
         reply_click,
         pin_click,
     } = handlers;
-    let RowFlags { struck, mentioned } = flags;
+    let RowFlags {
+        struck,
+        mentioned,
+        external_highlight,
+    } = flags;
     let scale = Scale::new(font_size);
     let name_color = readable_color(
         msg.author
@@ -1428,7 +1529,13 @@ pub fn render_message(
                 div()
                     .flex_none()
                     .ml_2()
-                    .text_size(px(scale.small))
+                    .mt_0p5()
+                    .px_1p5()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(palette().first_message_label))
+                    .text_size(px(scale.small * 0.9))
+                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(palette().first_message_label))
                     .child("FIRST MESSAGE"),
             )
@@ -1450,21 +1557,33 @@ pub fn render_message(
     // `format!`.
     let group_id = ids.base.clone();
     let body = if reply_click.is_some() || pin_click.is_some() {
-        let mut actions = h_flex()
+        let mut chips = h_flex()
+            .gap_0p5()
+            .px_0p5()
+            .py_0p5()
+            .bg(rgb(palette().panel_bg))
+            .border_1()
+            .border_color(rgb(panel_border()))
+            .rounded_md()
+            .shadow_sm();
+        if let Some(cb) = pin_click {
+            chips = chips.child(hover_action(ids.pin(), "📌 pin", scale, cb));
+        }
+        if let Some(cb) = reply_click {
+            chips = chips.child(hover_action(ids.reply(), "↩ reply", scale, cb));
+        }
+        // The chip pill sits in a full-height right-edge strip that centers it
+        // vertically on the row; the strip itself carries no listeners, so it
+        // never blocks text under it while hidden or around the pill.
+        let actions = h_flex()
             .invisible()
             .group_hover(group_id.clone(), |s| s.visible())
             .absolute()
             .top_0()
+            .bottom_0()
             .right_0()
-            .bg(rgb(palette().panel_bg))
-            .rounded_md()
-            .shadow_sm();
-        if let Some(cb) = pin_click {
-            actions = actions.child(hover_action(ids.pin(), "📌 pin", scale, cb));
-        }
-        if let Some(cb) = reply_click {
-            actions = actions.child(hover_action(ids.reply(), "↩ reply", scale, cb));
-        }
+            .items_center()
+            .child(chips);
         div()
             .relative()
             .w_full()
@@ -1479,11 +1598,15 @@ pub fn render_message(
     // A reply adds a muted context line above the message; without one we return
     // the row directly so non-reply messages keep their single-row layout. A
     // message that mentions the user, or a chatter's first message in the channel,
-    // gets a tinted background — mention wins when a row is both.
-    let row_bg = if mentioned {
-        Some(palette().mention_bg)
+    // gets a subtle tint plus a colored accent bar on its left edge — mention
+    // wins when a row is both. In the chat log the wrapper paints this full-bleed
+    // instead (`external_highlight`).
+    let row_accent = if external_highlight {
+        None
+    } else if mentioned {
+        Some(highlight_mention())
     } else if msg.first_message {
-        Some(palette().first_message_bg)
+        Some(highlight_first_message())
     } else {
         None
     };
@@ -1496,12 +1619,16 @@ pub fn render_message(
         // The tinted pill gets horizontal padding for the rounded look, with an
         // equal negative margin so the message content stays flush with normal
         // (un-highlighted) rows instead of being nudged right — the tint floats as
-        // a pill that bleeds an equal amount past the text on each side.
-        .when_some(row_bg, |row, bg| {
+        // a pill that bleeds an equal amount past the text on each side, with the
+        // accent bar riding its left edge (same box model as error/automod rows).
+        .when_some(row_accent, |row, (bg, accent)| {
             row.bg(rgb(bg))
                 .rounded_md()
+                .border_l_2()
+                .border_color(rgb(accent))
                 .px(px(HIGHLIGHT_INSET))
                 .mx(px(-HIGHLIGHT_INSET))
+                .py_0p5()
         })
         .when_some(msg.reply.as_ref(), |col, reply| {
             col.child(reply_line(reply, scale))
@@ -1522,11 +1649,15 @@ fn hover_action(
     div()
         .id(id)
         .flex_none()
-        .px_1()
+        .px_1p5()
+        .rounded_sm()
         .cursor_pointer()
         .text_size(px(scale.small))
         .text_color(rgb(palette().timestamp))
-        .hover(|s| s.text_color(rgb(palette().default_name)))
+        .hover(|s| {
+            s.bg(chrome_hover())
+                .text_color(rgb(palette().default_name))
+        })
         .child(SharedString::from(label))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             cb(window, cx);
@@ -1632,20 +1763,11 @@ pub fn render_error(
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.clone()));
         });
 
+    // Bare content — the log's row wrapper paints the tint + accent bar.
     h_flex()
         .w_full()
         .min_w_0()
         .items_start()
-        .my_px()
-        // A floating pill: padding + equal negative margin so the ⚠ + text align
-        // with normal rows while the tint bleeds an equal amount past it each side.
-        .px(px(HIGHLIGHT_INSET))
-        .mx(px(-HIGHLIGHT_INSET))
-        .py_1()
-        .rounded_md()
-        .border_l_2()
-        .border_color(rgb(p.error_text))
-        .bg(rgb(p.error_bg))
         .text_size(px(scale.font))
         .child(
             h_flex()
@@ -1785,19 +1907,11 @@ pub fn render_automod(
         }
     };
 
+    // Bare content — the log's row wrapper paints the tint + accent bar.
     h_flex()
         .w_full()
         .min_w_0()
         .items_start()
-        .my_px()
-        // The same floating-pill inset as error/event rows, so content aligns.
-        .px(px(HIGHLIGHT_INSET))
-        .mx(px(-HIGHLIGHT_INSET))
-        .py_1()
-        .rounded_md()
-        .border_l_2()
-        .border_color(rgb(p.automod_text))
-        .bg(rgb(p.automod_bg))
         .text_size(px(scale.font))
         .child(
             v_flex()
@@ -1825,11 +1939,10 @@ pub fn render_automod(
 /// carry the time). Watch-streak rows (`kind`) get a distinct amber tint. The
 /// text/message column wraps; the icon pins to the top so it stays aligned with
 /// the first line when the content spans several.
-/// `flush` selects the pill's box model: `false` (the chat log) floats the tint
-/// past the row box with a negative margin so the content lines up with normal
-/// rows; `true` (the events panel) keeps the pill inside its row box — the
-/// panel has no normal rows to align with, and the bleed interacts badly with
-/// its container's edges (uneven left/right margins).
+/// `panel` selects the box model: `true` (the events panel) draws a
+/// self-contained tinted pill inside the row box; `false` (the chat log) stays
+/// bare — the log's full-width row wrapper paints the tint + accent bar
+/// edge-to-edge instead.
 pub fn render_event(
     platform: Platform,
     kind: EventKind,
@@ -1837,14 +1950,11 @@ pub fn render_event(
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
     message: Option<&Message>,
     font_size: f32,
-    flush: bool,
+    panel: bool,
 ) -> impl IntoElement {
     let scale = Scale::new(font_size);
     let p = palette();
-    let (bg, fg) = match kind {
-        EventKind::WatchStreak => (p.streak_bg, p.streak_text),
-        _ => (p.event_bg, p.event_text),
-    };
+    let (bg, fg) = highlight_event(kind);
 
     // The system text is split into per-word tokens (like a chat body) so a long
     // event string wraps at word boundaries instead of overflowing the (often
@@ -1896,16 +2006,18 @@ pub fn render_event(
     v_flex()
         .w_full()
         .min_w_0()
-        .my_px()
-        // A floating pill: `px` padding for the rounded box + (in the log) an
-        // equal negative margin so the icon/text line up with normal rows while
-        // the tint bleeds an equal amount past the content on each side (and
-        // trailing content clears the rounded corner instead of being clipped).
-        .px(px(HIGHLIGHT_INSET))
-        .when(!flush, |pill| pill.mx(px(-HIGHLIGHT_INSET)))
-        .py_1()
-        .rounded_md()
-        .bg(rgb(bg))
+        // In a panel the row draws its own self-contained pill (tint + accent
+        // bar inside the row box); in the log the wrapper paints it full-bleed,
+        // so only the text color is set here.
+        .when(panel, |pill| {
+            pill.my_px()
+                .px(px(HIGHLIGHT_INSET))
+                .py_1()
+                .rounded_md()
+                .border_l_2()
+                .border_color(rgb(fg))
+                .bg(rgb(bg))
+        })
         .text_color(rgb(fg))
         .text_size(px(scale.font))
         .child(header)
@@ -2074,12 +2186,7 @@ pub fn render_live(
     font_size: f32,
 ) -> impl IntoElement {
     let scale = Scale::new(font_size);
-    let p = palette();
-    let (bg, fg) = if live {
-        (p.live_bg, p.live_text)
-    } else {
-        (p.offline_bg, p.offline_text)
-    };
+    let (_, fg) = highlight_live(live);
     let text = if live {
         if title.trim().is_empty() {
             format!("● {} stream is live", platform.label())
@@ -2090,19 +2197,12 @@ pub fn render_live(
         format!("○ {} stream went offline", platform.label())
     };
 
+    // Bare content — the log's row wrapper paints the tint + accent bar.
     h_flex()
         .w_full()
         .min_w_0()
         .items_start()
         .gap_2()
-        .my_px()
-        // A floating pill: padding + equal negative margin so content aligns with
-        // normal rows while the tint bleeds an equal amount past it on each side.
-        .px(px(HIGHLIGHT_INSET))
-        .mx(px(-HIGHLIGHT_INSET))
-        .py_1()
-        .rounded_md()
-        .bg(rgb(bg))
         .text_color(rgb(fg))
         .text_size(px(scale.font))
         .child(platform_badge(platform, scale).flex_none())

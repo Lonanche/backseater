@@ -119,6 +119,7 @@ pub fn feed_rows(store: &Entity<MentionStore>, font_size: f32, cx: &App) -> Vec<
                 render::RowFlags {
                     struck: false,
                     mentioned: true,
+                    ..Default::default()
                 },
                 font_size,
                 &selection,

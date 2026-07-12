@@ -1291,12 +1291,17 @@ impl ChatView {
         Some(
             h_flex()
                 .w_full()
-                .px_2()
+                .px_3()
                 .py_1()
                 .gap_4()
                 .flex_wrap()
                 .items_center()
-                .bg(cx.theme().secondary)
+                // The chat surface tone, not the chrome tone: the tab strip sits
+                // directly above, and on the same color the two fused into one
+                // band. On the content tone the strip ends where the bar starts
+                // (and the active tab connects into it); the hairline below
+                // separates it from the pins/log.
+                .bg(gpui::rgb(render::chat_bg()))
                 .border_b_1()
                 .border_color(cx.theme().border)
                 .text_size(px(self.font_size * 0.9))
@@ -1310,12 +1315,19 @@ impl ChatView {
                         .items_center()
                         .child(crate::tip_platform_icon(platform))
                         .child(div().font_weight(FontWeight::BOLD).child(channel))
+                        // A real dot (not the ● glyph, whose size and vertical
+                        // position drift with the chat font).
                         .child(
                             div()
-                                .text_color(gpui::rgb(render::live_text()))
-                                .child(SharedString::from("●")),
+                                .size(px(7.))
+                                .rounded_full()
+                                .bg(gpui::rgb(render::live_text())),
                         )
-                        .child(SharedString::from(readout))
+                        .child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(SharedString::from(readout)),
+                        )
                 }))
                 .children(total.map(|total| {
                     h_flex()
@@ -1326,10 +1338,14 @@ impl ChatView {
                                 .font_weight(FontWeight::BOLD)
                                 .child(SharedString::from("Total")),
                         )
-                        .child(SharedString::from(format!(
-                            "{} viewers",
-                            format_count(total)
-                        )))
+                        .child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(SharedString::from(format!(
+                                    "{} viewers",
+                                    format_count(total)
+                                ))),
+                        )
                 }))
                 .into_any_element(),
         )
@@ -1353,18 +1369,19 @@ impl ChatView {
         .detach();
     }
 
-    /// The pinned-message banners (Twitch, then Kick) shown above the log — one
-    /// row per platform with an active, undismissed pin (and the platform not
-    /// hidden in settings): 📌 + "Pinned by X", the message rendered like a chat
-    /// line, an Unpin button for moderators, and an ✕ that dismisses just this
-    /// pin locally.
-    fn render_pin_banners(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+    /// The pinned-message overlay floating over the chat log's top edge: one
+    /// card per platform with an active pin (and the platform not hidden in
+    /// settings) — 📌 + "Pinned by X", the message rendered like a chat line, an
+    /// Unpin button for moderators, and an ✕ that *collapses* the card. A
+    /// collapsed pin isn't gone: a small 📌 chip stays at the top-right and a
+    /// click brings the card(s) back.
+    fn render_pin_overlay(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         // No pins is the common case (every frame) — skip the deep message clone.
         if self.channel.read(cx).pins.is_empty() {
-            return Vec::new();
+            return None;
         }
         // Clone the shared model's pins so we don't hold a model borrow across the
-        // per-banner render (which needs `cx`).
+        // per-card render (which needs `cx`).
         let pins: Vec<(bks_core::Platform, ActivePin)> = self
             .channel
             .read(cx)
@@ -1372,21 +1389,72 @@ impl ChatView {
             .iter()
             .map(|(p, pin)| (*p, pin.clone()))
             .collect();
-        [bks_core::Platform::Twitch, bks_core::Platform::Kick]
-            .into_iter()
-            .filter_map(|platform| {
-                let pin = pins.iter().find(|(p, _)| *p == platform).map(|(_, pin)| pin)?;
-                if pin.expired()
-                    || !crate::settings::show_pinned(platform)
-                    || self
-                        .dismissed_pins
-                        .contains(&(platform, pin.message.id.clone()))
-                {
-                    return None;
-                }
-                Some(self.render_pin_banner(platform, pin, cx))
-            })
-            .collect()
+        let mut cards: Vec<gpui::AnyElement> = Vec::new();
+        let mut collapsed = 0usize;
+        for platform in [bks_core::Platform::Twitch, bks_core::Platform::Kick] {
+            let Some(pin) = pins.iter().find(|(p, _)| *p == platform).map(|(_, pin)| pin)
+            else {
+                continue;
+            };
+            if pin.expired() || !crate::settings::show_pinned(platform) {
+                continue;
+            }
+            if self
+                .dismissed_pins
+                .contains(&(platform, pin.message.id.clone()))
+            {
+                collapsed += 1;
+                continue;
+            }
+            cards.push(self.render_pin_banner(platform, pin, cx));
+        }
+        if cards.is_empty() && collapsed == 0 {
+            return None;
+        }
+        let mut col = v_flex()
+            .absolute()
+            .top_0()
+            .left_0()
+            // Stay clear of the overlay scrollbar's gutter.
+            .right(px(crate::SCROLLBAR_WIDTH))
+            .p_1()
+            .gap_1()
+            .children(cards);
+        if collapsed > 0 {
+            let label = if collapsed > 1 {
+                format!("📌 {collapsed}")
+            } else {
+                "📌".to_string()
+            };
+            col = col.child(
+                h_flex().justify_end().child(
+                    div()
+                        .id("restore-pins")
+                        .px_2()
+                        .py_0p5()
+                        .rounded_full()
+                        .bg(gpui::rgb(render::panel_bg()))
+                        .border_1()
+                        .border_color(gpui::rgb(render::panel_border()))
+                        .shadow_sm()
+                        .text_size(px(self.font_size * 0.8))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(render::chrome_hover()))
+                        .tooltip(|window, cx| {
+                            Tooltip::new("Show the pinned message").build(window, cx)
+                        })
+                        .child(SharedString::from(label))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.dismissed_pins.clear();
+                                cx.notify();
+                            }),
+                        ),
+                ),
+            );
+        }
+        Some(col.into_any_element())
     }
 
     fn render_pin_banner(
@@ -1418,15 +1486,19 @@ impl ChatView {
         };
         let msg_id = pin.message.id.clone();
 
+        // A floating card over the log (not a full-width bar): rounded, accent
+        // left bar, and a shadow so it reads as pinned *on top of* the chat.
         let mut banner = h_flex()
             .w_full()
             .items_start()
             .gap_2()
             .px_2()
             .py_1()
+            .rounded_md()
             .bg(gpui::rgb(p.event_bg))
-            .border_b_1()
-            .border_color(cx.theme().border)
+            .border_l_2()
+            .border_color(gpui::rgb(p.event_text))
+            .shadow_md()
             .child(
                 div()
                     .flex_none()
@@ -1472,7 +1544,9 @@ impl ChatView {
                 .text_color(cx.theme().muted_foreground)
                 .hover(|s| s.text_color(cx.theme().foreground))
                 .child(SharedString::from("✕"))
-                .tooltip(|window, cx| Tooltip::new("Hide this pinned message").build(window, cx))
+                .tooltip(|window, cx| {
+                    Tooltip::new("Collapse — the 📌 chip brings it back").build(window, cx)
+                })
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, _, cx| {
@@ -2561,8 +2635,11 @@ impl ChatView {
                 .py_1()
                 .rounded_md()
                 .cursor_pointer()
-                .bg(cx.theme().background)
-                .hover(|s| s.bg(cx.theme().secondary))
+                .text_color(cx.theme().muted_foreground)
+                .hover(|s| {
+                    s.bg(render::chrome_hover())
+                        .text_color(cx.theme().foreground)
+                })
                 .child(SharedString::from("👥"))
                 .tooltip(|window, cx| {
                     Tooltip::new("Viewer list (mods only — Twitch restriction)").build(window, cx)
@@ -2921,6 +2998,7 @@ impl ChatView {
                                 render::RowFlags {
                                     struck,
                                     mentioned: true,
+                                    ..Default::default()
                                 },
                                 font_size,
                                 &selection,
@@ -3013,6 +3091,18 @@ impl ChatView {
                             .take()
                             .map(IntoElement::into_any_element)
                             .unwrap_or_else(|| div().into_any_element());
+                        // Pinned messages float over the log's top edge (inside
+                        // the chat, Twitch-style), so the wrapper is `relative`.
+                        let log = div()
+                            .relative()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .child(log)
+                            .children(self.render_pin_overlay(cx))
+                            .into_any_element();
                         if single_panel {
                             // Chat alone: no header (nothing to move; saves a row).
                             log
@@ -3026,11 +3116,7 @@ impl ChatView {
                                 .bg(gpui::rgb(render::chat_bg()))
                                 .pt_2()
                                 .gap_1()
-                                .child(self.panel_header(
-                                    self.config.display_name(),
-                                    tabs::PanelKind::Chat,
-                                    cx,
-                                ))
+                                .child(self.panel_header("Chat", tabs::PanelKind::Chat, cx))
                                 .child(log)
                                 .into_any_element()
                         }
@@ -3490,10 +3576,9 @@ impl Render for ChatView {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            // Live viewer-count status bar, then any active pinned messages
-            // (per platform), sit above the log.
+            // Live viewer-count status bar above the panels; pinned messages
+            // float *inside* the chat log (see `render_pin_overlay`).
             .children(self.render_status_bar(cx))
-            .children(self.render_pin_banners(cx))
             .child(layout_grid)
             // The emote picker, when open, sits between the feed and the input bar.
             .when(self.picker_open, |col| {
@@ -3505,10 +3590,16 @@ impl Render for ChatView {
                 h_flex()
                     .w_full()
                     .relative()
-                    .p_2()
-                    .gap_2()
+                    .px_2()
+                    .py_1p5()
+                    .gap_1p5()
                     .items_center()
-                    .bg(cx.theme().secondary)
+                    // The input bar sits on the chrome tone (one elevation step
+                    // above the log), separated by a hairline instead of a
+                    // recessed slab.
+                    .bg(gpui::rgb(render::tab_bar_bg()))
+                    .border_t_1()
+                    .border_color(cx.theme().border)
                     .children(self.send_target_toggle(cx))
                     .child(self.picker_button(cx))
                     .children(self.viewerlist_button(cx))
