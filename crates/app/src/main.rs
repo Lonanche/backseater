@@ -2139,30 +2139,76 @@ impl BackseaterApp {
                             }))
                             .into_any_element(),
                     ))
-                    .child(card_divider())
-                    .child(setting_row(
-                        "Pinned messages — Twitch",
-                        Some("Banner above chat while a moderator has a message pinned."),
-                        Switch::new("show-pinned-twitch")
-                            .small()
-                            .checked(self.settings.show_pinned_twitch)
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.set_show_pinned(bks_core::Platform::Twitch, *checked, cx);
-                            }))
-                            .into_any_element(),
+            )
+            .child(div().h_1())
+            .child(section_title("Pinned messages"))
+            .child(
+                setting_card()
+                    .child(self.pinned_platform_row(
+                        bks_core::Platform::Twitch,
+                        self.settings.show_pinned_twitch,
+                        cx,
                     ))
                     .child(card_divider())
-                    .child(setting_row(
-                        "Pinned messages — Kick",
-                        Some("The banner's ✕ hides just the current pin."),
-                        Switch::new("show-pinned-kick")
-                            .small()
-                            .checked(self.settings.show_pinned_kick)
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.set_show_pinned(bks_core::Platform::Kick, *checked, cx);
-                            }))
-                            .into_any_element(),
+                    .child(self.pinned_platform_row(
+                        bks_core::Platform::Kick,
+                        self.settings.show_pinned_kick,
+                        cx,
                     )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(
+                        "The banner above chat while a moderator has a message pinned; \
+                         its ✕ hides just the current pin.",
+                    )),
+            )
+            .into_any_element()
+    }
+
+    /// One platform's row of the pinned-messages card: logo + platform name +
+    /// a show/hide switch (the process-wide show-pinned flag for it).
+    fn pinned_platform_row(
+        &self,
+        platform: bks_core::Platform,
+        checked: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        use gpui_component::switch::Switch;
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(22.))
+                    .flex()
+                    .justify_center()
+                    .child(platform_icon(platform, 18.)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(SharedString::from(platform.label())),
+            )
+            .child(
+                Switch::new(SharedString::from(format!(
+                    "show-pinned-{}",
+                    platform.label()
+                )))
+                .small()
+                .checked(checked)
+                .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                    this.set_show_pinned(platform, *checked, cx);
+                })),
             )
             .into_any_element()
     }
