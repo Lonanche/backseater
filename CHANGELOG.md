@@ -3,6 +3,40 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.4.0-beta.1
+
+### Features
+
+- Per-message mod buttons: a customizable button strip on the left of chat rows
+  in channels you moderate. The stock Delete / Ban / Timeout 10m buttons are
+  seeded on first run; add your own in Settings → Mod Buttons with any slash
+  command or plain chat text (bot commands work) — known commands target the
+  row's author or message automatically, and `{user}` / `{msg-id}` placeholders
+  are available for custom placement. Buttons can be reordered, edited, scoped
+  to one platform, and shown Always, on hover, or not at all. Clicks act on the
+  clicked row's platform regardless of the send-target toggle.
+- A curated icon set for mod buttons — one lucide icon per mod action (ban,
+  delete, warn, pin, monitor, restrict, and four timeout styles plus three warn
+  styles for telling multiple buttons of the same kind apart) — or type any
+  text/emoji as the button face.
+- Deleting single messages on Kick works again, now through Kick's new official
+  API (`/delete` or a delete mod button). Log out and back in on Kick to grant
+  the new permission it needs.
+- `/timeout` accepts an optional reason after the duration, on both platforms.
+- The pin banner, collapsed-pin chip, and hover pin button use a proper pin
+  icon instead of the 📌 emoji.
+
+### Fixes
+
+- Kick pin/unpin is disabled with a clear notice instead of failing with an
+  authentication error — Kick's API doesn't offer pinning to third-party apps
+  yet (the delete fix above came from Kick adding exactly such an endpoint, so
+  pinning will return if Kick does the same).
+- Mod buttons whose command can't run on a row's platform (like a Twitch-only
+  `/warn` on a Kick message) now gray out instead of failing when clicked.
+- Text/emoji mod-button faces are no longer struck through on rows of banned
+  users.
+
 ## v0.3.0
 
 ### Features
