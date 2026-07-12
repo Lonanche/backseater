@@ -275,7 +275,7 @@ struct Completion {
 /// chatters, see [`ChatView::mention_candidates`]), `:` (emotes from the
 /// send target's set(s), see [`ChatView::emote_popup_candidates`]), or `/` at
 /// the start of the line (slash commands for the send target's platform, see
-/// [`ChatView::command_popup`]). Up/Down/Tab cycle, Enter/click inserts,
+/// [`ChatView::command_popup`]). Up/Down move the highlight, Tab/Enter/click insert,
 /// Escape dismisses; recomputed on every input change, so typing a space (the
 /// word no longer starts with the trigger) closes it naturally. An empty
 /// candidate list renders as its `empty_text` notice rather than hiding, so
@@ -318,7 +318,7 @@ impl PopupItem {
 }
 
 /// Rows the input popup shows at once; the rest scroll into view as the
-/// selection moves past an edge (Up/Down/Tab wrap, mouse wheel too).
+/// selection moves past an edge (Up/Down wrap, mouse wheel too).
 const POPUP_VISIBLE_ITEMS: usize = 4;
 
 /// How many recently-sent input lines each tab keeps for Up/Down recall.
@@ -1322,6 +1322,20 @@ impl ChatView {
             state.set_value(&value, window, cx);
         });
         self.popup = None;
+        cx.notify();
+        true
+    }
+
+    /// A Down press outside history browsing clears a typed draft (Chatterino-
+    /// style: Down = discard what I was writing). Returns whether it consumed
+    /// the key (there was text to clear).
+    fn clear_typed_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.history_index.is_some() || self.input.read(cx).value().is_empty() {
+            return false;
+        }
+        self.input.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
         cx.notify();
         true
     }
@@ -2896,26 +2910,22 @@ impl ChatView {
         cx.notify();
     }
 
-    /// A Tab press while the popup is open: selects a sole match outright,
-    /// dismisses an empty ("No matches") popup, and otherwise cycles the
-    /// highlight — mirroring what Enter/Escape would do once the list is
-    /// unambiguous.
+    /// A Tab press while the popup is open: dismisses an empty ("No matches")
+    /// popup, otherwise inserts the highlighted candidate — Tab confirms like
+    /// Enter; Up/Down move the highlight.
     fn popup_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.popup.as_ref().map(|m| m.items.len()) {
-            Some(0) => {
+        match self.popup.as_ref().map(|m| (m.items.len(), m.selected)) {
+            Some((0, _)) => {
                 self.popup = None;
                 cx.notify();
             }
-            Some(1) => self.popup_select(0, window, cx),
-            Some(_) => {
-                self.popup_move(1, cx);
-            }
+            Some((_, ix)) => self.popup_select(ix, window, cx),
             None => {}
         }
     }
 
     /// The autocomplete popup, anchored just above the input bar (its parent).
-    /// Rows are clickable; the highlighted one tracks Up/Down/Tab. Only
+    /// Rows are clickable; the highlighted one tracks Up/Down. Only
     /// [`POPUP_VISIBLE_ITEMS`] rows show at once — the window follows the
     /// highlight (and the mouse wheel), with muted "N more" hints past each
     /// edge. Emote rows show a first-frame poster thumbnail (cheap — no full
@@ -4320,6 +4330,7 @@ impl ChatView {
                                 |this, _: &gpui_component::input::MoveDown, window, cx| {
                                     if this.popup_move(1, cx)
                                         || this.history_recall(1, window, cx)
+                                        || this.clear_typed_draft(window, cx)
                                     {
                                         cx.stop_propagation();
                                     }
