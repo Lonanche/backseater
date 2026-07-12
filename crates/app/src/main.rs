@@ -1654,10 +1654,11 @@ impl BackseaterApp {
             .into_any_element()
     }
 
-    /// The side-panels section of a tab's settings: "Show events panel" (with,
-    /// when on, a checklist of which event kinds appear in it) and "Show
-    /// mentions panel". All toggle live (no Save) and persist immediately. Built
-    /// fresh each render, so it reflects the tab's current config.
+    /// The Panels category of a tab's settings: an Events-panel card (show
+    /// toggle plus, when on, its behavior switches and kind checklist) and a
+    /// separate Mentions-panel card. All toggle live (no Save) and persist
+    /// immediately. Built fresh each render, so it reflects the tab's current
+    /// config.
     fn events_panel_section(&self, ix: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         use gpui_component::checkbox::Checkbox;
         use gpui_component::switch::Switch;
@@ -1669,7 +1670,7 @@ impl BackseaterApp {
         let filter = tab.config.event_kinds;
 
         let mut card = setting_card().child(setting_row(
-            "Events panel",
+            "Show events panel",
             Some("Subs, raids, and other channel events in a side panel."),
             Switch::new("show-events-panel")
                 .small()
@@ -1736,8 +1737,8 @@ impl BackseaterApp {
         }
 
         let show_mentions = tab.config.layout.contains(tabs::PanelKind::Mentions);
-        card = card.child(card_divider()).child(setting_row(
-            "Mentions panel",
+        let mut mentions_card = setting_card().child(setting_row(
+            "Show mentions panel",
             Some("Messages that mention you, in a side panel."),
             Switch::new("show-mentions-panel")
                 .small()
@@ -1749,7 +1750,7 @@ impl BackseaterApp {
         ));
 
         if show_mentions {
-            card = card.child(card_divider()).child(setting_row(
+            mentions_card = mentions_card.child(card_divider()).child(setting_row(
                 "Mentions from all tabs",
                 Some("Click a mention to jump to its tab."),
                 Switch::new("mentions-all-tabs")
@@ -1763,9 +1764,19 @@ impl BackseaterApp {
         }
 
         v_flex()
-            .gap_2()
-            .child(section_title("Side panels"))
-            .child(card)
+            .gap_4()
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(section_title("Events panel"))
+                    .child(card),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(section_title("Mentions panel"))
+                    .child(mentions_card),
+            )
             .into_any_element()
     }
 
