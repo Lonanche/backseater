@@ -767,8 +767,13 @@ impl Controller {
                 // number is MINUTES ("/pin 20 hi" = 20m — pins are minutes-
                 // scale, unlike /timeout's seconds); without one the pin
                 // stays until the stream ends. A first word that doesn't
-                // parse as a duration is just part of the message.
+                // parse as a duration is just part of the message; a leading
+                // "--" (or "-") skips duration parsing entirely, so a message
+                // that *starts* with a number can still pin unlimited
+                // ("/pin -- 20 chickens"). Only the first token is ever read
+                // as a duration — a timed pin's message is never at risk.
                 let (duration_secs, message_args) = match args.split_first() {
+                    Some((first, rest)) if *first == "--" || *first == "-" => (None, rest),
                     Some((first, rest)) if !rest.is_empty() => {
                         let parsed = if first.bytes().all(|b| b.is_ascii_digit()) {
                             first.parse::<u64>().ok().and_then(|mins| mins.checked_mul(60))
@@ -796,7 +801,8 @@ impl Controller {
                     ),
                     None => self.notice(
                         "usage: /pin [duration] <message> — sends your message and pins it \
-                         (no duration = until the stream ends)",
+                         (no duration = until the stream ends; start with -- to pin a \
+                         message that begins with a number)",
                     ),
                 }
             }

@@ -95,7 +95,9 @@ platform = implement one trait + one message builder, with zero UI changes**.
   bare card the stats fetch fills), `/unpin` (the target platform's active pin).
   `/pin [duration] <message>` is twitch.tv's semantics — it **sends your message and pins it**
   (leading duration optional, validated 30s–30m; a bare number is **minutes** — "/pin 20 hi" =
-  20m, unlike /timeout's seconds; none = until the stream ends): the send goes
+  20m, unlike /timeout's seconds; none = until the stream ends; a leading `--`/`-` skips duration
+  parsing so a number-leading message can pin unlimited — only the first token is ever read as a
+  duration): the send goes
   through Helix `POST /chat/messages` (`TwitchActions::send_and_pin`) because that returns the
   real message id to pin (IRC gives a sent message no id; the message still lands in chat via the
   read connection), so it's Twitch-only — pinning *others'* messages stays on the hover 📌, whose
