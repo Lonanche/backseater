@@ -1837,11 +1837,6 @@ impl ChatView {
         // chip floats at the top-right below them.
         let mut col = v_flex().absolute().top_0().left_0().right_0().children(cards);
         if collapsed > 0 {
-            let label = if collapsed > 1 {
-                format!("📌 {collapsed}")
-            } else {
-                "📌".to_string()
-            };
             col = col.child(
                 h_flex().justify_end().pt_1().pr_2().child(
                     div()
@@ -1865,7 +1860,20 @@ impl ChatView {
                         .tooltip(|window, cx| {
                             Tooltip::new("Show the pinned message").build(window, cx)
                         })
-                        .child(SharedString::from(label))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        // svg() needs its own text color — nothing cascades.
+                        .child(
+                            gpui::svg()
+                                .path("icons/pin.svg")
+                                .size(px(self.font_size * 0.8))
+                                .flex_none()
+                                .text_color(cx.theme().foreground),
+                        )
+                        .when(collapsed > 1, |chip| {
+                            chip.child(SharedString::from(collapsed.to_string()))
+                        })
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, _, cx| {
@@ -1921,12 +1929,22 @@ impl ChatView {
             .items_center()
             .gap_2()
             .child(
-                div()
+                h_flex()
                     .flex_1()
                     .min_w_0()
+                    .items_center()
+                    .gap_1()
                     .text_size(px(self.font_size * 0.75))
                     .text_color(gpui::rgb(p.event_text))
-                    .child(SharedString::from(format!("📌 {header_label}"))),
+                    // svg() needs its own text color — nothing cascades.
+                    .child(
+                        gpui::svg()
+                            .path("icons/pin.svg")
+                            .size(px(self.font_size * 0.8))
+                            .flex_none()
+                            .text_color(gpui::rgb(p.event_text)),
+                    )
+                    .child(SharedString::from(header_label)),
             );
 
         if self.can_pin(platform, cx) {
@@ -1956,7 +1974,7 @@ impl ChatView {
                 })
                 .child(SharedString::from("✕"))
                 .tooltip(|window, cx| {
-                    Tooltip::new("Collapse — the 📌 chip brings it back").build(window, cx)
+                    Tooltip::new("Collapse — the pin chip brings it back").build(window, cx)
                 })
                 .on_mouse_down(
                     MouseButton::Left,

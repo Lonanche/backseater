@@ -1634,10 +1634,16 @@ pub fn render_message(
             .rounded_md()
             .shadow_sm();
         if let Some(cb) = pin_click {
-            chips = chips.child(hover_action(ids.pin(), "📌 pin", scale, cb));
+            chips = chips.child(hover_action(
+                ids.pin(),
+                Some("icons/pin.svg"),
+                "pin",
+                scale,
+                cb,
+            ));
         }
         if let Some(cb) = reply_click {
-            chips = chips.child(hover_action(ids.reply(), "↩ reply", scale, cb));
+            chips = chips.child(hover_action(ids.reply(), None, "↩ reply", scale, cb));
         }
         // The chip pill sits in a full-height right-edge strip that centers it
         // vertically on the row; the strip itself carries no listeners, so it
@@ -1824,12 +1830,15 @@ fn no_strike<E: gpui::Styled>(mut el: E) -> E {
     el
 }
 
-/// One action chip in a row's hover overlay ("↩ reply", "📌 pin"): highlighted
+/// One action chip in a row's hover overlay (pin, "↩ reply"): highlighted
 /// on its own hover, firing `cb` on mouse-down (with propagation stopped so the
 /// same mouse-down doesn't refocus the log and steal focus back from the input).
-/// The show/hide-on-row-hover lives on the overlay container, not the chip.
+/// `icon` is an optional SVG drawn before the label (with its own text color —
+/// nothing cascades onto `svg()`). The show/hide-on-row-hover lives on the
+/// overlay container, not the chip.
 fn hover_action(
     id: impl Into<gpui::ElementId>,
+    icon: Option<&'static str>,
     label: &'static str,
     scale: Scale,
     cb: RowAction,
@@ -1838,6 +1847,9 @@ fn hover_action(
         div()
             .id(id)
             .flex_none()
+            .flex()
+            .items_center()
+            .gap_0p5()
             .px_1p5()
             .rounded_sm()
             .cursor_pointer()
@@ -1846,6 +1858,15 @@ fn hover_action(
             .hover(|s| {
                 s.bg(chrome_hover())
                     .text_color(rgb(palette().default_name))
+            })
+            .when_some(icon, |chip, path| {
+                chip.child(
+                    gpui::svg()
+                        .path(path)
+                        .size(px(scale.small))
+                        .flex_none()
+                        .text_color(rgb(palette().timestamp)),
+                )
             })
             .child(SharedString::from(label)),
     )
