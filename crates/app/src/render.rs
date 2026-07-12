@@ -1708,6 +1708,7 @@ pub fn render_message(
 /// `settings::mod_buttons`), one slot per button applicable to any of the
 /// view's moderated platforms. A slot renders as a real button when it applies
 /// to this row, else as an invisible ghost of the same width (wrong platform;
+/// a command the row's platform doesn't support, like /delete on Kick;
 /// `{msg-id}` commands on local-echo rows, whose synthetic id no API accepts;
 /// or the row's platform isn't moderated at all) — the constant gutter width
 /// keeps every message's text at the same x across a merged multi-platform feed.
@@ -1725,6 +1726,7 @@ fn mod_button_strip(msg: &Message, ids: &RowIds, scale: Scale, ctx: ModStrip) ->
         .map(|(i, b)| {
             let real = ctx.row_moderated
                 && b.platform.is_none_or(|p| p == msg.platform)
+                && crate::commands::supported_on(&b.command, msg.platform)
                 && !(echo && crate::commands::needs_msg_id(&b.command));
             mod_button_chip(ids.mod_button(i), b, scale, ctx.click.clone(), !real)
         })

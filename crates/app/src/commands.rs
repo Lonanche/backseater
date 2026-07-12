@@ -113,7 +113,8 @@ pub const COMMANDS: &[CommandDef] = &[
         name: "delete",
         aliases: &[],
         usage: "/delete <message-id>",
-        // Twitch = Helix; Kick = the site API (its public API has no delete).
+        // Twitch = Helix; Kick = public `DELETE /chat/{id}` (needs the
+        // moderation:chat_message:manage scope — re-login on older tokens).
         description: "Delete a single message",
         platforms: TWITCH_KICK,
         broadcaster_only: false,
@@ -285,8 +286,9 @@ pub const COMMANDS: &[CommandDef] = &[
         name: "unpin",
         aliases: &[],
         usage: "/unpin",
+        // Twitch-only, like /delete — Kick has no public unpin endpoint.
         description: "Remove the current pinned message",
-        platforms: TWITCH_KICK,
+        platforms: TWITCH,
         broadcaster_only: false,
         mod_only: true,
     },
@@ -381,6 +383,21 @@ pub fn needs_msg_id(template: &str) -> bool {
         == Some(ImplicitTarget::MessageId)
 }
 
+/// Whether a mod button's command template can run on `platform`: a leading
+/// known slash command must list the platform in the registry (e.g. a bare
+/// "/delete" can't run on Kick rows, so the button ghosts there); plain text
+/// (sent to chat) and unknown commands aren't platform-gated.
+pub fn supported_on(template: &str, platform: Platform) -> bool {
+    let Some(rest) = template.trim_start().strip_prefix('/') else {
+        return true;
+    };
+    let name = rest.split_whitespace().next().unwrap_or("").to_lowercase();
+    COMMANDS
+        .iter()
+        .find(|c| c.name == name || c.aliases.contains(&name.as_str()))
+        .is_none_or(|c| c.platforms.contains(&platform))
+}
+
 /// The commands available on `platform` whose canonical name (or an alias)
 /// starts with `stem` (already-typed text after the `/`, matched
 /// case-insensitively) — the autocomplete popup's candidate list.
@@ -424,6 +441,19 @@ mod tests {
         assert!(!needs_msg_id("/timeout 600 spam"));
         assert!(!needs_msg_id("!so {user}"));
         assert!(!needs_msg_id("plain chat text"));
+    }
+
+    #[test]
+    fn supported_on_gates_known_commands_by_platform() {
+        // /delete works on both (Kick added the public endpoint); /unpin and
+        // /warn are Twitch-only.
+        assert!(supported_on("/delete", Platform::Kick));
+        assert!(!supported_on("/unpin", Platform::Kick));
+        assert!(!supported_on("/warn {user} spam", Platform::Kick));
+        assert!(supported_on("/warn {user} spam", Platform::Twitch));
+        // Plain text and unknown commands aren't platform-gated.
+        assert!(supported_on("!so {user}", Platform::Kick));
+        assert!(supported_on("/notacommand", Platform::Kick));
     }
 
     #[test]

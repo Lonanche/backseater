@@ -1247,11 +1247,12 @@ impl ChatView {
                     .get(&platform)
                     .map(|pin| pin.message.id.clone());
                 match pinned {
-                    Some(id) => match platform {
-                        bks_core::Platform::Twitch => self.controller.unpin_twitch(id),
-                        bks_core::Platform::Kick => self.controller.unpin_kick(),
-                        _ => {}
-                    },
+                    Some(id) if platform == bks_core::Platform::Twitch => {
+                        self.controller.unpin_twitch(id)
+                    }
+                    Some(_) => self
+                        .controller
+                        .notice(controller::Controller::KICK_UNSUPPORTED),
                     None => self
                         .controller
                         .notice(format!("no pinned message on {}", platform.label())),
@@ -1495,12 +1496,8 @@ impl ChatView {
                         if !still_active {
                             return;
                         }
-                        match platform {
-                            bks_core::Platform::Twitch => {
-                                this.controller.unpin_twitch(id.clone())
-                            }
-                            bks_core::Platform::Kick => this.controller.unpin_kick(),
-                            _ => {}
+                        if platform == bks_core::Platform::Twitch {
+                            this.controller.unpin_twitch(id.clone());
                         }
                     });
                     true
@@ -1508,40 +1505,25 @@ impl ChatView {
         });
     }
 
-    /// Pins `msg_id` on its platform for `duration` seconds (`None` = until
-    /// the stream ends — Twitch only; Kick always pins timed). Twitch pins by
-    /// message id (Helix); Kick's endpoint wants the original message object
-    /// back, rebuilt from our copy of the row.
+    /// Pins `msg_id` for `duration` seconds (`None` = until the stream ends).
+    /// Twitch-only, by message id (Helix) — [`can_pin`](Self::can_pin) keeps the
+    /// 📌 button off other platforms' rows.
     fn pin_message(&self, msg_id: &str, duration: Option<u32>, cx: &App) {
         let Some(msg) = self.message_by_id(msg_id, cx) else {
             return;
         };
-        match msg.platform {
-            bks_core::Platform::Twitch => self.controller.pin_twitch(msg.id.clone(), duration),
-            bks_core::Platform::Kick => {
-                let pinnable = bks_kick::PinnableMessage {
-                    id: msg.id.clone(),
-                    user_id: msg.author.user_id.parse().unwrap_or(0),
-                    login: msg.author.login.clone(),
-                    username: msg.author.display_name.clone(),
-                    color: msg.author.color.map(|c| format!("#{:06X}", c.to_u32())),
-                    content: msg.raw_text.clone(),
-                    created_at: msg.timestamp,
-                };
-                let secs =
-                    duration.unwrap_or(controller::Controller::PIN_DURATION_SECS);
-                self.controller.pin_kick(pinnable, secs);
-            }
-            _ => {}
+        if msg.platform == bks_core::Platform::Twitch {
+            self.controller.pin_twitch(msg.id.clone(), duration);
         }
     }
 
     /// Whether the logged-in user can pin/unpin on `platform` (gates the per-row
-    /// 📌 button and the banner's Unpin). Twitch knows real mod status (IRC
-    /// USERSTATE); for Kick a login is the best signal we have — a non-mod's
-    /// attempt fails with the API error as a notice, like the usercard actions.
+    /// 📌 button and the banner's Unpin). Twitch-only: mod status comes from IRC
+    /// USERSTATE and pins go through Helix. Kick *receiving* pins is anonymous
+    /// and stays, but pinning/unpinning only exists on Kick's site API, which
+    /// rejects third-party OAuth tokens ([`Controller::KICK_UNSUPPORTED`]).
     fn can_pin(&self, platform: bks_core::Platform, cx: &App) -> bool {
-        self.channel.read(cx).can_moderate(platform)
+        platform == bks_core::Platform::Twitch && self.channel.read(cx).can_moderate(platform)
     }
 
     /// The live-status bar above the log: one segment per platform of this tab

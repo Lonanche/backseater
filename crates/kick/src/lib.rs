@@ -7,7 +7,7 @@ mod builder;
 mod connector;
 mod history;
 
-pub use actions::{AuthExpired, KickActions, OnRefreshed, PinnableMessage};
+pub use actions::{AuthExpired, KickActions, OnRefreshed};
 pub use api::{
     fetch_channel_emotes, fetch_channel_info, fetch_user_info, fetch_viewer_count, slugify,
     ChannelInfo, KickUserInfo, LastStream, SubscriberBadge,

@@ -32,7 +32,9 @@ const AUTHORIZE_URL: &str = "https://id.kick.com/oauth/authorize";
 const USERS_URL: &str = "https://api.kick.com/public/v1/users";
 const STORE_NAME: &str = "kick_credentials";
 
-const SCOPES: &str = "user:read channel:read chat:write moderation:ban";
+// `moderation:chat_message:manage` = delete-message; a token from before it
+// was added keeps chatting, delete just 401/403s with a re-login hint.
+const SCOPES: &str = "user:read channel:read chat:write moderation:ban moderation:chat_message:manage";
 
 /// A logged-in Kick session. Tokens expire, so we keep the refresh token + the
 /// broker URL needed to refresh them.

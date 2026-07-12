@@ -31,18 +31,9 @@ static CLIENT: Lazy<Client> = Lazy::new(|| {
         // channel join / usercard / history fetch forever.
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(20))
-        // Kick's site API (pin/unpin) sits behind Laravel's `web` middleware,
-        // which demands a CSRF token matching the session cookie — so responses'
-        // cookies (kick_session + XSRF-TOKEN) must round-trip. The jar is shared
-        // so [`csrf_token`] can read the XSRF value back out.
-        .cookie_provider(COOKIE_JAR.clone())
         .build()
         .expect("building wreq client")
 });
-
-/// The shared cookie jar behind [`CLIENT`], readable for the CSRF handshake.
-static COOKIE_JAR: Lazy<std::sync::Arc<wreq::cookie::Jar>> =
-    Lazy::new(|| std::sync::Arc::new(wreq::cookie::Jar::default()));
 
 /// Issues a GET to a Cloudflare-fronted Kick URL with the shared emulated client
 /// plus browser-looking headers (Accept / UA-ish referer). Returns the response.
@@ -361,135 +352,6 @@ fn flexible_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error>
         serde_json::Value::String(s) => s.parse().unwrap_or(0),
         _ => 0,
     })
-}
-
-/// The CSRF token for Kick's site API writes (pin/unpin). Laravel's `web`
-/// middleware 419s ("CSRF token mismatch") any POST/DELETE whose
-/// `X-XSRF-TOKEN` header doesn't match the session — both the `XSRF-TOKEN`
-/// cookie and the session cookie are set on any page/API response, so a GET to
-/// the channel page primes the shared jar when it's empty. The header wants the
-/// cookie's value percent-decoded.
-pub(crate) async fn csrf_token(slug: &str) -> anyhow::Result<String> {
-    let url: wreq::Url = "https://kick.com/".parse().expect("static url");
-    if let Some(token) = xsrf_from_jar(&url) {
-        return Ok(token);
-    }
-    let _ = kick_get(format!(
-        "https://kick.com/{}",
-        bks_core::encode_url_component(slug)
-    ))
-    .await;
-    xsrf_from_jar(&url).context("kick did not set an XSRF-TOKEN cookie")
-}
-
-/// Reads the `XSRF-TOKEN` cookie for `url` out of the shared jar, decoded.
-fn xsrf_from_jar(url: &wreq::Url) -> Option<String> {
-    use wreq::cookie::CookieStore;
-    let header = COOKIE_JAR.cookies(url)?;
-    let cookies = header.to_str().ok()?;
-    cookies
-        .split(';')
-        .find_map(|part| part.trim().strip_prefix("XSRF-TOKEN=").map(percent_decode))
-}
-
-/// Minimal percent-decoding for the XSRF cookie value (Laravel encodes the
-/// trailing `=` padding as `%3D`).
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let decoded = (bytes[i] == b'%' && i + 2 < bytes.len())
-            .then(|| u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?, 16).ok())
-            .flatten();
-        match decoded {
-            Some(b) => {
-                out.push(b);
-                i += 3;
-            }
-            None => {
-                out.push(bytes[i]);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// Pins a message in `slug`'s chat via the (Cloudflare-fronted) site API —
-/// `POST /api/v2/channels/{slug}/pinned-message` with the full message object +
-/// duration, as the web client sends it. Goes through the emulated client (a
-/// plain client is 403'd by Cloudflare) with the user's bearer token + the CSRF
-/// handshake (`xsrf` from [`csrf_token`], session cookie riding the shared
-/// jar). Returns the response for the caller to check (401 drives its token
-/// refresh).
-pub(crate) async fn pin_message_request(
-    token: &str,
-    xsrf: &str,
-    slug: &str,
-    body: &serde_json::Value,
-) -> wreq::Result<wreq::Response> {
-    CLIENT
-        .post(format!(
-            "{CHANNELS_URL}{}/pinned-message",
-            bks_core::encode_url_component(slug)
-        ))
-        .header("accept", "application/json")
-        .header("accept-language", "en-US,en;q=0.9")
-        .header("referer", format!("https://kick.com/{slug}"))
-        .header("authorization", format!("Bearer {token}"))
-        .header("x-xsrf-token", xsrf)
-        .json(body)
-        .send()
-        .await
-}
-
-/// Deletes one chat message — `DELETE /api/v2/chatrooms/{chatroom_id}/
-/// messages/{message_id}` (the *public* API has no delete endpoint), same
-/// authed edge path as [`pin_message_request`]. `chatroom_id` is the Pusher
-/// `chatroom.id` (the id the WS subscribes on and chat events carry as
-/// `chatroom_id`), NOT the history endpoint's `channel_id` — from a live
-/// capture of the web client's request.
-pub(crate) async fn delete_message_request(
-    token: &str,
-    xsrf: &str,
-    slug: &str,
-    chatroom_id: u64,
-    message_id: &str,
-) -> wreq::Result<wreq::Response> {
-    CLIENT
-        .delete(format!(
-            "https://kick.com/api/v2/chatrooms/{chatroom_id}/messages/{}",
-            bks_core::encode_url_component(message_id)
-        ))
-        .header("accept", "application/json")
-        .header("accept-language", "en-US,en;q=0.9")
-        .header("referer", format!("https://kick.com/{slug}"))
-        .header("authorization", format!("Bearer {token}"))
-        .header("x-xsrf-token", xsrf)
-        .send()
-        .await
-}
-
-/// Unpins `slug`'s current pinned message — `DELETE /api/v2/channels/{slug}/
-/// pinned-message`, same authed edge path as [`pin_message_request`].
-pub(crate) async fn unpin_message_request(
-    token: &str,
-    xsrf: &str,
-    slug: &str,
-) -> wreq::Result<wreq::Response> {
-    CLIENT
-        .delete(format!(
-            "{CHANNELS_URL}{}/pinned-message",
-            bks_core::encode_url_component(slug)
-        ))
-        .header("accept", "application/json")
-        .header("accept-language", "en-US,en;q=0.9")
-        .header("referer", format!("https://kick.com/{slug}"))
-        .header("authorization", format!("Bearer {token}"))
-        .header("x-xsrf-token", xsrf)
-        .send()
-        .await
 }
 
 /// Parses Kick's `livestream.start_time` to UTC, `None` on an empty/bad value.

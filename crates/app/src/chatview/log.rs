@@ -193,11 +193,15 @@ impl Render for LogView {
                     };
                     let name_click = name_click_for(&render_entity, msg);
                     let reply_click = reply_click_for(&render_entity, msg);
-                    // The 📌 button only renders for rows the user can moderate and
-                    // that carry a real platform message id (not a local echo).
+                    // The 📌 button only renders for Twitch rows the user can
+                    // moderate that carry a real platform message id (not a
+                    // local echo) — pinning is Helix-only; Kick's site API
+                    // rejects third-party tokens.
                     let can_moderate = model.can_moderate(msg.platform);
-                    let pin_click = (can_moderate && !msg.id.starts_with("echo-"))
-                        .then(|| pin_click_for(&render_entity, msg));
+                    let pin_click = (msg.platform == bks_core::Platform::Twitch
+                        && can_moderate
+                        && !msg.id.starts_with("echo-"))
+                    .then(|| pin_click_for(&render_entity, msg));
                     // The left-side mod-button strip. Always mode gives EVERY
                     // message row the same-width gutter when this view
                     // moderates anything (rows whose platform isn't moderated

@@ -654,44 +654,12 @@ impl Controller {
         });
     }
 
-    /// Pins a Kick message in this tab's channel for `duration_secs` (Kick's
-    /// endpoint always wants a number — no open-ended pin). `msg` carries the
-    /// original message's fields — Kick's pin endpoint wants the whole message
-    /// object back, not just an id.
-    pub fn pin_kick(&self, msg: bks_kick::PinnableMessage, duration_secs: u32) {
-        let this = self.clone();
-        self.rt.spawn(async move {
-            let Some(actions) = this.kick_actions_or_hint().await else {
-                return;
-            };
-            if !this.require_kick_channel() {
-                return;
-            }
-            if let Err(err) = actions
-                .pin_message(&this.kick_channel, &msg, duration_secs as u64)
-                .await
-            {
-                this.report_kick_error(&err);
-            }
-        });
-    }
-
-    /// Unpins this tab's Kick pinned message (the banner's Unpin button — Kick
-    /// keys the unpin on the channel, no message id needed).
-    pub fn unpin_kick(&self) {
-        let this = self.clone();
-        self.rt.spawn(async move {
-            let Some(actions) = this.kick_actions_or_hint().await else {
-                return;
-            };
-            if !this.require_kick_channel() {
-                return;
-            }
-            if let Err(err) = actions.unpin_message(&this.kick_channel).await {
-                this.report_kick_error(&err);
-            }
-        });
-    }
+    /// The notice for pin/unpin attempts on Kick: those only exist on
+    /// kick.com's site API, which rejects public-API OAuth tokens (it wants the
+    /// web client's session token) — disabled until Kick adds public endpoints
+    /// (like it eventually did for delete-message).
+    pub(crate) const KICK_UNSUPPORTED: &'static str =
+        "Kick's API doesn't let third-party apps do this yet — disabled until Kick adds it";
 
     /// Runs a Kick moderation action, reporting "log in first" when not authed.
     fn spawn_kick_mod(&self, action: ModAction) {
@@ -1176,10 +1144,10 @@ impl Controller {
         if !self.require_kick_channel() {
             return;
         }
-        // Delete keys on the channel + message id (the site API — Kick's public
-        // API has no delete endpoint), not on a chatter id like the ban family.
+        // Delete keys on the message id alone (public API
+        // `DELETE /chat/{message_id}`), not on a chatter id like the ban family.
         if let ModAction::Delete { message_id } = &action {
-            if let Err(err) = actions.delete_message(&self.kick_channel, message_id).await {
+            if let Err(err) = actions.delete_message(message_id).await {
                 self.report_kick_error(&err);
             }
             return;

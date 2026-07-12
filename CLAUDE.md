@@ -111,14 +111,16 @@ platform = implement one trait + one message builder, with zero UI changes**.
   Twitch-only since Kick's endpoint always wants a number — `pin_duration_chips`, selection on
   `ChatView::pin_duration_choice`, reset to the 20m default per open; the dialog builder re-runs
   on notify so the chips are live). Kick gets the shared command set only
-  (`ban/timeout/unban/delete/unpin/usercard` — no chat-mode/announce/pin-command APIs; delete
-  rides the site API, see the Kick login note).
+  (`ban/timeout/unban/delete/usercard` — no chat-mode/announce/pin/unpin APIs; delete is the
+  public `DELETE /public/v1/chat/{message_id}`, see the Kick login note).
 - **Per-message mod buttons (left-side strip)**: small buttons before the platform icon on rows
   whose platform the user can moderate (`ChannelModel::can_moderate`). The strip is a **uniform
   gutter across the view** (`render::ModStrip`): one slot per button applicable to *any*
   platform the view moderates (`ChannelModel::mod_platforms` — channel-present + moderated), and
-  a slot that doesn't apply to a given row (wrong platform, `{msg-id}` on a local echo, or the
-  row's platform unmoderated — in Always mode unmoderated rows still get the all-ghost gutter)
+  a slot that doesn't apply to a given row (wrong platform, a command the row's platform doesn't
+  support per the registry — `commands::supported_on`, e.g. a /warn button on a Kick row —
+  `{msg-id}` on a local echo, or the row's platform unmoderated — in Always mode unmoderated
+  rows still get the all-ghost gutter)
   renders as the same button `.invisible()` — identical width, no listeners — so a merged
   Twitch+Kick feed's messages all start at the same x. **One flat, fully
   user-editable list** (`Settings.mod_buttons`, strip order = list order): the stock **delete**
@@ -173,22 +175,23 @@ platform = implement one trait + one message builder, with zero UI changes**.
   seconds-as-string). On join the current pin is seeded: Kick via the anonymous
   `GET kick.com/api/v2/channels/{slug}/pinned-message` (wreq, tolerant parse), Twitch via Helix
   `GET /chat/pins` (only when logged in — it's moderator-gated; 403 = not a mod = no seed).
-  **Mods pin/unpin**: a hover 📌 button on chat rows (next to ↩ reply, shown when the user can
-  moderate that row's platform: Twitch `twitch_mod`, Kick = logged in) and an Unpin button on the
-  banner. Twitch uses the official Helix `PUT`/`DELETE /helix/chat/pins` (query params only:
-  broadcaster_id, moderator_id, message_id, duration_seconds 30–1800 or omit = until stream ends;
-  covered by the `moderator:manage:chat_messages` scope we already request — no re-login needed;
-  **verified live**, 204s). The 📌 button is hidden on our own sent messages' *local echo* rows —
-  their synthetic `echo-…` id (IRC doesn't echo PRIVMSGs) is rejected by Helix with a 400
-  (`ChatView::can_pin_row`). Kick has **no public pin API** — we call the site's `POST`/`DELETE
-  /api/v2/channels/{slug}/pinned-message` via wreq with the OAuth bearer, rebuilding the message
-  object from our `Message` (`chat_id` = the v2 `chatroom.channel_id`, same id history keys on).
-  That route sits behind Laravel's `web` middleware (a first live test 419'd "CSRF token
-  mismatch"), so the shared wreq client keeps a **cookie jar** and writes send an `x-xsrf-token`
-  header (`api::csrf_token`: the `XSRF-TOKEN` cookie percent-decoded, primed by a channel-page GET
-  when the jar is empty; the session cookie rides the jar). ⚠️ Still **unverified** whether Kick
-  then authorizes a public-API OAuth token there (the web client sends its session token) — a
-  rejection surfaces as an error row. Timed pins expire client-side
+  **Mods pin/unpin — Twitch only**: a hover 📌 button on chat rows (next to ↩ reply, shown when
+  the user can moderate that row's platform — `ChatView::can_pin` is Twitch-gated) and an Unpin
+  button on the banner. Twitch uses the official Helix `PUT`/`DELETE /helix/chat/pins` (query
+  params only: broadcaster_id, moderator_id, message_id, duration_seconds 30–1800 or omit =
+  until stream ends; covered by the `moderator:manage:chat_messages` scope we already request —
+  no re-login needed; **verified live**, 204s). The 📌 button is hidden on our own sent messages'
+  *local echo* rows — their synthetic `echo-…` id (IRC doesn't echo PRIVMSGs) is rejected by
+  Helix with a 400. ⚠️ Kick pin/unpin is **disabled** (`Controller::KICK_UNSUPPORTED` notice on
+  `/unpin`): Kick has no public pin API, and its site API
+  (`POST`/`DELETE kick.com/api/v2/channels/{slug}/pinned-message`) only authenticates the web
+  client's `session_token` cookie as its bearer — it rejects public-API OAuth tokens
+  (**verified live**: 401 "Unauthenticated" with a valid OAuth token; a web capture showed the
+  browser's Authorization header is literally the percent-decoded `session_token` cookie value).
+  We won't ask users to paste browser cookies, so it stays off until Kick adds a public
+  endpoint — like it eventually did for delete-message. (The earlier site-API attempt, with the
+  wreq cookie jar + `x-xsrf-token` CSRF handshake, is removed; it's in git history if ever
+  needed.) Timed pins expire client-side
   (`ChatView::schedule_pin_expiry` + render-time check); a pin with no expiry stays until unpinned.
 - **Twitch viewer list** (👥 button on the input bar, or `/chatters`/`/viewers`): a child OS
   window listing who's connected to the tab's Twitch chat, with a live search filter, count,
@@ -768,12 +771,13 @@ The Kick app id/secret live ONLY as Worker secrets — see `worker/README.md`.
 Send = `POST /public/v1/chat`; ban/timeout = `POST /public/v1/moderation/bans` (duration in
 **minutes**; `/timeout` seconds are converted). Kick's API can't resolve a username → id, so
 `/ban`/`/timeout` only work on chatters we've **already seen** send a message (the controller
-remembers `login → id`). Delete-message has **no public endpoint** — it goes through the **site
-API** like pins (`DELETE kick.com/api/v2/chatrooms/{chatroom_id}/messages/{message_id}`, wreq +
-bearer + `x-xsrf-token`, `KickActions::delete_message`; captured from the web client). ⚠️ The
-`chatroom_id` there is the **Pusher `chatroom.id`**, NOT the history endpoint's
-`chatroom.channel_id`; OAuth-token acceptance on that route is unverified live, same caveat as
-pins — a rejection surfaces as an error row.
+remembers `login → id`). Delete-message = the public `DELETE /public/v1/chat/{message_id}`
+(`KickActions::delete_message`, keyed on the message id alone; **verified live**), behind the
+`moderation:chat_message:manage` scope in `SCOPES` — a login from before that scope keeps
+chatting/banning, delete 401/403s with a re-login hint. ⚠️ Kick's **site API**
+(`kick.com/api/v2/...`) rejects public-API OAuth tokens outright (verified live — it only
+accepts the web client's `session_token` cookie as bearer), so anything that exists *only*
+there (pin/unpin) is disabled, not routed through it.
 
 The broker (`worker/src/index.js`) is **OAuth-only**, intentionally minimal + locked down: POST-only
 token/refresh endpoints + a public `GET /kick/config` (client id), not a general proxy; `redirect_uri`

@@ -2,10 +2,19 @@
 //! and moderation (ban/timeout). Unlike Twitch (IRC sends on the read socket),
 //! Kick sends are stateless HTTPS POSTs, independent of the Pusher read stream.
 //!
-//! Endpoints (all need a `chat:write` / `moderation:ban` scoped user token):
-//! - send:   `POST /public/v1/chat`            `{broadcaster_user_id, content, type}`
-//! - ban:    `POST /public/v1/moderation/bans` `{broadcaster_user_id, user_id, duration?, reason?}`
+//! Endpoints (all need a scoped user token):
+//! - send:   `POST /public/v1/chat`               `{broadcaster_user_id, content, type}` (`chat:write`)
+//! - ban:    `POST /public/v1/moderation/bans`    `{broadcaster_user_id, user_id, duration?, reason?}` (`moderation:ban`)
 //! - unban:  `DELETE /public/v1/moderation/bans`
+//! - delete: `DELETE /public/v1/chat/{message_id}` (`moderation:chat_message:manage`)
+//!
+//! Pin/unpin are intentionally **absent**: Kick's public API has no endpoints
+//! for them, and the site API (`kick.com/api/v2/...`) only authenticates
+//! kick.com *web session* tokens — it rejects public-API OAuth tokens
+//! (verified live: 401 "Unauthenticated"; the web client's bearer is literally
+//! its `session_token` cookie value). Disabled until Kick adds public
+//! endpoints. (Delete used to be in that bucket too, until Kick added the
+//! public endpoint above.)
 //!
 //! **Token refresh.** Kick access tokens are short-lived (~hours). Each authed
 //! request that comes back `401` triggers one refresh through the broker
@@ -250,6 +259,33 @@ impl KickActions {
         ensure_ok(resp, "ban").await
     }
 
+    /// Deletes one chat message via the public API
+    /// (`DELETE /public/v1/chat/{message_id}`, scope
+    /// `moderation:chat_message:manage`). Keys on the message id alone — no
+    /// broadcaster/chatroom id needed.
+    pub async fn delete_message(&self, message_id: &str) -> anyhow::Result<()> {
+        let url = format!(
+            "{CHAT_URL}/{}",
+            bks_core::encode_url_component(message_id)
+        );
+        let resp = self
+            .send_authed("delete", |client, token| {
+                client.delete(&url).bearer_auth(token)
+            })
+            .await?;
+        // The delete scope is newer than the rest — a token from before it was
+        // requested fails here while everything else still works, so point at
+        // the fix instead of dumping the raw rejection.
+        if matches!(resp.status().as_u16(), 401 | 403) {
+            anyhow::bail!(
+                "kick delete failed ({}): the login may predate the delete permission — \
+                 log out and back in (Settings → Account)",
+                resp.status()
+            );
+        }
+        ensure_ok(resp, "delete").await
+    }
+
     /// Unbans (or removes a timeout for) a user in a channel.
     pub async fn unban(&self, broadcaster_id: u64, target_id: u64) -> anyhow::Result<()> {
         let body = serde_json::json!({
@@ -264,135 +300,6 @@ impl KickActions {
         ensure_ok(resp, "unban").await
     }
 
-    /// Pins `msg` in `slug`'s chat for `duration_secs` via the site API
-    /// (`POST /api/v2/channels/{slug}/pinned-message` — Kick's *public* API has no
-    /// pin endpoint). The body mirrors what the web client sends: the original
-    /// message object rebuilt from our copy, plus the duration. ⚠️ Unverified
-    /// whether Kick's site API accepts a public-API OAuth token here (the web
-    /// client sends its session token); a rejection surfaces as the error row.
-    pub async fn pin_message(
-        &self,
-        slug: &str,
-        msg: &PinnableMessage,
-        duration_secs: u64,
-    ) -> anyhow::Result<()> {
-        // The site keys the message's `chat_id` on the v2 `chatroom.channel_id`
-        // (the same id the history endpoint uses), not the Pusher chatroom id.
-        let info = crate::api::fetch_channel_info(slug).await?;
-        let created_at = msg
-            .created_at
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let body = serde_json::json!({
-            "message": {
-                "id": msg.id,
-                "chat_id": info.channel_id,
-                "user_id": msg.user_id,
-                "content": msg.content,
-                "type": "message",
-                "sender": {
-                    "id": msg.user_id,
-                    "slug": msg.login,
-                    "username": msg.username,
-                    "identity": {
-                        "color": msg.color.clone().unwrap_or_default(),
-                        "badges": [],
-                        "badges_v2": [],
-                    },
-                },
-                "created_at": created_at,
-                "thread_parent_id": null,
-            },
-            "duration": duration_secs,
-        });
-        // The exact server expectations are unverified (undocumented endpoint) —
-        // log what we send so a rejection can be diagnosed against a web capture.
-        tracing::debug!("kick pin body for {slug}: {body}");
-        let xsrf = crate::api::csrf_token(slug).await?;
-        let (body, xsrf) = (&body, &xsrf);
-        let resp = self
-            .send_authed_edge("pin", |token| async move {
-                crate::api::pin_message_request(&token, xsrf, slug, body).await
-            })
-            .await?;
-        ensure_ok_edge(resp, "pin").await
-    }
-
-    /// Deletes the chat message `message_id` in `slug`'s chat via the site API
-    /// (`DELETE /api/v2/chatrooms/{chatroom_id}/messages/{message_id}` — the
-    /// *public* API has no delete endpoint; captured from the web client).
-    /// Same auth caveat as [`pin_message`](Self::pin_message).
-    pub async fn delete_message(&self, slug: &str, message_id: &str) -> anyhow::Result<()> {
-        // The chatrooms resource keys on the Pusher `chatroom.id`, not the
-        // history endpoint's `channel_id`.
-        let info = crate::api::fetch_channel_info(slug).await?;
-        let xsrf = crate::api::csrf_token(slug).await?;
-        let (xsrf, chatroom_id) = (&xsrf, info.chatroom_id);
-        let resp = self
-            .send_authed_edge("delete", |token| async move {
-                crate::api::delete_message_request(&token, xsrf, slug, chatroom_id, message_id)
-                    .await
-            })
-            .await?;
-        ensure_ok_edge(resp, "delete").await
-    }
-
-    /// Unpins `slug`'s current pinned message (site API `DELETE`; same auth
-    /// caveat as [`pin_message`](Self::pin_message)).
-    pub async fn unpin_message(&self, slug: &str) -> anyhow::Result<()> {
-        let xsrf = crate::api::csrf_token(slug).await?;
-        let xsrf = &xsrf;
-        let resp = self
-            .send_authed_edge("unpin", |token| async move {
-                crate::api::unpin_message_request(&token, xsrf, slug).await
-            })
-            .await?;
-        ensure_ok_edge(resp, "unpin").await
-    }
-
-    /// Like [`send_authed`](Self::send_authed) but for requests that must go
-    /// through the emulated (Cloudflare-passing) client: runs `send` with the
-    /// current token, refreshing + retrying once on `401`.
-    async fn send_authed_edge<F, Fut>(
-        &self,
-        action: &str,
-        send: F,
-    ) -> anyhow::Result<wreq::Response>
-    where
-        F: Fn(String) -> Fut,
-        Fut: std::future::Future<Output = wreq::Result<wreq::Response>>,
-    {
-        let resp = send(self.access_token().await)
-            .await
-            .with_context(|| format!("kick {action} request"))?;
-        if resp.status().as_u16() != 401 {
-            return Ok(resp);
-        }
-        self.refresh().await.map_err(|_| anyhow!(AuthExpired))?;
-        send(self.access_token().await)
-            .await
-            .with_context(|| format!("kick {action} retry"))
-    }
-}
-
-/// The fields of one of our [`bks_core::Message`]s that the Kick pin endpoint
-/// needs to rebuild the original message object. Built by the app from the
-/// message row the moderator clicked "pin" on.
-#[derive(Clone, Debug)]
-pub struct PinnableMessage {
-    /// The message's Kick id (a UUID).
-    pub id: String,
-    /// The sender's numeric Kick id.
-    pub user_id: u64,
-    /// The sender's login/slug (lowercase).
-    pub login: String,
-    /// The sender's display username.
-    pub username: String,
-    /// The sender's chat color as `#RRGGBB`, when known.
-    pub color: Option<String>,
-    /// The raw message content, with `[emote:id:name]` markers intact.
-    pub content: String,
-    /// When the message was sent.
-    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Turns a non-2xx response into an error carrying the body (Kick puts the
@@ -406,12 +313,3 @@ async fn ensure_ok(resp: reqwest::Response, action: &str) -> anyhow::Result<()> 
     Err(anyhow!("kick {action} failed ({status}): {body}"))
 }
 
-/// [`ensure_ok`] for the emulated-client (`wreq`) responses.
-async fn ensure_ok_edge(resp: wreq::Response, action: &str) -> anyhow::Result<()> {
-    if resp.status().is_success() {
-        return Ok(());
-    }
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    Err(anyhow!("kick {action} failed ({status}): {body}"))
-}
