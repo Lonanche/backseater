@@ -38,8 +38,9 @@ use std::sync::Arc;
 use bks_platform::EventKind;
 use gpui::prelude::*;
 use gpui::{
-    div, img, px, AnyWindowHandle, App, Context, Entity, FontWeight, MouseButton, Pixels, Point,
-    ScrollHandle, SharedString, Size, Subscription, Task, Window, WindowOptions,
+    div, img, px, AnyWindowHandle, App, Context, Div, ElementId, Entity, FontWeight, MouseButton,
+    Pixels, Point, ScrollHandle, SharedString, Size, Stateful, Subscription, Task, Window,
+    WindowOptions,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::combobox::{Combobox, ComboboxEvent, ComboboxState};
@@ -3990,35 +3991,55 @@ impl BackseaterApp {
             .into_any_element()
     }
 
-    /// The pinned "@ Mentions" chip at the front of the tab strip (only when
-    /// enabled in Highlights settings): selecting it shows the shared all-tabs
-    /// mention feed instead of a tab. Like a normal tab it has an ✕ (closes it =
-    /// unchecks the setting) and a right-click "Open in new window"; no drag, no
-    /// per-tab settings.
-    fn mentions_tab_chip(&self, selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Shared base for every tab chip (normal tabs + the Mentions pseudo-tab), so
+    /// they render identically. A compact rounded chip: the active one gets a faint
+    /// accent-tinted fill, full-foreground text, and a 2px accent underline;
+    /// inactive ones sit on a muted recessed fill and lift on hover. Both carry the
+    /// bottom border (transparent when inactive) so selecting doesn't shift the text.
+    fn tab_chip_base(
+        id: impl Into<ElementId>,
+        selected: bool,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let accent = gpui::rgb(render::accent());
         h_flex()
-            .id("mentions-tab")
-            .flex_none()
-            .px_3()
-            .py_1p5()
-            .mt_1()
+            .id(id)
+            .h_6()
+            .px_2p5()
+            .my_1()
             .mr_0p5()
-            .gap_2()
+            .gap_1p5()
             .items_center()
             .rounded_t_md()
-            .border_t_2()
+            .border_b_2()
+            .cursor_pointer()
+            .text_size(px(13.))
             .map(|chip| {
                 if selected {
-                    chip.bg(gpui::rgb(render::tab_active_bg()))
-                        .border_color(gpui::rgb(render::accent()))
+                    chip.bg(accent.opacity(0.14))
+                        .border_color(accent)
+                        .text_color(cx.theme().foreground)
+                        .font_weight(FontWeight::SEMIBOLD)
                 } else {
-                    chip.border_color(gpui::transparent_black())
+                    chip.bg(gpui::rgb(render::tab_inactive_bg()))
+                        .border_color(gpui::transparent_black())
                         .text_color(cx.theme().muted_foreground)
-                        .hover(|s| s.bg(render::chrome_hover()))
+                        .hover(|s| {
+                            s.bg(render::chrome_hover())
+                                .text_color(cx.theme().foreground)
+                        })
                 }
             })
-            .cursor_pointer()
-            .when(selected, |this| this.font_weight(FontWeight::BOLD))
+    }
+
+    /// The pinned "@ Mentions" chip at the front of the tab strip (only when
+    /// enabled in Highlights settings): selecting it shows the shared all-tabs
+    /// mention feed instead of a tab. Rendered like a normal tab (`tab_chip_base`);
+    /// closing it (right-click → Close tab) unchecks the setting; no drag, no
+    /// per-tab settings.
+    fn mentions_tab_chip(&self, selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        Self::tab_chip_base("mentions-tab", selected, cx)
+            .flex_none()
             // A custom name shows verbatim; only the default keeps the "@" mark.
             .child(SharedString::from(
                 self.settings
@@ -4030,40 +4051,33 @@ impl BackseaterApp {
                 this.mentions_tab_selected = true;
                 cx.notify();
             }))
-            // ✕ closes the Mentions tab (turns off the setting, like a normal ✕).
-            .child(
-                div()
-                    .id("mentions-tab-close")
-                    .px_1()
-                    .rounded_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .hover(|s| {
-                        s.bg(render::chrome_hover())
-                            .text_color(cx.theme().foreground)
-                    })
-                    .child(SharedString::from("✕"))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.close_mentions_tab(cx);
-                            cx.stop_propagation();
-                        }),
-                    ),
-            )
-            // Right-click: Open the Mentions feed in its own window.
+            // Right-click: Open in new window / Close tab (closing unchecks the
+            // Highlights setting, like a normal tab's Close).
             .context_menu({
                 let app = cx.entity().downgrade();
                 move |menu, _window, _cx| {
                     let for_popout = app.clone();
-                    menu.min_w(px(200.)).item(
-                        PopupMenuItem::new("Open in new window")
-                            .icon(IconName::WindowMaximize)
-                            .on_click(move |_, _, cx| {
-                                for_popout
-                                    .update(cx, |this, cx| this.pop_out_mentions(cx))
-                                    .ok();
-                            }),
-                    )
+                    let for_close = app.clone();
+                    menu.min_w(px(200.))
+                        .item(
+                            PopupMenuItem::new("Open in new window")
+                                .icon(IconName::WindowMaximize)
+                                .on_click(move |_, _, cx| {
+                                    for_popout
+                                        .update(cx, |this, cx| this.pop_out_mentions(cx))
+                                        .ok();
+                                }),
+                        )
+                        .separator()
+                        .item(
+                            PopupMenuItem::new("Close tab")
+                                .icon(IconName::Close)
+                                .on_click(move |_, _, cx| {
+                                    for_close
+                                        .update(cx, |this, cx| this.close_mentions_tab(cx))
+                                        .ok();
+                                }),
+                        )
                 }
             })
     }
@@ -4155,33 +4169,9 @@ impl BackseaterApp {
                 let any_live = tip_platforms
                     .iter()
                     .any(|p| !p.channel.is_empty() && p.status.as_ref().is_some_and(|s| s.live));
-                // Browser-style chip: rounded top corners, flush to the content
-                // below. The active chip takes the chat surface's color (so it
-                // reads as the front tab, connected to the log) plus a 2px accent
-                // line on top; inactive chips sit flat on the bar and lift on
-                // hover. Every chip carries the top border (transparent when
-                // unselected) so selection doesn't shift the text down 2px.
-                h_flex()
-                    .id(("tab", ix))
-                    .px_3()
-                    .py_1p5()
-                    .mt_1()
-                    .mr_0p5()
-                    .gap_2()
-                    .items_center()
-                    .rounded_t_md()
-                    .border_t_2()
-                    .map(|chip| {
-                        if selected {
-                            chip.bg(gpui::rgb(render::tab_active_bg()))
-                                .border_color(gpui::rgb(render::accent()))
-                        } else {
-                            chip.border_color(gpui::transparent_black())
-                                .text_color(cx.theme().muted_foreground)
-                                .hover(|s| s.bg(render::chrome_hover()))
-                        }
-                    })
-                    .cursor_pointer()
+                // Compact pill chip (see `tab_chip_base`): a rounded, self-contained
+                // pill so each tab reads as its own, active one filled with the accent.
+                Self::tab_chip_base(("tab", ix), selected, cx)
                     // Anchor for the tooltip overlay (absolute, just below the chip).
                     .relative()
                     // A live-status tooltip per set platform, only when the tab has a
@@ -4202,7 +4192,6 @@ impl BackseaterApp {
                         MouseButton::Right,
                         cx.listener(|this, _, _, cx| this.dismiss_chip_tip(cx)),
                     )
-                    .when(selected, |this| this.font_weight(FontWeight::BOLD))
                     // Fade the source chip while its copy is being carried.
                     .when(being_dragged, |this| this.opacity(0.4))
                     // The live dot, theme-aware green (matches the tooltip's ● LIVE).
@@ -4260,35 +4249,16 @@ impl BackseaterApp {
                         this.dismiss_chip_tip(cx);
                         this.select_tab(ix, cx);
                     }))
-                    .child(
-                        div()
-                            .id(("close", ix))
-                            .px_1()
-                            .rounded_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .hover(|s| {
-                                s.bg(render::chrome_hover())
-                                    .text_color(cx.theme().foreground)
-                            })
-                            .child(SharedString::from("✕"))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, window, cx| {
-                                    this.dismiss_chip_tip(cx);
-                                    this.confirm_close_tab(ix, window, cx);
-                                    cx.stop_propagation();
-                                }),
-                            ),
-                    )
-                    // Right-click: Settings / Open in new window. The item click
-                    // closures run in `App` context, so they hop back to this app
-                    // entity to call its methods (which need `Context<Self>`).
+                    // Right-click: Settings / Open in new window / Close tab. The
+                    // item click closures run in `App` context, so they hop back to
+                    // this app entity to call its methods (which need `Context<Self>`).
                     .context_menu({
                         let app = cx.entity().downgrade();
                         move |menu, _window, _cx| {
                             let for_settings = app.clone();
                             let for_popout = app.clone();
-                            // A comfortable width so the two items don't feel cramped.
+                            let for_close = app.clone();
+                            // A comfortable width so the items don't feel cramped.
                             menu.min_w(px(200.))
                                 .item(
                                     PopupMenuItem::new("Settings")
@@ -4299,6 +4269,7 @@ impl BackseaterApp {
                                                 .ok();
                                         }),
                                 )
+                                .separator()
                                 .item(
                                     // Nothing to pop out until the tab has a channel.
                                     PopupMenuItem::new("Open in new window")
@@ -4307,6 +4278,18 @@ impl BackseaterApp {
                                         .on_click(move |_, _, cx| {
                                             for_popout
                                                 .update(cx, |this, cx| this.pop_out_tab(ix, cx))
+                                                .ok();
+                                        }),
+                                )
+                                .separator()
+                                .item(
+                                    PopupMenuItem::new("Close tab")
+                                        .icon(IconName::Close)
+                                        .on_click(move |_, window, cx| {
+                                            for_close
+                                                .update(cx, |this, cx| {
+                                                    this.confirm_close_tab(ix, window, cx)
+                                                })
                                                 .ok();
                                         }),
                                 )
@@ -4369,14 +4352,13 @@ impl BackseaterApp {
         };
 
         // No hard border under the strip: the bar sits one elevation step above
-        // the chat surface, and that contrast is the separation; the active chip
-        // (chat-surface colored, flush to the bottom) visually connects to the
-        // content below.
+        // the chat surface, and that contrast is the separation. Compact pill chips
+        // are vertically centered on the bar.
         h_flex()
             .w_full()
             .px_1()
             .bg(bg)
-            .items_end()
+            .items_center()
             // The global Mentions pseudo-tab, pinned ahead of the scrolling
             // strip so it's always reachable. Enabled in Highlights settings.
             .when(self.settings.mentions_tab, |this| {
@@ -4395,7 +4377,7 @@ impl BackseaterApp {
                     .id("tab-strip-scroll")
                     .flex_1()
                     .min_w_0()
-                    .items_end()
+                    .items_center()
                     // `track_scroll` stays on so the strip is always measured (it
                     // fills `max_offset` regardless of overflow style); scrolling is
                     // only engaged when the chips actually overflow, so a fitting

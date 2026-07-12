@@ -63,11 +63,8 @@ pub(crate) struct Palette {
     automod_deny: u32,
     /// The tab strip background (behind the chips).
     tab_bar_bg: u32,
-    /// Selected-tab chip background — matches `chat_bg` so the active tab reads as
-    /// the content surface it sits above, instead of the kit's
-    /// near-black `background` which looked like a hole.
-    tab_active_bg: u32,
-    /// Unselected-tab chip background (a recessed tone vs the active tab).
+    /// Unselected-tab chip background (a recessed tone; the active tab is filled
+    /// with the accent instead).
     tab_inactive_bg: u32,
     /// Floating-panel surface (settings/usercard windows) — an *elevated* tone so a
     /// panel reads as raised above the app, not the kit's flat near-black.
@@ -105,8 +102,7 @@ const DARK: Palette = Palette {
     automod_allow: 0x57d98a,
     automod_deny: 0xf28b8b,
     tab_bar_bg: 0x1b1b1f,
-    tab_active_bg: 0x121214,
-    tab_inactive_bg: 0x1b1b1f,
+    tab_inactive_bg: 0x2a2a30,
     panel_bg: 0x222228,
 };
 
@@ -138,8 +134,7 @@ const LIGHT: Palette = Palette {
     automod_allow: 0x188038,
     automod_deny: 0xc22e2e,
     tab_bar_bg: 0xe9e9ec,
-    tab_active_bg: 0xffffff,
-    tab_inactive_bg: 0xe9e9ec,
+    tab_inactive_bg: 0xdadadf,
     panel_bg: 0xffffff,
 };
 
@@ -255,7 +250,6 @@ impl Palette {
             automod_allow: base.automod_allow,
             automod_deny: base.automod_deny,
             tab_bar_bg: shade(0.5),
-            tab_active_bg: c.chat_bg,
             tab_inactive_bg: shade(0.25),
             panel_bg: lift(0.12),
         }
@@ -321,12 +315,6 @@ pub fn offline_text() -> u32 {
 /// channel names in the tab tooltip.
 pub fn link_color() -> u32 {
     palette().link
-}
-
-/// The selected-tab chip background — matches [`chat_bg`] so the active tab reads
-/// as the content surface below it.
-pub fn tab_active_bg() -> u32 {
-    palette().tab_active_bg
 }
 
 /// The unselected-tab chip background (recessed vs the active tab).
