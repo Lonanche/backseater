@@ -383,6 +383,26 @@ pub fn needs_msg_id(template: &str) -> bool {
         == Some(ImplicitTarget::MessageId)
 }
 
+/// Whether a mod button's command template acts on a *user* (not a message):
+/// an explicit `{user}`, or a leading known command whose implicit target is
+/// the user (a bare "/ban", "/timeout 600"). The usercard — which targets a
+/// person, not a message — offers only these buttons (a "/delete" or a
+/// `{msg-id}` template has no message to act on there).
+pub fn targets_user(template: &str) -> bool {
+    if template.contains("{user}") {
+        return true;
+    }
+    if template.contains("{msg-id}") {
+        return false;
+    }
+    template
+        .trim_start()
+        .strip_prefix('/')
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(implicit_target)
+        == Some(ImplicitTarget::User)
+}
+
 /// Whether a mod button's command template can run on `platform`: a leading
 /// known slash command must list the platform in the registry (e.g. a bare
 /// "/delete" can't run on Kick rows, so the button ghosts there); plain text
@@ -469,6 +489,19 @@ mod tests {
         assert!(!needs_msg_id("/timeout 600 spam"));
         assert!(!needs_msg_id("!so {user}"));
         assert!(!needs_msg_id("plain chat text"));
+    }
+
+    #[test]
+    fn targets_user_covers_explicit_and_implicit_forms() {
+        assert!(targets_user("/ban"));
+        assert!(targets_user("/timeout 600 spam"));
+        assert!(targets_user("/warn {user} spam"));
+        assert!(targets_user("!so {user}"));
+        // Message-targeted and no-target templates don't touch a user.
+        assert!(!targets_user("/delete"));
+        assert!(!targets_user("/delete {msg-id}"));
+        assert!(!targets_user("/announce hi"));
+        assert!(!targets_user("plain chat text"));
     }
 
     #[test]

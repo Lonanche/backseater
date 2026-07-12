@@ -1536,6 +1536,33 @@ impl ChatView {
         self.controller.handle_input_at(&line, msg.platform);
     }
 
+    /// Runs a custom mod button from the usercard against `login` on `platform`.
+    /// Like [`run_mod_button`](Self::run_mod_button) but there's no message —
+    /// the card targets a user — so only `{user}`/`<user>`-target templates are
+    /// offered (filtered by `commands::targets_user`); the login is substituted
+    /// for `{user}` and injected as the implicit target when no placeholder is
+    /// typed.
+    fn run_usercard_mod_button(&self, command: &str, login: &str, platform: bks_core::Platform) {
+        let mut template = command.to_string();
+        if !command.contains("{user}") {
+            let is_user_target = command
+                .strip_prefix('/')
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(commands::implicit_target)
+                == Some(commands::ImplicitTarget::User);
+            if is_user_target {
+                let mut parts = command.splitn(2, char::is_whitespace);
+                let head = parts.next().unwrap_or_default();
+                template = match parts.next() {
+                    Some(rest) => format!("{head} {{user}} {rest}"),
+                    None => format!("{head} {{user}}"),
+                };
+            }
+        }
+        let line = template.replace("{user}", login);
+        self.controller.handle_input_at(&line, platform);
+    }
+
     /// Opens the pin confirmation dialog for message `msg_id`: the message is
     /// shown as it will appear pinned, with duration chips (Twitch-web style —
     /// timed, or "Until stream ends" where the platform supports it), and only
@@ -4139,10 +4166,45 @@ impl ChatView {
         let is_broadcaster = card.is_broadcaster;
         let show_ban_timeout = !is_broadcaster && !card.is_moderator;
         let show_roles = !is_broadcaster && self.channel.read(cx).twitch_broadcaster;
-        if !show_ban_timeout && !show_roles {
+        let login = card.login.clone();
+
+        // The user's own custom mod buttons (Settings → Mod Buttons), filtered
+        // to this card's platform (scope Both/None or a matching platform, and
+        // supported on it) and to those that act on a *user* — the card has no
+        // message, so "/delete"/`{msg-id}` buttons are skipped. Labeled with the
+        // button's name; each runs its template against this login. These show
+        // even for a mod/broadcaster target (a bot shoutout isn't a ban).
+        let custom_buttons: Vec<gpui::AnyElement> = crate::settings::mod_buttons()
+            .iter()
+            .filter(|b| b.platform.is_none_or(|p| p == platform))
+            .filter(|b| commands::supported_on(&b.command, platform))
+            .filter(|b| commands::targets_user(&b.command))
+            .enumerate()
+            .map(|(i, b)| {
+                let label = if b.name.is_empty() {
+                    b.command.clone()
+                } else {
+                    b.name.clone()
+                };
+                let command = b.command.clone();
+                let to_login = login.clone();
+                Button::new(SharedString::from(format!("usercard-custom-{i}")))
+                    .label(SharedString::from(label))
+                    .outline()
+                    .xsmall()
+                    .compact()
+                    .on_click(cx.listener(move |this, _, _, _| {
+                        this.run_usercard_mod_button(&command, &to_login, platform);
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        let custom_buttons_row = (!custom_buttons.is_empty())
+            .then(|| h_flex().w_full().flex_wrap().gap_1().children(custom_buttons));
+
+        if !show_ban_timeout && !show_roles && custom_buttons_row.is_none() {
             return div().into_any_element();
         }
-        let login = card.login.clone();
 
         // (label, seconds) timeout presets — Chatterino's spread, through the
         // full 2-week Twitch cap; presets over the platform's cap are dropped
@@ -4313,8 +4375,8 @@ impl ChatView {
         });
 
         // A compact, sectioned panel: the timeout chips + custom-duration row,
-        // a Ban/Unban row, and (Twitch broadcaster only) a "Role" row with
-        // explicit Mod/Unmod/VIP/Unvip buttons.
+        // a Ban/Unban row, (Twitch broadcaster only) a "Role" row, and the
+        // user's custom mod buttons.
         let section_label = |text: &'static str| {
             div()
                 .text_size(px(11.))
@@ -4364,6 +4426,15 @@ impl ChatView {
                         .gap_1()
                         .child(section_label("Role"))
                         .child(role_row.w_full().flex_wrap()),
+                )
+            })
+            .when_some(custom_buttons_row, |col, row| {
+                col.child(
+                    v_flex()
+                        .w_full()
+                        .gap_1()
+                        .child(section_label("Custom"))
+                        .child(row),
                 )
             })
             .into_any_element()
