@@ -823,6 +823,7 @@ impl PinnedChat {
             reply: None,
             first_message: false,
             historical: false,
+            reward_id: None,
         }
     }
 }

@@ -205,6 +205,7 @@ fn usernotice_message(un: &tmi::msg::UserNotice<'_>) -> Option<Box<Message>> {
         reply: None,
         first_message: false,
         historical: false,
+        reward_id: None,
     }))
 }
 
@@ -443,6 +444,13 @@ pub(crate) fn privmsg_to_message(
         reply,
         first_message,
         historical: false,
+        // A non-empty `custom-reward-id` marks a message sent by redeeming a
+        // text-requiring channel-point reward; the UI pairs it with the pubsub
+        // "X redeemed …" event and shows it under that header.
+        reward_id: pm
+            .custom_reward_id()
+            .filter(|id| !id.is_empty())
+            .map(str::to_string),
     }
 }
 
@@ -525,6 +533,31 @@ mod tests {
         let reply = msg.reply.expect("reply parent");
         assert_eq!(reply.author, "Posty");
         assert_eq!(reply.text, "hello");
+    }
+
+    #[test]
+    fn custom_reward_id_tags_message() {
+        let raw = "@badge-info=;badges=;color=#8A2BE2;\
+                   custom-reward-id=be22f712-8fd9-426a-90df-c13eae6cc6dc;\
+                   display-name=vesdeg;emotes=;first-msg=0;flags=;id=abc;mod=0;\
+                   room-id=164774298;subscriber=0;tmi-sent-ts=1709298826724;\
+                   turbo=0;user-id=164774298;user-type= \
+                   :vesdeg!vesdeg@vesdeg.tmi.twitch.tv PRIVMSG #vesdeg :my message";
+        let msg = privmsg_to_message("#vesdeg", &parse_privmsg(raw), false);
+        assert_eq!(
+            msg.reward_id.as_deref(),
+            Some("be22f712-8fd9-426a-90df-c13eae6cc6dc")
+        );
+    }
+
+    #[test]
+    fn normal_message_has_no_reward_id() {
+        let raw = "@badge-info=;badges=;color=;display-name=qaixx;emotes=;id=abc;\
+                   mod=0;room-id=11148817;subscriber=0;tmi-sent-ts=1594555275886;\
+                   turbo=0;user-id=40286300;user-type= \
+                   :qaixx!qaixx@qaixx.tmi.twitch.tv PRIVMSG #lonanche :hi";
+        let msg = privmsg_to_message("#lonanche", &parse_privmsg(raw), false);
+        assert!(msg.reward_id.is_none());
     }
 
     #[test]

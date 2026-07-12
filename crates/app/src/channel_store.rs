@@ -37,6 +37,12 @@ use crate::controller::Controller;
 use crate::session::Session;
 use crate::{MAX_EVENTS, MAX_ROWS};
 
+/// How long a channel-point reward message (Twitch IRC) waits for its pubsub
+/// "X redeemed …" event (or vice-versa) before giving up and rendering alone.
+/// The two arrive over separate sockets a beat apart; a couple seconds covers
+/// the skew without holding an unpaired message visibly long.
+const REWARD_PAIR_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// A public channel event (sub/gift/raid/…) held in the model's retained
 /// [`events`](ChannelModel::events) buffer, which — unlike the chat ring buffer —
 /// isn't trimmed when chat fills up, so the events panel keeps its history through
@@ -196,6 +202,19 @@ pub struct ChannelModel {
     /// Platforms whose rich moderator feed (Twitch EventSub) is live — suppresses
     /// the generic ban/timeout notice fallback.
     pub rich_mod_feed: HashSet<Platform>,
+    /// Reward messages (Twitch IRC PRIVMSGs carrying a `custom-reward-id`) held
+    /// back until their pubsub "X redeemed …" event arrives, so the message
+    /// renders *under* that header as one row. Keyed by lowercased redeemer login
+    /// → a FIFO queue, so one user redeeming twice in the window keeps both
+    /// messages (a plain map would clobber the first). A held message with no
+    /// event within the window is flushed as a normal chat row.
+    pending_reward_msgs: HashMap<String, VecDeque<Box<Message>>>,
+    /// Redeemers whose "X redeemed …" event was just rendered without its
+    /// message (the rare case where pubsub beat IRC). Their reward message,
+    /// arriving within the window, renders as a normal row *below* the already-
+    /// shown event (correct order) instead of being held. Keyed by lowercased
+    /// redeemer name → the instant the event rendered.
+    recent_reward_events: HashMap<String, std::time::Instant>,
     /// The connection handle (send/moderation), shared by every view.
     pub controller: Controller,
     /// Drains the connection's event stream into this model. Dropping the model
@@ -349,6 +368,63 @@ impl ChannelModel {
 
     /// Inserts a message row, keeping backfilled history timestamp-sorted (so
     /// Twitch + Kick history interleave chronologically and stay ahead of live).
+    /// Routes a channel-point reward message (Twitch `custom-reward-id`). If its
+    /// "X redeemed …" event just rendered (pubsub beat IRC), show it now as a
+    /// normal row — it lands directly below that event. Otherwise hold it, keyed
+    /// by the redeemer, until the event arrives and attaches it; a matching event
+    /// within [`REWARD_PAIR_WINDOW`] merges the two, and a flush after that window
+    /// renders any still-unpaired message as a plain row (a reward that emits no
+    /// community-points event).
+    fn handle_reward_message(&mut self, msg: Box<Message>, cx: &mut Context<Self>) {
+        let key = msg.author.display_name.to_lowercase();
+        let recent = self
+            .recent_reward_events
+            .get(&key)
+            .is_some_and(|at| at.elapsed() < REWARD_PAIR_WINDOW);
+        if recent {
+            self.recent_reward_events.remove(&key);
+            self.insert_message(msg.into(), cx);
+            return;
+        }
+        self.pending_reward_msgs
+            .entry(key.clone())
+            .or_default()
+            .push_back(msg);
+        cx.spawn(async move |model, cx| {
+            cx.background_executor().timer(REWARD_PAIR_WINDOW).await;
+            let _ = model.update(cx, |model, cx| {
+                // Flush the oldest still-held message for this key (this timer's).
+                // A matching event may have already taken it, leaving nothing.
+                if let Some(msg) = model.take_pending_reward_msg(&key, None) {
+                    model.insert_message(msg.into(), cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Takes a reward message held for `key`, preferring the one whose text
+    /// matches `want_text` (the event's `user_input`) so a user redeeming more
+    /// than once at a time pairs each event with the right message; falls back to
+    /// the oldest (FIFO) when there's no text match — Twitch may normalize the
+    /// input, and identical redemptions are indistinguishable anyway. Removes the
+    /// queue entry once empty so the map doesn't retain empty deques.
+    fn take_pending_reward_msg(
+        &mut self,
+        key: &str,
+        want_text: Option<&str>,
+    ) -> Option<Box<Message>> {
+        let queue = self.pending_reward_msgs.get_mut(key)?;
+        let msg = want_text
+            .and_then(|want| queue.iter().position(|m| m.raw_text == want))
+            .and_then(|i| queue.remove(i))
+            .or_else(|| queue.pop_front());
+        if queue.is_empty() {
+            self.pending_reward_msgs.remove(key);
+        }
+        msg
+    }
+
     fn insert_message(&mut self, msg: std::sync::Arc<Message>, cx: &mut Context<Self>) {
         if !msg.historical {
             self.row_push_back(Row::Message { msg }, cx);
@@ -459,6 +535,14 @@ impl ChannelModel {
                 if crate::settings::global_ignored(&msg.raw_text) {
                     return;
                 }
+                // A channel-point reward message (Twitch `custom-reward-id`) is
+                // paired with its "X redeemed …" event so it renders under that
+                // header. Hold it here unless the event already showed for this
+                // redeemer (then it renders as a normal row *below* the event).
+                if msg.reward_id.is_some() {
+                    self.handle_reward_message(msg, cx);
+                    return;
+                }
                 self.insert_message(msg.into(), cx);
             }
             ChatEvent::System(text) => tracing::info!("{text}"),
@@ -469,9 +553,30 @@ impl ChannelModel {
                 kind,
                 text,
                 timestamp,
-                message,
+                mut message,
                 details,
             } => {
+                // A channel-point reward's message arrives separately over IRC. If
+                // it's already waiting, attach it so it renders under this header;
+                // otherwise remember that the event showed first, so the message
+                // (arriving shortly) renders as a normal row below it.
+                if kind == EventKind::Reward {
+                    if let Some(name) = details.actor.as_deref() {
+                        let key = name.to_lowercase();
+                        let want = details.redeem_input.as_deref();
+                        if let Some(reward_msg) = self.take_pending_reward_msg(&key, want) {
+                            message = Some(reward_msg);
+                        } else {
+                            // Drop entries whose message never arrived so the map
+                            // can't grow unbounded (a text reward should always
+                            // emit a message, but be defensive).
+                            self.recent_reward_events
+                                .retain(|_, at| at.elapsed() < REWARD_PAIR_WINDOW);
+                            self.recent_reward_events
+                                .insert(key, std::time::Instant::now());
+                        }
+                    }
+                }
                 // Retain the event in its own buffer (survives chat-ring trimming)
                 // for the events panel, then also push the inline log row.
                 let group = gift_group(
@@ -834,6 +939,8 @@ fn build_model(
             // (`kick/connector.rs`), so it's a "rich mod feed" from the start —
             // seeded here so the generic-notice suppression below needn't name it.
             rich_mod_feed: HashSet::from([Platform::Kick]),
+            pending_reward_msgs: HashMap::new(),
+            recent_reward_events: HashMap::new(),
             controller,
             _drain: drain,
         }

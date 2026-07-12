@@ -5014,6 +5014,7 @@ mod tests {
                 reply: None,
                 first_message: false,
                 historical,
+                reward_id: None,
             }),
         }
     }

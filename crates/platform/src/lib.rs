@@ -107,6 +107,12 @@ pub struct EventDetails {
     /// default highlight (Twitch's PRIMARY is the channel's own accent color,
     /// which anonymous chat can't see, so it maps to `None` too).
     pub accent: Option<u32>,
+    /// For a channel-point reward that requires text: the viewer's typed input
+    /// (Twitch pubsub `redemption.user_input`). The store uses it to pair this
+    /// event with the matching IRC message (which carries the badges/emotes),
+    /// disambiguating when one user redeems more than once at a time. `None` for
+    /// non-reward events and rewards without text.
+    pub redeem_input: Option<String>,
 }
 
 /// A channel's active chat-restriction modes, platform-agnostic. Always a

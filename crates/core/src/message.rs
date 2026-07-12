@@ -277,4 +277,11 @@ pub struct Message {
     /// live one. The UI renders these faded to set them apart.
     #[serde(default)]
     pub historical: bool,
+    /// The Twitch custom-reward id when this message was sent by redeeming a
+    /// channel-point reward that requires text (IRC `custom-reward-id` tag).
+    /// The UI pairs such a message with its "X redeemed …" event and renders it
+    /// under that header instead of as a standalone row. `None` for normal
+    /// messages and non-Twitch platforms.
+    #[serde(default)]
+    pub reward_id: Option<String>,
 }

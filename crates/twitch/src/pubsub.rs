@@ -70,6 +70,10 @@ struct RedeemData {
 struct Redemption {
     user: RedeemUser,
     reward: Reward,
+    /// The viewer's typed message, present only when the reward requires text.
+    /// Used to pair the event with its IRC message; absent/empty otherwise.
+    #[serde(default)]
+    user_input: String,
 }
 
 #[derive(Deserialize)]
@@ -236,6 +240,10 @@ pub async fn run(channel_id: String, tx: ChatSink) -> anyhow::Result<()> {
                     kind: EventKind::Reward,
                     text: redeem_text(&data.redemption),
                     timestamp: chrono::Utc::now(),
+                    // The viewer's message (for a text-requiring reward) arrives
+                    // separately over IRC (with badges/emotes); the UI pairs it
+                    // with this event and renders it under the header. So no
+                    // message is attached here.
                     message: None,
                     details: redeem_details(&data.redemption),
                 }
@@ -355,6 +363,7 @@ fn pin_event(data: PinData) -> Option<ChatEvent> {
         reply: None,
         first_message: false,
         historical: false,
+        reward_id: None,
     };
     Some(ChatEvent::PinMessage {
         platform: Platform::Twitch,
@@ -375,9 +384,11 @@ fn redeem_text(r: &Redemption) -> String {
 
 /// Condensed form for the events panel: "redeemed <reward> · N pts".
 fn redeem_details(r: &Redemption) -> bks_platform::EventDetails {
+    let input = r.user_input.trim();
     bks_platform::EventDetails {
         actor: Some(r.user.display_name.clone()),
         compact: Some(format!("redeemed {} · {} pts", r.reward.title, r.reward.cost)),
+        redeem_input: (!input.is_empty()).then(|| input.to_string()),
         ..Default::default()
     }
 }
@@ -395,7 +406,20 @@ mod tests {
                 title: title.into(),
                 cost,
             },
+            user_input: String::new(),
         }
+    }
+
+    #[test]
+    fn redeem_details_carries_trimmed_user_input() {
+        let mut r = redemption("alice", "Say something", 50);
+        assert_eq!(redeem_details(&r).redeem_input, None);
+
+        r.user_input = "  gg wp  ".into();
+        assert_eq!(
+            redeem_details(&r).redeem_input.as_deref(),
+            Some("gg wp")
+        );
     }
 
     #[test]

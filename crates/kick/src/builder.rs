@@ -328,6 +328,7 @@ pub fn build_message(
         reply,
         first_message: false,
         historical: false,
+        reward_id: None,
     }
 }
 
