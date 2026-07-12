@@ -126,6 +126,10 @@ pub struct Settings {
     /// collecting every tab's mentions in one feed. Off by default.
     #[serde(default)]
     pub mentions_tab: bool,
+    /// A custom display name for the global Mentions tab (chip label + window
+    /// titles). `None` = the default "Mentions".
+    #[serde(default)]
+    pub mentions_tab_name: Option<String>,
     /// Whether the updater also installs pre-release (beta) builds. Off by
     /// default; betas move to the next stable automatically (semver ordering).
     #[serde(default)]
@@ -168,6 +172,7 @@ impl Default for Settings {
             show_pinned_kick: true,
             show_status_bar: true,
             mentions_tab: false,
+            mentions_tab_name: None,
             beta_updates: false,
             mention_sound: false,
             muted_mentions: Vec::new(),
@@ -183,6 +188,12 @@ impl Settings {
             Ok(Some(s)) => s,
             _ => Settings::default(),
         }
+    }
+
+    /// The global Mentions tab's display name: the custom name if one is set,
+    /// else "Mentions".
+    pub fn mentions_tab_label(&self) -> &str {
+        self.mentions_tab_name.as_deref().unwrap_or("Mentions")
     }
 
     /// The saved custom theme matching the active [`theme`](Self::theme) choice,

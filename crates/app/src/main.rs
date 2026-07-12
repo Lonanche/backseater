@@ -40,7 +40,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::combobox::{Combobox, ComboboxEvent, ComboboxState};
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::searchable_list::SearchableVec;
@@ -126,6 +126,7 @@ enum SettingsInput {
     Ignore,
     TabMention,
     TabIgnore,
+    MentionsTabName,
 }
 
 /// The font-family dropdown's state type: a searchable list of font names.
@@ -152,6 +153,7 @@ struct SettingsInputs {
     ignore: Entity<InputState>,
     tab_mention: Entity<InputState>,
     tab_ignore: Entity<InputState>,
+    mentions_tab_name: Entity<InputState>,
 }
 
 impl SettingsInputs {
@@ -165,6 +167,7 @@ impl SettingsInputs {
             ignore: settings_input(SettingsInput::Ignore, window, cx),
             tab_mention: settings_input(SettingsInput::TabMention, window, cx),
             tab_ignore: settings_input(SettingsInput::TabIgnore, window, cx),
+            mentions_tab_name: settings_input(SettingsInput::MentionsTabName, window, cx),
         }
     }
 }
@@ -180,6 +183,7 @@ fn settings_input(which: SettingsInput, window: &mut Window, cx: &mut App) -> En
         SettingsInput::Ignore => "Word, phrase, or re:<regex>",
         SettingsInput::TabMention => "Add a term for this tab",
         SettingsInput::TabIgnore => "Word, phrase, or re:<regex>",
+        SettingsInput::MentionsTabName => "Mentions",
     };
     cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
 }
@@ -526,6 +530,9 @@ pub(crate) struct BackseaterApp {
     /// created in, so these are recreated against the settings window each time
     /// it opens ([`rebind_settings_inputs`](Self::rebind_settings_inputs)).
     settings_inputs: SettingsInputs,
+    /// Applies edits of the Mentions-tab rename input live (label + titles).
+    /// Replaced together with the inputs on each settings-window open.
+    _settings_mentions_name_sub: Subscription,
     /// The searchable font-family dropdown in Appearance. Window-bound like the
     /// inputs (its popover + search field), so recreated on each settings-window
     /// open; the subscription (selection → [`set_font_family`](Self::set_font_family))
@@ -709,6 +716,13 @@ impl BackseaterApp {
 
         // Placeholders until the settings window opens and rebinds them to itself.
         let settings_inputs = SettingsInputs::build(window, cx);
+        if let Some(name) = settings.mentions_tab_name.clone() {
+            settings_inputs
+                .mentions_tab_name
+                .update(cx, |s, cx| s.set_value(name, window, cx));
+        }
+        let settings_mentions_name_sub =
+            Self::subscribe_mentions_name(&settings_inputs.mentions_tab_name, cx);
         let (settings_font, settings_font_sub) =
             Self::font_combobox(settings.font_family.as_deref(), window, cx);
         // Open the theme editor on the active custom theme (if any) so its colors
@@ -772,6 +786,7 @@ impl BackseaterApp {
             tab_scroll: ScrollHandle::new(),
             settings,
             settings_inputs,
+            _settings_mentions_name_sub: settings_mentions_name_sub,
             settings_theme_name,
             settings_theme_pickers,
             _settings_theme_subs: settings_theme_subs,
@@ -806,6 +821,13 @@ impl BackseaterApp {
     /// wouldn't get focus/blur/cursor events in a child window.
     fn rebind_settings_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_inputs = SettingsInputs::build(window, cx);
+        if let Some(name) = self.settings.mentions_tab_name.clone() {
+            self.settings_inputs
+                .mentions_tab_name
+                .update(cx, |s, cx| s.set_value(name, window, cx));
+        }
+        self._settings_mentions_name_sub =
+            Self::subscribe_mentions_name(&self.settings_inputs.mentions_tab_name, cx);
         let (font, font_sub) =
             Self::font_combobox(self.settings.font_family.as_deref(), window, cx);
         self.settings_font = font;
@@ -1223,6 +1245,45 @@ impl BackseaterApp {
             })
             .detach();
         });
+    }
+
+    /// Subscribes the Mentions-tab rename input so edits apply live (created
+    /// alongside the input on each settings-window rebind).
+    fn subscribe_mentions_name(
+        input: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe(input, |this, state, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                let value = state.read(cx).value().to_string();
+                this.set_mentions_tab_name(value, cx);
+            }
+        })
+    }
+
+    /// Applies + persists a new global Mentions tab name (empty = the default),
+    /// retitling the popped-out Mentions window if open.
+    fn set_mentions_tab_name(&mut self, value: String, cx: &mut Context<Self>) {
+        let name = value.trim();
+        let name = (!name.is_empty()).then(|| name.to_string());
+        if name == self.settings.mentions_tab_name {
+            return;
+        }
+        self.settings.mentions_tab_name = name;
+        self.settings.save();
+        if let Some(handle) = self.mentions_window {
+            let title = self.mentions_window_title();
+            handle
+                .update(cx, |_, window, _| window.set_window_title(&title))
+                .ok();
+        }
+        cx.notify();
+    }
+
+    /// The Mentions views' window title ("Backseater - {name}"), following the
+    /// custom tab name.
+    pub(crate) fn mentions_window_title(&self) -> String {
+        format!("Backseater - {}", self.settings.mentions_tab_label())
     }
 
     /// Closes the global Mentions tab — same as unchecking "Show a Mentions tab"
@@ -2470,6 +2531,15 @@ impl BackseaterApp {
                     }))
                     .into_any_element(),
             ))
+            .child(card_divider())
+            .child(setting_row(
+                "Tab name",
+                Some("What the Mentions tab is called; leave empty for the default."),
+                div()
+                    .w(px(160.))
+                    .child(Input::new(&self.settings_inputs.mentions_tab_name).small())
+                    .into_any_element(),
+            ))
             .into_any_element()
     }
 
@@ -3242,7 +3312,13 @@ impl BackseaterApp {
             })
             .cursor_pointer()
             .when(selected, |this| this.font_weight(FontWeight::BOLD))
-            .child(SharedString::from("@ Mentions"))
+            // A custom name shows verbatim; only the default keeps the "@" mark.
+            .child(SharedString::from(
+                self.settings
+                    .mentions_tab_name
+                    .clone()
+                    .unwrap_or_else(|| "@ Mentions".to_string()),
+            ))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.mentions_tab_selected = true;
                 cx.notify();
@@ -3985,7 +4061,7 @@ impl Render for BackseaterApp {
         // it (select, rename, close, restore) is covered without call-site hooks.
         let mentions_tab = self.settings.mentions_tab && self.mentions_tab_selected;
         let title = if mentions_tab {
-            "Backseater - Mentions".to_string()
+            self.mentions_window_title()
         } else {
             match self.tabs.get(self.active) {
                 Some(tab) => format!("Backseater - {}", tab.config.display_name()),

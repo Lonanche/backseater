@@ -171,6 +171,7 @@ pub fn open_mentions(
     cx: &mut App,
 ) -> anyhow::Result<(AnyWindowHandle, Entity<MentionsWindow>)> {
     let display_id = crate::child_window::resolve_display(bounds, parent_display, cx);
+    let title = app.read(cx).mentions_window_title();
 
     let mut content = None;
     let handle = cx.open_window(
@@ -178,7 +179,7 @@ pub fn open_mentions(
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             display_id,
             titlebar: Some(TitlebarOptions {
-                title: Some(SharedString::from("Backseater - Mentions")),
+                title: Some(SharedString::from(title)),
                 ..Default::default()
             }),
             window_min_size: Some(POPOUT_MIN_SIZE),
