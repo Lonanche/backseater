@@ -94,6 +94,31 @@ pub fn open_centered<H: Render>(
     )
 }
 
+/// [`open_centered`] without the built-in padded scroll surface: the body gets
+/// the window edge-to-edge and manages its own padding + scrolling. For panels
+/// with their own chrome (the settings window's full-height category sidebar).
+pub fn open_centered_bare<H: Render>(
+    title: &str,
+    size: Size<Pixels>,
+    min_size: Size<Pixels>,
+    parent: AnyWindowHandle,
+    host: Entity<H>,
+    body: impl Fn(&mut H, &mut gpui::Context<H>) -> AnyElement + 'static,
+    cx: &mut App,
+) -> anyhow::Result<(AnyWindowHandle, Entity<ChildWindow<H>>)> {
+    let (parent, display) = parent_bounds(parent, cx);
+    open_impl(
+        title,
+        centered_on(parent, size),
+        min_size,
+        display,
+        host,
+        body,
+        true,
+        cx,
+    )
+}
+
 /// The body builder a child window renders its content with, against the host.
 type Body<H> = Box<dyn Fn(&mut H, &mut gpui::Context<H>) -> AnyElement>;
 
@@ -102,6 +127,9 @@ type Body<H> = Box<dyn Fn(&mut H, &mut gpui::Context<H>) -> AnyElement>;
 pub struct ChildWindow<H: Render> {
     host: WeakEntity<H>,
     body: Body<H>,
+    /// Bare windows hand the body the full window; padded ones wrap it in the
+    /// shared scrolling panel surface.
+    bare: bool,
     _observe_host: Subscription,
 }
 
@@ -113,10 +141,14 @@ impl<H: Render> Render for ChildWindow<H> {
             return div().into_any_element();
         };
         let body = host.update(cx, |host, cx| (self.body)(host, cx));
-        div()
+        let root = div()
             .size_full()
             .bg(rgb(crate::render::panel_bg()))
-            .text_color(cx.theme().foreground)
+            .text_color(cx.theme().foreground);
+        if self.bare {
+            return root.child(body).into_any_element();
+        }
+        root
             // The body scrolls if it's taller than the window.
             .child(
                 div()
@@ -151,6 +183,20 @@ pub fn open<H: Render>(
     body: impl Fn(&mut H, &mut gpui::Context<H>) -> AnyElement + 'static,
     cx: &mut App,
 ) -> anyhow::Result<(AnyWindowHandle, Entity<ChildWindow<H>>)> {
+    open_impl(title, bounds, min_size, parent_display, host, body, false, cx)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn open_impl<H: Render>(
+    title: &str,
+    bounds: Bounds<Pixels>,
+    min_size: Size<Pixels>,
+    parent_display: Option<DisplayId>,
+    host: Entity<H>,
+    body: impl Fn(&mut H, &mut gpui::Context<H>) -> AnyElement + 'static,
+    bare: bool,
+    cx: &mut App,
+) -> anyhow::Result<(AnyWindowHandle, Entity<ChildWindow<H>>)> {
     let display_id = resolve_display(bounds, parent_display, cx);
     let mut content = None;
     let handle = cx.open_window(
@@ -169,6 +215,7 @@ pub fn open<H: Render>(
             let view = cx.new(|cx| ChildWindow {
                 host: host.downgrade(),
                 body: Box::new(body),
+                bare,
                 _observe_host: cx.observe(&host, |_, _, cx| cx.notify()),
             });
             content = Some(view.clone());

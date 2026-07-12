@@ -85,13 +85,13 @@ pub(crate) const PICKER_GRID_HEIGHT: f32 = 132.0;
 /// Default size of the settings child window — a bit bigger than the usercard;
 /// the OS resizes it freely from there (the Highlights inputs wrap when narrow).
 const SETTINGS_WINDOW_SIZE: Size<Pixels> = Size {
-    width: px(600.),
+    width: px(700.),
     height: px(660.),
 };
 /// Smallest the settings window can be resized to — the width floor keeps the
-/// content column (after the 140px category sidebar + padding) usable.
+/// content column (after the 150px category sidebar + padding) usable.
 const SETTINGS_MIN_SIZE: Size<Pixels> = Size {
-    width: px(420.),
+    width: px(460.),
     height: px(300.),
 };
 
@@ -215,6 +215,18 @@ impl SettingsCategory {
             SettingsCategory::Highlights => "Highlights",
             SettingsCategory::Streamer => "Streamer Mode",
             SettingsCategory::About => "About",
+        }
+    }
+
+    /// The sidebar entry's icon (the kit's bundled lucide set).
+    fn icon(self) -> IconName {
+        match self {
+            SettingsCategory::Account => IconName::CircleUser,
+            SettingsCategory::Appearance => IconName::ALargeSmall,
+            SettingsCategory::Themes => IconName::Palette,
+            SettingsCategory::Highlights => IconName::Bell,
+            SettingsCategory::Streamer => IconName::EyeOff,
+            SettingsCategory::About => IconName::Info,
         }
     }
 }
@@ -1253,7 +1265,9 @@ impl BackseaterApp {
         }
 
         // Always opens centered over the chat window; drag it away from there.
-        let opened = child_window::open_centered(
+        // Bare: the settings body draws its own full-height sidebar + scrolling
+        // content pane instead of the shared padded panel surface.
+        let opened = child_window::open_centered_bare(
             panel.title(),
             SETTINGS_WINDOW_SIZE,
             SETTINGS_MIN_SIZE,
@@ -1303,11 +1317,19 @@ impl BackseaterApp {
             .update(cx, |s, cx| s.set_value(&cfg.youtube_channel, window, cx));
     }
 
-    /// The settings window's content, dispatched on the current panel.
+    /// The settings window's content, dispatched on the current panel. The
+    /// window is bare (no built-in padding/scroll): the app panel draws its own
+    /// sidebar + content pane; a tab panel gets a plain padded scroll here.
     fn settings_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         match self.settings_window {
             Some((_, Panel::App)) => self.app_settings_body(cx),
-            Some((_, Panel::Tab(ix))) => self.tab_settings_body(ix, cx),
+            Some((_, Panel::Tab(ix))) => div()
+                .id("tab-settings-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .p_4()
+                .child(self.tab_settings_body(ix, cx))
+                .into_any_element(),
             None => gpui::Empty.into_any_element(),
         }
     }
@@ -1459,26 +1481,50 @@ impl BackseaterApp {
         }
     }
 
-    /// The body of the app-settings panel: a category sidebar on the left and the
-    /// selected category's sections on the right. Built fresh each render so it
-    /// tracks live login/size/theme changes.
+    /// The body of the app-settings panel: a full-height category rail on the
+    /// left (its own surface, icons + labels) and the selected category's
+    /// sections in an independently scrolling content pane, headed by the
+    /// category name. Built fresh each render so it tracks live login/size/theme
+    /// changes.
     fn app_settings_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use gpui_component::Icon;
+
         let selected = self.settings_category;
-        let sidebar = v_flex().flex_none().w(px(140.)).gap_1().children(
-            SettingsCategory::ALL.into_iter().map(|cat| {
+        let sidebar = v_flex()
+            .flex_none()
+            .w(px(150.))
+            .h_full()
+            .gap_0p5()
+            .p_2()
+            .bg(cx.theme().sidebar)
+            .border_r_1()
+            .border_color(cx.theme().sidebar_border)
+            .children(SettingsCategory::ALL.into_iter().map(|cat| {
                 let is_sel = cat == selected;
-                div()
+                h_flex()
                     .id(SharedString::from(format!("settings-cat-{}", cat.label())))
                     .w_full()
-                    .px_3()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
                     .py_1p5()
                     .rounded_md()
                     .cursor_pointer()
+                    .text_size(px(13.))
                     .when(is_sel, |s| {
                         s.bg(cx.theme().secondary).font_weight(FontWeight::MEDIUM)
                     })
                     .when(!is_sel, |s| s.text_color(cx.theme().muted_foreground))
                     .hover(|s| s.bg(cx.theme().secondary))
+                    .child(
+                        Icon::new(cat.icon())
+                            .size(px(15.))
+                            .text_color(if is_sel {
+                                cx.theme().foreground
+                            } else {
+                                cx.theme().muted_foreground
+                            }),
+                    )
                     .child(SharedString::from(cat.label()))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1487,8 +1533,7 @@ impl BackseaterApp {
                             cx.notify();
                         }),
                     )
-            }),
-        );
+            }));
 
         let body = match selected {
             SettingsCategory::Account => v_flex().gap_5().child(self.account_section(cx)),
@@ -1504,11 +1549,32 @@ impl BackseaterApp {
         };
 
         h_flex()
-            .w_full()
-            .items_start()
-            .gap_5()
+            .size_full()
+            .items_stretch()
             .child(sidebar)
-            .child(div().flex_1().min_w_0().child(body))
+            .child(
+                div()
+                    .id("settings-scroll")
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_y_scroll()
+                    .px_5()
+                    .py_4()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .max_w(px(520.))
+                            .gap_4()
+                            .child(
+                                div()
+                                    .text_size(px(17.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(SharedString::from(selected.label())),
+                            )
+                            .child(body),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -1516,11 +1582,16 @@ impl BackseaterApp {
     /// button that applies them to tab `ix` and closes the panel.
     fn tab_settings_body(&mut self, ix: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         v_flex()
-            .gap_3()
-            .child(field("Name", &self.settings_inputs.name))
-            .child(field("Twitch channel", &self.settings_inputs.twitch))
-            .child(field("Kick channel", &self.settings_inputs.kick))
-            .child(field("YouTube channel", &self.settings_inputs.youtube))
+            .gap_4()
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(section_title("Tab"))
+                    .child(field("Name", &self.settings_inputs.name))
+                    .child(field("Twitch channel", &self.settings_inputs.twitch))
+                    .child(field("Kick channel", &self.settings_inputs.kick))
+                    .child(field("YouTube channel", &self.settings_inputs.youtube)),
+            )
             .child(self.events_panel_section(ix, cx))
             .child(self.term_list_section(TermList::tab(TermKind::Mentions, ix), cx))
             .child(self.term_list_section(TermList::tab(TermKind::Ignore, ix), cx))
@@ -1548,6 +1619,7 @@ impl BackseaterApp {
     /// fresh each render, so it reflects the tab's current config.
     fn events_panel_section(&self, ix: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         use gpui_component::checkbox::Checkbox;
+        use gpui_component::switch::Switch;
 
         let Some(tab) = self.tabs.get(ix) else {
             return div().into_any_element();
@@ -1555,25 +1627,31 @@ impl BackseaterApp {
         let show = tab.config.layout.contains(tabs::PanelKind::Events);
         let filter = tab.config.event_kinds;
 
-        let mut col = v_flex().gap_2().child(section_title("Side panels")).child(
-            Checkbox::new("show-events-panel")
-                .label("Show events panel")
+        let mut card = setting_card().child(setting_row(
+            "Events panel",
+            Some("Subs, raids, and other channel events in a side panel."),
+            Switch::new("show-events-panel")
+                .small()
                 .checked(show)
                 .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                     this.set_panel_shown(ix, tabs::PanelKind::Events, *checked, cx);
-                })),
-        );
+                }))
+                .into_any_element(),
+        ));
 
         if show {
             let events_only = tab.config.events_only;
-            col = col.child(
-                Checkbox::new("events-only")
-                    .child(div().pb_1().child("Events only (hide from chat)"))
+            card = card.child(card_divider()).child(setting_row(
+                "Events only",
+                Some("Hide events from the chat log; they show only in the panel."),
+                Switch::new("events-only")
+                    .small()
                     .checked(events_only)
                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                         this.set_events_only(ix, *checked, cx);
-                    })),
-            );
+                    }))
+                    .into_any_element(),
+            ));
 
             let kinds = EventKind::ALL.into_iter().map(|kind| {
                 Checkbox::new(SharedString::from(format!("event-kind-{}", kind.label())))
@@ -1583,85 +1661,99 @@ impl BackseaterApp {
                         this.set_event_kind(ix, kind, *checked, cx);
                     }))
             });
-            col = col.child(
+            card = card.child(card_divider()).child(
                 v_flex()
                     .gap_1()
-                    .pl_2()
+                    .px_3()
+                    .py_2()
                     .children(kinds.map(IntoElement::into_any_element)),
             );
         }
 
         let show_mentions = tab.config.layout.contains(tabs::PanelKind::Mentions);
-        col = col.child(
-            Checkbox::new("show-mentions-panel")
-                .label("Show mentions panel")
+        card = card.child(card_divider()).child(setting_row(
+            "Mentions panel",
+            Some("Messages that mention you, in a side panel."),
+            Switch::new("show-mentions-panel")
+                .small()
                 .checked(show_mentions)
                 .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                     this.set_panel_shown(ix, tabs::PanelKind::Mentions, *checked, cx);
-                })),
-        );
+                }))
+                .into_any_element(),
+        ));
 
         if show_mentions {
-            col = col.child(
-                v_flex().pl_2().child(
-                    Checkbox::new("mentions-all-tabs")
-                        .label("Mentions from all tabs (click one to jump to its tab)")
-                        .checked(tab.config.mentions_all_tabs)
-                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                            this.set_mentions_all_tabs(ix, *checked, cx);
-                        })),
-                ),
-            );
+            card = card.child(card_divider()).child(setting_row(
+                "Mentions from all tabs",
+                Some("Click a mention to jump to its tab."),
+                Switch::new("mentions-all-tabs")
+                    .small()
+                    .checked(tab.config.mentions_all_tabs)
+                    .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                        this.set_mentions_all_tabs(ix, *checked, cx);
+                    }))
+                    .into_any_element(),
+            ));
         }
 
-        col.into_any_element()
-    }
-
-    /// Renders the Account section: login status + a login/logout button per
-    /// platform. Actions go through the active tab's controller.
-    fn account_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let state = self.session.login_state();
         v_flex()
-            .gap_3()
-            .child(section_title("Account"))
-            .child(self.account_row(
-                "Twitch",
-                state.twitch,
-                0x9147ff,
-                cx,
-                |c| c.twitch_login(),
-                |c| c.twitch_logout(),
-            ))
-            .child(self.account_row(
-                "Kick",
-                state.kick,
-                0x53fc18,
-                cx,
-                |c| c.kick_login(),
-                |c| c.kick_logout(),
-            ))
+            .gap_2()
+            .child(section_title("Side panels"))
+            .child(card)
             .into_any_element()
     }
 
-    /// One platform's account row: the account name (or "not logged in") and a
-    /// Log in / Log out button. `account` is `Some(name)` when logged in.
+    /// Renders the Account section: one card row per platform (logo, login
+    /// status, a Log in / Log out button). Actions go through the active tab's
+    /// controller.
+    fn account_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let state = self.session.login_state();
+        v_flex()
+            .gap_2()
+            .child(section_title("Accounts"))
+            .child(
+                setting_card()
+                    .child(self.account_row(
+                        bks_core::Platform::Twitch,
+                        state.twitch,
+                        cx,
+                        |c| c.twitch_login(),
+                        |c| c.twitch_logout(),
+                    ))
+                    .child(card_divider())
+                    .child(self.account_row(
+                        bks_core::Platform::Kick,
+                        state.kick,
+                        cx,
+                        |c| c.kick_login(),
+                        |c| c.kick_logout(),
+                    )),
+            )
+            .into_any_element()
+    }
+
+    /// One platform's account row: logo + platform name with the account name
+    /// (or "Not logged in") under it, and a Log in / Log out button at the
+    /// right. `account` is `Some(name)` when logged in.
     fn account_row(
         &self,
-        platform: &'static str,
+        platform: bks_core::Platform,
         account: Option<String>,
-        color: u32,
         cx: &mut Context<Self>,
         login: fn(&Controller),
         logout: fn(&Controller),
     ) -> gpui::AnyElement {
         let logged_in = account.is_some();
         let status = match &account {
-            Some(name) => format!("logged in as {name}"),
-            None => "not logged in".to_string(),
+            Some(name) => format!("Logged in as {name}"),
+            None => "Not logged in".to_string(),
         };
+        let label = platform.label();
         let button = if logged_in {
-            Button::new(SharedString::from(format!("logout-{platform}")))
+            Button::new(SharedString::from(format!("logout-{label}")))
                 .label("Log out")
+                .small()
                 .danger()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(c) = this.active_controller(cx) {
@@ -1670,8 +1762,9 @@ impl BackseaterApp {
                     cx.notify();
                 }))
         } else {
-            Button::new(SharedString::from(format!("login-{platform}")))
+            Button::new(SharedString::from(format!("login-{label}")))
                 .label("Log in")
+                .small()
                 .primary()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(c) = this.active_controller(cx) {
@@ -1683,16 +1776,41 @@ impl BackseaterApp {
         h_flex()
             .w_full()
             .items_center()
-            .justify_between()
-            .gap_4()
+            .gap_3()
+            .px_3()
+            .py_2p5()
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(22.))
+                    .flex()
+                    .justify_center()
+                    .child(match platform.icon_url() {
+                        Some(url) => {
+                            let (w, h) = platform.icon_size(20.);
+                            img(SharedString::from(url))
+                                .h(px(h))
+                                .w(px(w))
+                                .flex_none()
+                                .into_any_element()
+                        }
+                        None => div()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(gpui::rgb(platform.color().to_u32()))
+                            .child(SharedString::from(platform.glyph()))
+                            .into_any_element(),
+                    }),
+            )
             .child(
                 v_flex()
-                    .gap_0()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
                     .child(
                         div()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(gpui::rgb(color))
-                            .child(SharedString::from(platform)),
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(SharedString::from(label)),
                     )
                     .child(
                         div()
@@ -1809,14 +1927,17 @@ impl BackseaterApp {
         }
 
         let mut body = v_flex()
-            .gap_3()
-            .child(section_title("Themes"))
-            .child(selector)
+            .gap_2()
+            .child(section_title("Theme"))
+            .child(setting_card().p_1().gap_0p5().child(selector))
             .child(
-                Button::new("new-theme")
-                    .label("+ New theme")
-                    .outline()
-                    .on_click(cx.listener(|this, _, window, cx| this.new_theme(window, cx))),
+                h_flex().child(
+                    Button::new("new-theme")
+                        .label("+ New theme")
+                        .small()
+                        .outline()
+                        .on_click(cx.listener(|this, _, window, cx| this.new_theme(window, cx))),
+                ),
             );
 
         if self.theme_draft.is_some() {
@@ -1831,165 +1952,155 @@ impl BackseaterApp {
         use gpui_component::button::Button;
         use gpui_component::color_picker::ColorPicker;
 
-        let mut rows = v_flex().gap_2();
+        let mut card = setting_card().child(setting_row(
+            "Name",
+            None,
+            Input::new(&self.settings_theme_name)
+                .w(px(200.))
+                .into_any_element(),
+        ));
         for (i, field) in ThemeColorField::ALL.into_iter().enumerate() {
             let Some(picker) = self.settings_theme_pickers.get(i) else {
                 continue;
             };
-            rows = rows.child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    .child(SharedString::from(field.label()))
-                    .child(ColorPicker::new(picker)),
-            );
+            card = card.child(card_divider()).child(setting_row(
+                field.label(),
+                None,
+                ColorPicker::new(picker).into_any_element(),
+            ));
         }
 
         v_flex()
-            .gap_3()
+            .gap_2()
             .mt_2()
-            .pt_3()
-            .border_t_1()
-            .border_color(cx.theme().border)
             .child(section_title("Edit theme"))
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    .child(SharedString::from("Name"))
-                    .child(Input::new(&self.settings_theme_name).w(px(200.))),
-            )
-            .child(rows)
+            .child(card)
             .child(
                 h_flex()
                     .gap_2()
                     .child(
                         Button::new("save-theme")
                             .label("Save theme")
+                            .small()
                             .primary()
                             .on_click(cx.listener(|this, _, window, cx| this.save_theme(window, cx))),
                     )
                     .child(
                         Button::new("cancel-theme")
                             .label("Cancel")
+                            .small()
                             .ghost()
                             .on_click(cx.listener(|this, _, _, cx| this.cancel_theme_edit(cx))),
                     ),
             )
     }
 
-    /// Renders the Appearance section: chat font-size stepper + the 7TV name-colors
-    /// toggle.
+    /// Renders the Appearance section: a Font card (family + size) and a Chat
+    /// card (7TV name colors, live status bar, pinned-message banners), each a
+    /// label-left / control-right row.
     fn appearance_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use gpui_component::checkbox::Checkbox;
+        use gpui_component::switch::Switch;
         let size = self.settings.font_size;
-        let show_paints = self.settings.show_7tv_paints;
-        v_flex()
-            .gap_3()
-            .child(section_title("Appearance"))
+        let stepper = h_flex()
+            .items_center()
+            .gap_2()
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        Checkbox::new("show-7tv-paints")
-                            .label("Show 7TV name colors")
-                            .checked(show_paints)
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.set_show_7tv_paints(*checked, cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(SharedString::from(
-                                "Render 7TV paints (gradient/solid name colors) and 7TV badges.",
-                            )),
-                    ),
+                Button::new("font-smaller")
+                    .label("–")
+                    .small()
+                    .outline()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.adjust_font_size(-1.0, cx);
+                    })),
             )
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        Checkbox::new("show-status-bar")
-                            .label("Show live status bar (viewer counts)")
+                div()
+                    .w(px(44.))
+                    .text_center()
+                    .text_size(px(13.))
+                    .child(SharedString::from(format!("{size:.0} px"))),
+            )
+            .child(
+                Button::new("font-larger")
+                    .label("+")
+                    .small()
+                    .outline()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.adjust_font_size(1.0, cx);
+                    })),
+            );
+        v_flex()
+            .gap_2()
+            .child(section_title("Font"))
+            .child(
+                setting_card()
+                    .child(setting_row(
+                        "Font",
+                        None,
+                        Combobox::new(&self.settings_font)
+                            .w(px(220.))
+                            .menu_max_h(px(320.))
+                            .placeholder(DEFAULT_FONT_LABEL)
+                            .into_any_element(),
+                    ))
+                    .child(card_divider())
+                    .child(setting_row(
+                        "Chat font size",
+                        None,
+                        stepper.into_any_element(),
+                    )),
+            )
+            .child(div().h_1())
+            .child(section_title("Chat"))
+            .child(
+                setting_card()
+                    .child(setting_row(
+                        "7TV name colors",
+                        Some("Render 7TV paints (gradient/solid name colors) and 7TV badges."),
+                        Switch::new("show-7tv-paints")
+                            .small()
+                            .checked(self.settings.show_7tv_paints)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.set_show_7tv_paints(*checked, cx);
+                            }))
+                            .into_any_element(),
+                    ))
+                    .child(card_divider())
+                    .child(setting_row(
+                        "Live status bar",
+                        Some("Channel + viewer count above chat while a stream is live."),
+                        Switch::new("show-status-bar")
+                            .small()
                             .checked(self.settings.show_status_bar)
                             .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                 this.set_show_status_bar(*checked, cx);
-                            })),
-                    )
-                    .child(
-                        Checkbox::new("show-pinned-twitch")
-                            .label("Show pinned messages (Twitch)")
+                            }))
+                            .into_any_element(),
+                    ))
+                    .child(card_divider())
+                    .child(setting_row(
+                        "Pinned messages — Twitch",
+                        Some("Banner above chat while a moderator has a message pinned."),
+                        Switch::new("show-pinned-twitch")
+                            .small()
                             .checked(self.settings.show_pinned_twitch)
                             .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                 this.set_show_pinned(bks_core::Platform::Twitch, *checked, cx);
-                            })),
-                    )
-                    .child(
-                        Checkbox::new("show-pinned-kick")
-                            .label("Show pinned messages (Kick)")
+                            }))
+                            .into_any_element(),
+                    ))
+                    .child(card_divider())
+                    .child(setting_row(
+                        "Pinned messages — Kick",
+                        Some("The banner's ✕ hides just the current pin."),
+                        Switch::new("show-pinned-kick")
+                            .small()
                             .checked(self.settings.show_pinned_kick)
                             .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                 this.set_show_pinned(bks_core::Platform::Kick, *checked, cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(SharedString::from(
-                                "Show a banner above chat while a moderator has a message pinned. \
-                                 The banner's ✕ hides just the current pin.",
-                            )),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    .child(SharedString::from("Font"))
-                    .child(
-                        Combobox::new(&self.settings_font)
-                            .w(px(240.))
-                            .menu_max_h(px(320.))
-                            .placeholder(DEFAULT_FONT_LABEL),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    .child(SharedString::from("Chat font size"))
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(Button::new("font-smaller").label("–").outline().on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.adjust_font_size(-1.0, cx);
-                                }),
-                            ))
-                            .child(
-                                div()
-                                    .w(px(48.))
-                                    .text_center()
-                                    .child(SharedString::from(format!("{size:.0} px"))),
-                            )
-                            .child(Button::new("font-larger").label("+").outline().on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.adjust_font_size(1.0, cx);
-                                }),
-                            )),
-                    ),
+                            }))
+                            .into_any_element(),
+                    )),
             )
             .into_any_element()
     }
@@ -2019,13 +2130,14 @@ impl BackseaterApp {
                 )
         };
 
-        let active = match (streamer_mode::is_active(), current) {
-            (true, StreamerModeChoice::Auto) => "● Active (auto)",
-            (true, _) => "● Active (manual — closing OBS won't turn it off)",
-            (false, _) => "○ Inactive",
+        let is_active = streamer_mode::is_active();
+        let active = match (is_active, current) {
+            (true, StreamerModeChoice::Auto) => "Active (auto)",
+            (true, _) => "Active (manual — closing OBS won't turn it off)",
+            (false, _) => "Inactive",
         };
         let status = format!(
-            "{active} · Streaming software: {}.",
+            "{active} · Streaming software {}",
             if self.obs_running {
                 "detected"
             } else {
@@ -2034,16 +2146,17 @@ impl BackseaterApp {
         );
 
         v_flex()
-            .gap_3()
+            .gap_2()
             .child(section_title("Streamer Mode"))
             .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    .child(SharedString::from("Streamer mode"))
-                    .child(
+                setting_card()
+                    .child(setting_row(
+                        "Streamer mode",
+                        Some(
+                            "Hides things you might not want on stream — usercard avatars \
+                             are blanked until clicked. Auto follows streaming software \
+                             (OBS, Streamlabs, XSplit, Twitch Studio, vMix, PRISM).",
+                        ),
                         h_flex()
                             .gap_1()
                             .p_0p5()
@@ -2051,48 +2164,51 @@ impl BackseaterApp {
                             .bg(cx.theme().muted)
                             .child(seg(StreamerModeChoice::Off, "Off", cx))
                             .child(seg(StreamerModeChoice::On, "On", cx))
-                            .child(seg(StreamerModeChoice::Auto, "Auto", cx)),
+                            .child(seg(StreamerModeChoice::Auto, "Auto", cx))
+                            .into_any_element(),
+                    ))
+                    .child(card_divider())
+                    .child(setting_row(
+                        "Mute mention sounds while active",
+                        Some("Mention pings stay silent so they don't leak into the stream."),
+                        {
+                            use gpui_component::switch::Switch;
+                            Switch::new("streamer-mute-sounds")
+                                .small()
+                                .checked(self.settings.streamer_mute_sounds)
+                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                    this.set_streamer_mute_sounds(*checked, cx);
+                                }))
+                                .into_any_element()
+                        },
+                    ))
+                    .child(card_divider())
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .py_2()
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .size(px(7.))
+                                    .rounded_full()
+                                    .bg(gpui::rgb(if is_active {
+                                        render::live_text()
+                                    } else {
+                                        render::offline_text()
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(SharedString::from(status)),
+                            ),
                     ),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from(
-                        "Hides things you might not want on stream — usercard avatars are \
-                         blanked until clicked. Auto turns it on and off with streaming \
-                         software (OBS, Streamlabs, XSplit, Twitch Studio, vMix, PRISM), \
-                         checked every 10 seconds; On/Off ignore OBS entirely.",
-                    )),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from(status)),
-            )
-            .child({
-                use gpui_component::checkbox::Checkbox;
-                v_flex()
-                    .gap_1()
-                    .child(
-                        Checkbox::new("streamer-mute-sounds")
-                            .label("Mute mention sounds while active")
-                            .checked(self.settings.streamer_mute_sounds)
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.set_streamer_mute_sounds(*checked, cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(SharedString::from(
-                                "While streamer mode is active, mention pings stay silent so \
-                                 they don't leak into the stream. Uncheck to keep sounds on.",
-                            )),
-                    )
-            })
             .into_any_element()
     }
 
@@ -2100,71 +2216,93 @@ impl BackseaterApp {
     /// project links, and the install location. The version lives here (not
     /// chat/window chrome).
     fn about_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use gpui_component::checkbox::Checkbox;
-        let link = |id: &'static str, label: &'static str, url: String| {
-            div()
+        use gpui_component::switch::Switch;
+        use gpui_component::Icon;
+        let link = |id: &'static str, label: &'static str, url: String, cx: &Context<Self>| {
+            h_flex()
                 .id(id)
+                .w_full()
+                .items_center()
+                .gap_4()
+                .px_3()
+                .py_2()
                 .cursor_pointer()
-                .text_color(gpui::rgb(render::link_color()))
-                .hover(|s| s.underline())
-                .child(SharedString::from(label))
+                .hover(|s| s.bg(render::chrome_hover()))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(13.))
+                        .child(SharedString::from(label)),
+                )
+                .child(
+                    Icon::new(IconName::ExternalLink)
+                        .size(px(14.))
+                        .text_color(cx.theme().muted_foreground),
+                )
                 .on_click(move |_, _, cx| cx.open_url(&url))
         };
         v_flex()
-            .gap_3()
-            .child(section_title("About"))
+            .gap_2()
+            .child(section_title("Updates"))
             .child(
-                h_flex()
-                    .gap_2()
-                    .child(
+                setting_card()
+                    .child(setting_row(
+                        "Version",
+                        None,
                         div()
+                            .text_size(px(13.))
                             .text_color(cx.theme().muted_foreground)
-                            .child(SharedString::from("Version")),
-                    )
-                    .child(SharedString::from(updater::version_label())),
-            )
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        Checkbox::new("beta-updates")
-                            .label("Get beta updates")
+                            .child(SharedString::from(updater::version_label()))
+                            .into_any_element(),
+                    ))
+                    .child(card_divider())
+                    .child(setting_row(
+                        "Get beta updates",
+                        Some(
+                            "Also install pre-release (beta) builds. A beta moves to the \
+                             next stable release automatically.",
+                        ),
+                        Switch::new("beta-updates")
+                            .small()
                             .checked(self.settings.beta_updates)
                             .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                 this.set_beta_updates(*checked, cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(SharedString::from(
-                                "Also install pre-release (beta) builds. A beta moves to the \
-                                 next stable release automatically.",
-                            )),
-                    ),
+                            }))
+                            .into_any_element(),
+                    )),
             )
-            .child(link(
-                "about-github",
-                "Backseater on GitHub",
-                updater::repo_url().to_string(),
-            ))
-            .child(link(
-                "about-releases",
-                "Release notes",
-                format!("{}/releases", updater::repo_url()),
-            ))
+            .child(div().h_1())
+            .child(section_title("Links"))
             .child(
-                h_flex().child(
-                    Button::new("about-open-install")
-                        .label("Open install folder")
-                        .outline()
-                        .on_click(|_, _, cx| {
-                            if let Ok(exe) = std::env::current_exe() {
-                                cx.reveal_path(&exe);
-                            }
-                        }),
-                ),
+                setting_card()
+                    .child(link(
+                        "about-github",
+                        "Backseater on GitHub",
+                        updater::repo_url().to_string(),
+                        cx,
+                    ))
+                    .child(card_divider())
+                    .child(link(
+                        "about-releases",
+                        "Release notes",
+                        format!("{}/releases", updater::repo_url()),
+                        cx,
+                    ))
+                    .child(card_divider())
+                    .child(setting_row(
+                        "Install folder",
+                        None,
+                        Button::new("about-open-install")
+                            .label("Open")
+                            .small()
+                            .outline()
+                            .on_click(|_, _, cx| {
+                                if let Ok(exe) = std::env::current_exe() {
+                                    cx.reveal_path(&exe);
+                                }
+                            })
+                            .into_any_element(),
+                    )),
             )
             .into_any_element()
     }
@@ -2203,12 +2341,16 @@ impl BackseaterApp {
     /// The "Mentions tab" toggle in Highlights: shows/hides the pinned global
     /// Mentions pseudo-tab at the front of the tab strip.
     fn mentions_tab_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use gpui_component::checkbox::Checkbox;
-        v_flex()
-            .gap_2()
-            .child(
-                Checkbox::new("show-mentions-tab")
-                    .label("Show a Mentions tab")
+        use gpui_component::switch::Switch;
+        setting_card()
+            .child(setting_row(
+                "Mentions tab",
+                Some(
+                    "A pinned tab collecting every tab's mentions in one feed; \
+                     click a mention to jump to its tab.",
+                ),
+                Switch::new("show-mentions-tab")
+                    .small()
                     .checked(self.settings.mentions_tab)
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
                         this.settings.mentions_tab = *checked;
@@ -2217,17 +2359,9 @@ impl BackseaterApp {
                         }
                         this.settings.save();
                         cx.notify();
-                    })),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from(
-                        "A pinned tab collecting every tab's mentions in one feed; \
-                         click a mention to jump to its tab.",
-                    )),
-            )
+                    }))
+                    .into_any_element(),
+            ))
             .into_any_element()
     }
 
@@ -2339,7 +2473,7 @@ impl BackseaterApp {
         }));
 
         v_flex()
-            .gap_3()
+            .gap_2()
             .child(section_title(list.title()))
             .child(
                 div()
@@ -2348,29 +2482,21 @@ impl BackseaterApp {
                     .child(SharedString::from(list.description())),
             )
             .when(is_mentions && list.scope == TermScope::Global, |s| {
-                use gpui_component::checkbox::Checkbox;
-                s.child(
-                    v_flex()
-                        .gap_1()
-                        .child(
-                            Checkbox::new("mention-sound")
-                                .label("Play a sound on mention")
-                                .checked(self.settings.mention_sound)
-                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                    this.set_mention_sound(*checked, cx);
-                                })),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(SharedString::from(
-                                    "Off by default. When on, a term's bell button mutes just \
-                                     that term; streamer mode mutes all sounds unless changed \
-                                     in Streamer Mode settings.",
-                                )),
-                        ),
-                )
+                use gpui_component::switch::Switch;
+                s.child(setting_card().child(setting_row(
+                    "Play a sound on mention",
+                    Some(
+                        "A term's bell button mutes just that term; streamer mode \
+                         mutes all sounds unless changed in Streamer Mode settings.",
+                    ),
+                    Switch::new("mention-sound")
+                        .small()
+                        .checked(self.settings.mention_sound)
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.set_mention_sound(*checked, cx);
+                        }))
+                        .into_any_element(),
+                )))
             })
             .when(!chips.is_empty(), |s| {
                 s.child(h_flex().flex_wrap().gap_2().children(chips))
@@ -3595,11 +3721,65 @@ fn channel_kept(old: &str, new: &str) -> bool {
 }
 
 /// A bold section heading inside the settings dialog.
+/// A settings section's mini-header: small uppercase muted label (the category
+/// name itself is the content pane's page title).
 fn section_title(text: &str) -> impl IntoElement {
     div()
-        .font_weight(FontWeight::BOLD)
-        .text_size(px(15.))
-        .child(SharedString::from(text.to_string()))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_size(px(11.))
+        .text_color(gpui::rgb(render::offline_text()))
+        .child(SharedString::from(text.to_uppercase()))
+}
+
+/// A settings card: a bordered, slightly lifted surface whose rows are divided
+/// by [`card_divider`]s. The macOS-style grouped-settings look.
+fn setting_card() -> gpui::Div {
+    v_flex()
+        .w_full()
+        .rounded_lg()
+        .border_1()
+        .border_color(gpui::rgb(render::panel_border()))
+        .bg(render::row_hover())
+        .overflow_hidden()
+}
+
+/// The hairline between two rows of a [`setting_card`].
+fn card_divider() -> impl IntoElement {
+    div().h(px(1.)).w_full().bg(gpui::rgb(render::panel_border()))
+}
+
+/// One settings row: label (+ optional muted description under it) on the left,
+/// the control pinned right.
+fn setting_row(
+    label: &str,
+    desc: Option<&str>,
+    control: gpui::AnyElement,
+) -> gpui::AnyElement {
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap_4()
+        .px_3()
+        .py_2()
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .child(SharedString::from(label.to_string())),
+                )
+                .children(desc.map(|d| {
+                    div()
+                        .text_xs()
+                        .text_color(gpui::rgb(render::offline_text()))
+                        .child(SharedString::from(d.to_string()))
+                })),
+        )
+        .child(div().flex_none().child(control))
+        .into_any_element()
 }
 
 impl Render for BackseaterApp {
