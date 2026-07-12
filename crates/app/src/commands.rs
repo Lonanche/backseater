@@ -14,8 +14,8 @@ use bks_core::Platform;
 pub struct CommandDef {
     pub name: &'static str,
     /// Alternate spellings (`/untimeout` for unban, `/user` for usercard).
-    /// Accepted when typed, and prefix-matched in the popup (shown under the
-    /// canonical entry's usage/description).
+    /// Accepted when typed, and listed in the popup as their own rows (usage
+    /// rewritten to the alias, the canonical entry's description).
     pub aliases: &'static [&'static str],
     /// Shown as the popup row's main line, e.g. "/timeout <user> <duration>".
     pub usage: &'static str,
@@ -398,18 +398,46 @@ pub fn supported_on(template: &str, platform: Platform) -> bool {
         .is_none_or(|c| c.platforms.contains(&platform))
 }
 
-/// The commands available on `platform` whose canonical name (or an alias)
-/// starts with `stem` (already-typed text after the `/`, matched
-/// case-insensitively) — the autocomplete popup's candidate list.
-pub fn matching(platform: Platform, stem: &str) -> Vec<&'static CommandDef> {
+/// One autocomplete candidate: a command under one of its spellings. Aliases
+/// get their own row (their own name + usage line) so `/untimeout` is
+/// discoverable in the popup instead of folded invisibly into `/unban`.
+#[derive(Clone, Copy)]
+pub struct CommandMatch {
+    /// The matched spelling (canonical name or an alias) — what the popup
+    /// shows and inserts.
+    pub name: &'static str,
+    pub def: &'static CommandDef,
+}
+
+impl CommandMatch {
+    /// The usage line under this spelling: the def's usage with its leading
+    /// `/name` swapped for the matched one (`/untimeout <user>`).
+    pub fn usage(&self) -> String {
+        match self.def.usage.strip_prefix(&format!("/{}", self.def.name)) {
+            Some(rest) => format!("/{}{rest}", self.name),
+            None => self.def.usage.to_string(),
+        }
+    }
+}
+
+/// The command spellings available on `platform` that start with `stem`
+/// (already-typed text after the `/`, matched case-insensitively) — the
+/// autocomplete popup's candidate list, alphabetical, canonical names and
+/// aliases each as their own entry.
+pub fn matching(platform: Platform, stem: &str) -> Vec<CommandMatch> {
     let stem = stem.to_lowercase();
-    COMMANDS
+    let mut matches: Vec<CommandMatch> = COMMANDS
         .iter()
         .filter(|c| c.platforms.contains(&platform))
-        .filter(|c| {
-            c.name.starts_with(&stem) || c.aliases.iter().any(|a| a.starts_with(&stem))
+        .flat_map(|def| {
+            std::iter::once(def.name)
+                .chain(def.aliases.iter().copied())
+                .map(move |name| CommandMatch { name, def })
         })
-        .collect()
+        .filter(|m| m.name.starts_with(&stem))
+        .collect();
+    matches.sort_by_key(|m| m.name);
+    matches
 }
 
 #[cfg(test)]
@@ -459,30 +487,42 @@ mod tests {
     #[test]
     fn matching_filters_by_platform() {
         // /warn is Twitch-only; /ban exists on both.
-        assert!(matching(Platform::Twitch, "warn").iter().any(|c| c.name == "warn"));
+        assert!(matching(Platform::Twitch, "warn").iter().any(|m| m.name == "warn"));
         assert!(matching(Platform::Kick, "warn").is_empty());
-        assert!(matching(Platform::Kick, "ban").iter().any(|c| c.name == "ban"));
+        assert!(matching(Platform::Kick, "ban").iter().any(|m| m.name == "ban"));
     }
 
     #[test]
     fn matching_prefix_matches_names_and_aliases() {
         let slow: Vec<&str> = matching(Platform::Twitch, "slow")
             .iter()
-            .map(|c| c.name)
+            .map(|m| m.name)
             .collect();
         assert_eq!(slow, ["slow", "slowoff"]);
-        // "viewers" is an alias of chatters — the prefix must still surface it.
-        assert!(matching(Platform::Twitch, "view").iter().any(|c| c.name == "chatters"));
-        // Case-insensitive.
-        assert!(matching(Platform::Twitch, "SLOW").iter().any(|c| c.name == "slow"));
-        // Empty stem lists everything for the platform.
+        // "viewers" is an alias of chatters — the prefix surfaces it as its
+        // OWN row (typed spelling shown/inserted, usage rewritten to it).
+        let viewers = matching(Platform::Twitch, "view");
+        assert!(viewers.iter().any(|m| m.name == "viewers" && m.def.name == "chatters"));
         assert_eq!(
-            matching(Platform::Twitch, "").len(),
+            matching(Platform::Twitch, "unt")
+                .iter()
+                .map(|m| m.usage())
+                .collect::<Vec<_>>(),
+            ["/untimeout <user>"]
+        );
+        // Case-insensitive.
+        assert!(matching(Platform::Twitch, "SLOW").iter().any(|m| m.name == "slow"));
+        // Empty stem lists every spelling for the platform, alphabetically.
+        let all = matching(Platform::Twitch, "");
+        assert_eq!(
+            all.len(),
             COMMANDS
                 .iter()
                 .filter(|c| c.platforms.contains(&Platform::Twitch))
-                .count()
+                .map(|c| 1 + c.aliases.len())
+                .sum::<usize>()
         );
+        assert!(all.windows(2).all(|w| w[0].name < w[1].name));
     }
 
     #[test]
@@ -502,11 +542,11 @@ mod tests {
 
     #[test]
     fn matching_covers_aliases_exactly() {
-        // A fully typed alias still matches its canonical entry.
+        // A fully typed alias still matches, carrying its canonical def.
         assert!(matching(Platform::Twitch, "untimeout")
             .iter()
-            .any(|c| c.name == "unban"));
-        assert!(matching(Platform::Kick, "user").iter().any(|c| c.name == "usercard"));
+            .any(|m| m.def.name == "unban"));
+        assert!(matching(Platform::Kick, "user").iter().any(|m| m.def.name == "usercard"));
         assert!(matching(Platform::Twitch, "nosuch").is_empty());
     }
 }

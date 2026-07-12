@@ -303,8 +303,9 @@ enum PopupItem {
     Mention(String),
     /// An emote, its row showing the image; inserted as its bare name.
     Emote(bks_core::Emote),
-    /// A slash command, its row showing usage + description; inserted as `/name `.
-    Command(&'static crate::commands::CommandDef),
+    /// A slash command under one spelling (aliases are their own rows), its
+    /// row showing usage + description; inserted as `/name `.
+    Command(crate::commands::CommandMatch),
 }
 
 impl PopupItem {
@@ -313,7 +314,7 @@ impl PopupItem {
         match self {
             PopupItem::Mention(name) => format!("@{name}"),
             PopupItem::Emote(e) => e.name.clone(),
-            PopupItem::Command(c) => format!("/{}", c.name),
+            PopupItem::Command(m) => format!("/{}", m.name),
         }
     }
 }
@@ -2783,7 +2784,9 @@ impl ChatView {
                     let owner = model.is_broadcaster(platform);
                     crate::commands::matching(platform, stem)
                         .into_iter()
-                        .filter(|c| (can_mod || !c.mod_only) && (owner || !c.broadcaster_only))
+                        .filter(|m| {
+                            (can_mod || !m.def.mod_only) && (owner || !m.def.broadcaster_only)
+                        })
                         .map(PopupItem::Command)
                         .collect()
                 })
@@ -3090,15 +3093,15 @@ impl ChatView {
                                 )
                                 .child(SharedString::from(e.name.clone()))
                                 .into_any_element(),
-                            PopupItem::Command(c) => v_flex()
-                                .child(SharedString::from(c.usage))
+                            PopupItem::Command(m) => v_flex()
+                                .child(SharedString::from(m.usage()))
                                 .child(
                                     div()
                                         .text_size(px(11.))
                                         .when(!selected, |d| {
                                             d.text_color(cx.theme().muted_foreground)
                                         })
-                                        .child(SharedString::from(c.description)),
+                                        .child(SharedString::from(m.def.description)),
                                 )
                                 .into_any_element(),
                         };
