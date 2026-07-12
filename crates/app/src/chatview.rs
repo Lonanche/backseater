@@ -499,6 +499,13 @@ pub(crate) struct ChatView {
     /// Inline error under the custom timeout box (bad duration / over the
     /// platform's cap); cleared on a successful apply or a new card.
     usercard_timeout_error: Option<String>,
+    /// Warn-reason box on the usercard (Twitch-only — Helix requires a reason
+    /// the chatter must acknowledge). Window-bound like the timeout box.
+    usercard_warn_input: Option<Entity<InputState>>,
+    _usercard_warn_sub: Option<gpui::Subscription>,
+    /// Inline error under the warn box (empty/overlong reason); cleared on a
+    /// successful apply or a new card.
+    usercard_warn_error: Option<String>,
     /// The child OS window hosting the usercard, when open. Clicking another
     /// name re-points (and refocuses) the same window instead of opening more.
     usercard_window: Option<gpui::AnyWindowHandle>,
@@ -752,6 +759,9 @@ impl ChatView {
             usercard_timeout_input: None,
             _usercard_timeout_sub: None,
             usercard_timeout_error: None,
+            usercard_warn_input: None,
+            _usercard_warn_sub: None,
+            usercard_warn_error: None,
             usercard_window: None,
             viewer_list: None,
             viewer_list_window: None,
@@ -1992,8 +2002,9 @@ impl ChatView {
         let login = card.login.clone();
         let platform = card.platform;
         self.usercard = Some(card);
-        // A stale custom-timeout error would misread as being about the new card.
+        // A stale custom-timeout/warn error would misread as being about the new card.
         self.usercard_timeout_error = None;
+        self.usercard_warn_error = None;
 
         // Show the card's OS window. Deferred to a task because opening a window
         // draws it synchronously, and that draw re-enters this entity for the
@@ -2074,6 +2085,9 @@ impl ChatView {
                         if let Some(input) = &this.usercard_timeout_input {
                             input.update(cx, |state, cx| state.set_value("", window, cx));
                         }
+                        if let Some(input) = &this.usercard_warn_input {
+                            input.update(cx, |state, cx| state.set_value("", window, cx));
+                        }
                     });
                 });
                 return;
@@ -2105,6 +2119,11 @@ impl ChatView {
                 this._usercard_timeout_sub =
                     Some(cx.subscribe_in(&input, window, Self::on_usercard_timeout_event));
                 this.usercard_timeout_input = Some(input);
+                let warn =
+                    cx.new(|cx| InputState::new(window, cx).placeholder("Warning reason…"));
+                this._usercard_warn_sub =
+                    Some(cx.subscribe_in(&warn, window, Self::on_usercard_warn_event));
+                this.usercard_warn_input = Some(warn);
                 this.usercard_window = Some(handle);
                 // The user closing the window (OS ✕) releases its content view;
                 // drop the card then — unless a newer window replaced it.
@@ -2115,6 +2134,9 @@ impl ChatView {
                         this.usercard_timeout_input = None;
                         this._usercard_timeout_sub = None;
                         this.usercard_timeout_error = None;
+                        this.usercard_warn_input = None;
+                        this._usercard_warn_sub = None;
+                        this.usercard_warn_error = None;
                     }
                     cx.notify();
                 })
@@ -2168,6 +2190,44 @@ impl ChatView {
                 self.usercard_timeout_error = None;
                 input.update(cx, |state, cx| state.set_value("", window, cx));
             }
+        }
+        cx.notify();
+    }
+
+    /// Applies the warn-reason box on Enter.
+    fn on_usercard_warn_event(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let InputEvent::PressEnter { .. } = event {
+            self.apply_usercard_warn(window, cx);
+        }
+    }
+
+    /// Warns the card's chatter with the reason box's text (Twitch-only), or
+    /// leaves an inline error under the box — Helix requires a non-empty reason
+    /// of at most 500 characters.
+    fn apply_usercard_warn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(card), Some(input)) = (&self.usercard, self.usercard_warn_input.clone()) else {
+            return;
+        };
+        if card.platform != bks_core::Platform::Twitch {
+            return;
+        }
+        let login = card.login.clone();
+        let reason = input.read(cx).value().trim().to_string();
+        if reason.is_empty() {
+            self.usercard_warn_error =
+                Some("Enter a reason — the chatter has to acknowledge it".to_string());
+        } else if reason.chars().count() > 500 {
+            self.usercard_warn_error = Some("Warning reasons max out at 500 characters".to_string());
+        } else {
+            self.controller.warn_twitch(login, reason);
+            self.usercard_warn_error = None;
+            input.update(cx, |state, cx| state.set_value("", window, cx));
         }
         cx.notify();
     }
@@ -3879,7 +3939,7 @@ impl ChatView {
     }
 
     /// The moderation panel: a compact "Timeout" chip row plus Ban/Unban (and, on
-    /// Twitch, Mod/VIP grant toggles). Built to fit the card's default width — small
+    /// Twitch, a Warn reason box and Mod/VIP grant toggles). Built to fit the card's default width — small
     /// chips that wrap rather than a single overflowing row. Shown only when the
     /// logged-in user can moderate the card's platform: Twitch needs `twitch_mod`;
     /// Kick needs a Kick login (its API has ban/timeout/unban, no role grants).
@@ -3965,6 +4025,36 @@ impl ChatView {
                 )
         });
         let custom_error = self.usercard_timeout_error.as_ref().map(|err| {
+            div()
+                .text_size(px(12.))
+                .text_color(cx.theme().danger)
+                .child(SharedString::from(err.clone()))
+        });
+
+        // Warn (Twitch-only — Kick has no warn API): a reason box + button;
+        // Helix requires the reason, and the chatter must acknowledge the
+        // warning before they can chat again. Applied by Enter or the button.
+        let warn_row = (platform == bks_core::Platform::Twitch)
+            .then_some(self.usercard_warn_input.as_ref())
+            .flatten()
+            .map(|input| {
+                h_flex()
+                    .w_full()
+                    .gap_1()
+                    .items_center()
+                    .child(div().flex_1().child(Input::new(input).small()))
+                    .child(
+                        Button::new("usercard-warn")
+                            .label("Warn")
+                            .outline()
+                            .small()
+                            .compact()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.apply_usercard_warn(window, cx);
+                            })),
+                    )
+            });
+        let warn_error = self.usercard_warn_error.as_ref().map(|err| {
             div()
                 .text_size(px(12.))
                 .text_color(cx.theme().danger)
@@ -4077,6 +4167,16 @@ impl ChatView {
                         .child(ban)
                         .child(unban),
                 )
+                .when_some(warn_row, |col, row| {
+                    col.child(
+                        v_flex()
+                            .w_full()
+                            .gap_1()
+                            .child(section_label("Warn"))
+                            .child(row)
+                            .when_some(warn_error, |col, err| col.child(err)),
+                    )
+                })
             })
             .when_some(roles, |col, role_row| {
                 col.child(

@@ -423,6 +423,25 @@ impl Controller {
         });
     }
 
+    /// Warns `user` on Twitch with `reason` (usercard Warn button — acts on the
+    /// Twitch chatter regardless of the tab's send target, like the ban/timeout
+    /// buttons). The chatter must acknowledge the warning before chatting again.
+    pub fn warn_twitch(&self, user: String, reason: String) {
+        let this = self.clone();
+        self.rt.spawn(async move {
+            let Some(actions) = this.twitch_actions_or_hint().await else {
+                return;
+            };
+            if !this.require_twitch_channel() {
+                return;
+            }
+            match actions.warn(&this.twitch_channel, &user, &reason).await {
+                Ok(()) => this.confirm(format!("warned {user}")),
+                Err(err) => this.notice(format!("{err:#}")),
+            }
+        });
+    }
+
     /// Fetches the Twitch usercard for `login` (account info + follow age for this
     /// tab's channel) and delivers the result over `reply`. Requires Twitch login;
     /// sends `Err` describing why if not authed or the lookup fails.
