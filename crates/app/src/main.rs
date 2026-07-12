@@ -4664,16 +4664,16 @@ fn main() {
 }
 
 /// Formats an elapsed stream uptime compactly: under an hour shows minutes
-/// ("23m"), an hour or more shows hours + minutes ("1h23m", "2h00m"), and two
-/// days or more shows days + hours ("3d", "3d4h" — a "last live" from weeks ago
-/// shouldn't read "730h00m"); a negative span (clock skew) clamps to "0m". Used
-/// by the tab strip's live tooltip.
+/// ("23m"), an hour or more shows hours + minutes ("1h23m", "2h00m"), and a full
+/// day or more shows days + hours ("1d", "1d22h", "3d4h" — a "last live" from
+/// days/weeks ago shouldn't read "46h00m" or "730h00m"); a negative span (clock
+/// skew) clamps to "0m". Used by the tab strip's live tooltip.
 fn format_uptime(elapsed: chrono::Duration) -> String {
     let total_mins = elapsed.num_minutes().max(0);
     let (h, m) = (total_mins / 60, total_mins % 60);
     if h == 0 {
         format!("{m}m")
-    } else if h < 48 {
+    } else if h < 24 {
         format!("{h}h{m:02}m")
     } else {
         let (d, h) = (h / 24, h % 24);
@@ -4923,8 +4923,10 @@ mod tests {
             format_uptime(Duration::hours(2) + Duration::minutes(5)),
             "2h05m"
         );
-        // Long spans (a "last live" from days/weeks ago) switch to days + hours.
-        assert_eq!(format_uptime(Duration::hours(47)), "47h00m");
+        assert_eq!(format_uptime(Duration::hours(23) + Duration::minutes(59)), "23h59m");
+        // A full day or more (a "last live" from days/weeks ago) switches to days + hours.
+        assert_eq!(format_uptime(Duration::hours(24)), "1d");
+        assert_eq!(format_uptime(Duration::hours(46)), "1d22h");
         assert_eq!(format_uptime(Duration::hours(48)), "2d");
         assert_eq!(format_uptime(Duration::hours(76)), "3d4h");
         assert_eq!(format_uptime(Duration::days(30)), "30d");
