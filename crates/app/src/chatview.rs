@@ -3156,30 +3156,39 @@ impl ChatView {
             model
                 .rows
                 .iter()
-                .filter_map(|row| match row {
-                    Row::Message { msg } if self.mentions.matches(&msg.raw_text) => {
-                        let struck = model.is_struck(msg);
-                        let decorated = log::decorate(msg, model);
-                        Some(
-                            render::render_message(
-                                &decorated,
-                                render::RowFlags {
-                                    struck,
-                                    mentioned: true,
-                                    ..Default::default()
-                                },
-                                font_size,
-                                &selection,
-                                &mut ordinal,
-                                render::RowHandlers {
-                                    name_click: Some(name_click_for(&entity, msg)),
-                                    ..Default::default()
-                                },
-                            )
-                            .into_any_element(),
-                        )
+                .filter_map(|row| {
+                    // Chat rows and a sub/resub event's attached chatter message
+                    // both count as mention sources.
+                    let msg: &Message = match row {
+                        Row::Message { msg } => msg,
+                        Row::Event {
+                            message: Some(msg), ..
+                        } => msg,
+                        _ => return None,
+                    };
+                    if !self.mentions.matches(&msg.raw_text) {
+                        return None;
                     }
-                    _ => None,
+                    let struck = model.is_struck(msg);
+                    let decorated = log::decorate(msg, model);
+                    Some(
+                        render::render_message(
+                            &decorated,
+                            render::RowFlags {
+                                struck,
+                                mentioned: true,
+                                ..Default::default()
+                            },
+                            font_size,
+                            &selection,
+                            &mut ordinal,
+                            render::RowHandlers {
+                                name_click: Some(name_click_for(&entity, msg)),
+                                ..Default::default()
+                            },
+                        )
+                        .into_any_element(),
+                    )
                 })
                 .collect()
         };

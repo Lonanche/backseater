@@ -660,11 +660,15 @@ impl ChannelModel {
     }
 }
 
-/// The message of a message row, cloned (an `Arc` bump) to ride its
-/// `Appended`/`Inserted` event; `None` for every other row kind.
+/// The message of a new row, cloned to ride its `Appended`/`Inserted` event
+/// (an `Arc` bump for chat rows): a plain chat message, or a sub/resub event's
+/// attached chatter message — it can mention someone like any chat line.
 fn row_message(row: &Row) -> Option<std::sync::Arc<Message>> {
     match row {
         Row::Message { msg } => Some(msg.clone()),
+        Row::Event {
+            message: Some(msg), ..
+        } => Some(std::sync::Arc::new((**msg).clone())),
         _ => None,
     }
 }
