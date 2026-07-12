@@ -135,6 +135,7 @@ pub(crate) fn clearchat_event(cc: &tmi::msg::ClearChat<'_>, historical: bool) ->
         platform: Platform::Twitch,
         user: cc.target().map(|u| u.to_string()),
         historical,
+        timestamp: Some(cc.timestamp()),
     }
 }
 

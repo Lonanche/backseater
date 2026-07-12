@@ -96,13 +96,18 @@ mod tests {
     fn clearchat_history_line_becomes_silent_historical_fade() {
         let raw = "@room-id=11148817;target-user-id=40286300;tmi-sent-ts=1594555275886 \
                    :tmi.twitch.tv CLEARCHAT #oilrats :qaixx";
-        assert!(matches!(
-            parse_history_line("#lonanche", raw),
+        match parse_history_line("#oilrats", raw) {
             Some(ChatEvent::ClearChat {
                 historical: true,
+                timestamp: Some(ts),
                 ..
-            })
-        ));
+            }) => {
+                // The clear's real server-side time bounds the fade: a target
+                // unbanned since must not have their later messages struck.
+                assert_eq!(ts.timestamp_millis(), 1_594_555_275_886);
+            }
+            other => panic!("expected a historical timestamped clear, got {other:?}"),
+        }
     }
 
     #[test]

@@ -157,12 +157,12 @@ pub struct ChannelModel {
     /// `&str` — no key `String` allocation on the hot render path.
     struck_ids: HashMap<Platform, HashSet<String>>,
     /// Ban/timeout fades keyed platform → (lowercased login → cutoff time): only
-    /// that author's messages *at or before* the cutoff are struck. A live ban's
-    /// cutoff is "now", so once the timeout lapses the user's newer messages
-    /// render normally (the fade doesn't leak onto future chat). A historical
-    /// replayed clear uses `MAX_UTC`, fading the whole backfilled backlog (which
-    /// can still be arriving out of order when the clear lands). Nested for the
-    /// same borrowed-`&str` lookup as `struck_ids`.
+    /// that author's messages *at or before* the cutoff are struck. The cutoff is
+    /// the clear's server-side timestamp (falling back to "now"), so once the
+    /// timeout lapses — or a ban replayed from the join backlog was lifted before
+    /// we joined — the user's newer messages render normally (the fade doesn't
+    /// leak onto future chat). Nested for the same borrowed-`&str` lookup as
+    /// `struck_ids`.
     struck_authors: HashMap<Platform, HashMap<String, DateTime<Utc>>>,
     /// Resolved 7TV cosmetics keyed platform → (user_id → cosmetics), applied at
     /// render time. Nested so the per-row lookup borrows `user_id` as `&str`
@@ -338,23 +338,19 @@ impl ChannelModel {
     }
 
     /// Fades the target's chat *up to the ban moment* (a ban/timeout strikes their
-    /// past messages). The cutoff — `now` for a live ban — is what stops the fade
-    /// leaking onto future chat: once the timeout lapses the user's newer messages
-    /// carry a later timestamp than the cutoff, so [`is_struck`] renders them
-    /// normally. A historical replayed clear uses `MAX_UTC` to fade the whole
-    /// backfilled backlog, which may still be arriving out of order.
+    /// past messages). The cutoff — the clear's server-side timestamp, falling
+    /// back to `now` when the platform doesn't send one — is what stops the fade
+    /// leaking onto future chat: once the timeout lapses (or a replayed-from-
+    /// history ban was lifted before we joined) the user's newer messages carry a
+    /// later timestamp than the cutoff, so [`is_struck`] renders them normally.
     fn mark_banned(
         &mut self,
         platform: Platform,
         login: &str,
-        historical: bool,
+        timestamp: Option<DateTime<Utc>>,
         cx: &mut Context<Self>,
     ) {
-        let cutoff = if historical {
-            DateTime::<Utc>::MAX_UTC
-        } else {
-            Utc::now()
-        };
+        let cutoff = timestamp.unwrap_or_else(Utc::now);
         self.struck_authors
             .entry(platform)
             .or_default()
@@ -499,9 +495,10 @@ impl ChannelModel {
                 platform,
                 user,
                 historical,
+                timestamp,
             } => {
                 if let Some(u) = &user {
-                    self.mark_banned(platform, u, historical, cx);
+                    self.mark_banned(platform, u, timestamp, cx);
                 }
                 // The generic "X was timed out / banned" notice is posted only when
                 // no richer source will (`rich_mod_feed`: Twitch's EventSub feed once

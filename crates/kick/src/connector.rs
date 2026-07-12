@@ -457,6 +457,7 @@ async fn run_client(channel: String, tx: ChatSink, fetch_history: bool) -> anyho
                         platform: Platform::Kick,
                         user: Some(ev.user.username.clone()),
                         historical: false,
+                        timestamp: None,
                     });
                     let _ = tx.send(ChatEvent::Notice(ban_notice(&ev)));
                 }

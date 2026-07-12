@@ -187,10 +187,16 @@ pub enum ChatEvent {
     /// join backlog: it still fades the target's backfilled messages, but the UI
     /// posts no notice for it — the timeout happened before this session, and a
     /// fresh "X was timed out" row on every launch misreads as a live action.
+    /// `timestamp` is when the clear executed on the platform's servers (Twitch
+    /// `tmi-sent-ts`); it bounds the fade so only messages at or before it are
+    /// struck — critical for a replayed clear, whose target may have been
+    /// unbanned since. `None` (Kick, which doesn't timestamp its ban event)
+    /// means "now".
     ClearChat {
         platform: Platform,
         user: Option<String>,
         historical: bool,
+        timestamp: Option<chrono::DateTime<chrono::Utc>>,
     },
     /// A single message was deleted (by a mod or auto-moderation). The matching
     /// row is struck through + faded, like a ban fade but scoped to one message.
