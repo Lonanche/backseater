@@ -3,8 +3,30 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
-## v0.3.0-beta.1
+## v0.3.0
 
+### Features
+
+- Slash commands: typing `/` opens an autocomplete popup with the commands available
+  for the current send target — moderation (`/ban` `/timeout` `/unban` `/delete`
+  `/warn` `/clear`), chat modes (`/slow` `/followers` `/subscribers` `/emoteonly`
+  `/uniquechat` and their `off` variants), `/announce` (with color variants), `/mod`
+  `/vip` `/shoutout` `/raid` `/me` `/usercard` `/chatters`, and a twitch.tv-style
+  `/pin [duration] <message>` that sends the message and pins it. Mod-only commands
+  are hidden unless you moderate the channel; broadcaster-only ones unless it's your
+  channel. Log out and back in on Twitch to grant the new permissions the commands
+  need.
+- Chat-mode bar: active chat restrictions (followers-only, sub-only, emote-only,
+  slow, unique) show as chips above the message box.
+- Twitch `/announce` announcements now appear as highlighted announcement rows
+  (megaphone header, the announcement's color as the row accent), with an
+  Announcements toggle in the events-panel filter.
+- Your Twitch sub emotes from other channels now work in autocomplete and are cached
+  for an instant warm start (needs a fresh Twitch login).
+- Redesigned usercard: fixed header and actions with a scrolling recent-messages
+  section, platform icon, and a copyable user ID. Timeouts got preset chips (1s–2w,
+  capped at 7d on Kick) plus a custom-duration box; `/timeout` accepts the same
+  duration strings ("90s", "1h30m", "3d").
 - Redesigned chat surface: deeper dark/light palettes, full-width accent-bar highlights
   for mentions / first messages / events / going-live, a "FIRST MESSAGE" pill,
   browser-style tab chips, and auto-hiding scrollbars.
@@ -28,7 +50,18 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 - The tab live tooltip is a compact stream card, so long category names no longer
   overflow it.
 - The global Mentions tab can be renamed in Highlights settings.
-- Fixed: muted mention terms played the alert sound again after an app restart.
+
+### Fixes
+
+- A user who was banned and later unbanned before you joined no longer shows their
+  new messages struck through — replayed bans from chat history now only strike
+  messages from before the ban.
+- Mentions inside a sub/resub's attached message now feed the Mentions tab and the
+  alert sound, and mentions are no longer silently missed once the message buffer
+  is full.
+- `/pin` can pin a message that starts with a number without reading it as a
+  duration (start it with `--`).
+- Muted mention terms played the alert sound again after an app restart.
 
 ## v0.2.2
 
