@@ -72,6 +72,33 @@ pub struct ChannelMeta {
     pub name: String,
 }
 
+/// Structured extras a connector can attach to a public [`ChatEvent::Event`]
+/// so the events panel can render compact rows ("UserX · resubbed · 12 mo")
+/// and group a mass gift's per-recipient events under its announcement.
+/// Everything is optional — a connector that only has the pre-formatted `text`
+/// leaves this default and the panel falls back to showing `text`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EventDetails {
+    /// Display name of the acting user (subscriber, gifter, raider, …), shown
+    /// emphasized before `compact`.
+    pub actor: Option<String>,
+    /// Condensed description following the actor ("resubbed · 12 mo · Tier 1").
+    pub compact: Option<String>,
+    /// On a mass-gift announcement: how many subs were announced. Marks the
+    /// event as a batch summary the panel can collapse recipients under.
+    pub gift_count: Option<u32>,
+    /// Login key tying a batch announcement to its per-recipient events — the
+    /// announcement and each of its gifts carry the same key (anonymous
+    /// gifters share a fixed sentinel), so the store can group them.
+    pub gifter: Option<String>,
+    /// On a per-recipient gift: who received it. Grouped under the pending
+    /// announcement from the same `gifter` when there is one.
+    pub recipient: Option<String>,
+    /// Recipients listed directly on the announcement, for platforms that send
+    /// one event for the whole batch (Kick) instead of per-recipient events.
+    pub recipients: Vec<String>,
+}
+
 /// Something that happened in a channel. The connector pushes these onto a
 /// [`ChatStream`]; the UI drains them.
 #[derive(Clone, Debug)]
@@ -111,6 +138,8 @@ pub enum ChatEvent {
         text: String,
         timestamp: chrono::DateTime<chrono::Utc>,
         message: Option<Box<Message>>,
+        /// Structured extras for compact rendering + mass-gift grouping.
+        details: EventDetails,
     },
     /// Chat was cleared, optionally scoped to a single user (timeout/ban). The
     /// `platform` scopes the fade to that platform's messages (the same login can

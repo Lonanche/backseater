@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use bks_core::{Author, Badge, Color, Message, MessageElement, Platform, ReplyParent};
-use bks_platform::{ChannelMeta, ChatEvent, ChatSource, ChatStream, EventKind};
+use bks_platform::{ChannelMeta, ChatEvent, ChatSource, ChatStream, EventDetails, EventKind};
 use std::sync::Mutex;
 use tokio::sync::mpsc;
 
@@ -182,8 +182,122 @@ pub(crate) fn usernotice_event(un: &tmi::msg::UserNotice<'_>) -> Option<ChatEven
         text,
         timestamp: un.timestamp(),
         message,
+        details: usernotice_details(un),
     })
 }
+
+/// The login key anonymous gifters share, so an anonymous mass gift's
+/// announcement and its per-recipient events still group together.
+const ANON_GIFTER: &str = "ananonymousgifter";
+
+/// Builds the structured [`EventDetails`] for a USERNOTICE from tmi's parsed
+/// event data: a condensed line for the events panel ("resubbed · 12 mo ·
+/// Tier 1") plus the gifter/recipient/count fields that let the store tie a
+/// mass gift's individual events to their announcement. Events without
+/// structured data (announcements, rituals, …) get only the actor — the panel
+/// falls back to the full `system-msg` text.
+fn usernotice_details(un: &tmi::msg::UserNotice<'_>) -> EventDetails {
+    use tmi::msg::user_notice::Event;
+    let actor = un.sender().map(|s| s.name().to_string());
+    let gifter_key = || {
+        Some(
+            un.sender()
+                .map(|s| s.login().to_lowercase())
+                .unwrap_or_else(|| ANON_GIFTER.to_string()),
+        )
+    };
+    match un.event() {
+        Event::SubOrResub(sub) => {
+            let compact = if sub.is_resub() {
+                format!(
+                    "resubbed · {} mo{}",
+                    sub.cumulative_months().max(1),
+                    tier_suffix(sub.sub_plan())
+                )
+            } else {
+                format!("subscribed{}", tier_suffix(sub.sub_plan()))
+            };
+            EventDetails {
+                actor,
+                compact: Some(compact),
+                ..Default::default()
+            }
+        }
+        Event::SubGift(gift) => EventDetails {
+            actor: actor.or_else(|| Some("An anonymous user".to_string())),
+            compact: Some(format!(
+                "gifted a sub to {}{}",
+                gift.recipient().name(),
+                tier_suffix(gift.sub_plan())
+            )),
+            gifter: gifter_key(),
+            recipient: Some(gift.recipient().name().to_string()),
+            ..Default::default()
+        },
+        Event::SubMysteryGift(gift) => EventDetails {
+            actor,
+            compact: Some(format!(
+                "gifted {} {}{}",
+                gift.count(),
+                if gift.count() == 1 { "sub" } else { "subs" },
+                tier_suffix(gift.sub_plan())
+            )),
+            gift_count: Some(gift.count() as u32),
+            gifter: gifter_key(),
+            ..Default::default()
+        },
+        Event::AnonSubMysteryGift(gift) => EventDetails {
+            actor: Some("An anonymous user".to_string()),
+            compact: Some(format!(
+                "gifted {} {}{}",
+                gift.count(),
+                if gift.count() == 1 { "sub" } else { "subs" },
+                tier_suffix(gift.sub_plan())
+            )),
+            gift_count: Some(gift.count() as u32),
+            gifter: Some(ANON_GIFTER.to_string()),
+            ..Default::default()
+        },
+        Event::Raid(raid) => EventDetails {
+            actor,
+            compact: Some(format!(
+                "raided · {} viewers",
+                bks_core::format_count(raid.viewer_count())
+            )),
+            ..Default::default()
+        },
+        Event::GiftPaidUpgrade(_) | Event::AnonGiftPaidUpgrade(_) => EventDetails {
+            actor,
+            compact: Some("continued their gifted sub".to_string()),
+            ..Default::default()
+        },
+        Event::BitsBadgeTier(tier) => EventDetails {
+            actor,
+            compact: Some(format!(
+                "unlocked the {} bits badge",
+                bks_core::format_count(tier.tier())
+            )),
+            ..Default::default()
+        },
+        _ => EventDetails {
+            actor,
+            ..Default::default()
+        },
+    }
+}
+
+/// " · Tier N" / " · Prime" for a `msg-param-sub-plan` value, empty when
+/// unrecognized.
+fn tier_suffix(plan: &str) -> &'static str {
+    match plan {
+        "1000" => " · Tier 1",
+        "2000" => " · Tier 2",
+        "3000" => " · Tier 3",
+        "Prime" => " · Prime",
+        _ => "",
+    }
+}
+
 
 /// Classifies a USERNOTICE into an [`EventKind`] so the UI can filter events.
 /// tmi's `Event` enum splits the common cases; the watch-streak milestone has no
@@ -491,4 +605,59 @@ mod tests {
             other => panic!("expected a message-less event, got {other:?}"),
         }
     }
+
+    #[test]
+    fn resub_details_are_condensed() {
+        let raw = "@badge-info=subscriber/2;badges=subscriber/0;color=#0000FF;\
+                   display-name=Oilrats;emotes=;flags=;id=abc;login=oilrats;mod=0;\
+                   msg-id=resub;msg-param-cumulative-months=12;\
+                   msg-param-should-share-streak=1;msg-param-streak-months=2;\
+                   msg-param-sub-plan-name=Channel;msg-param-sub-plan=1000;\
+                   room-id=71092938;subscriber=1;system-msg=resub;\
+                   tmi-sent-ts=1581713640019;user-id=21156217;user-type= \
+                   :tmi.twitch.tv USERNOTICE #qaixx :peepoEvil";
+        let details = usernotice_details(&parse_usernotice(raw));
+        assert_eq!(details.actor.as_deref(), Some("Oilrats"));
+        assert_eq!(details.compact.as_deref(), Some("resubbed · 12 mo · Tier 1"));
+        assert_eq!(details.gift_count, None);
+        assert_eq!(details.gifter, None);
+    }
+
+    #[test]
+    fn mystery_gift_details_mark_a_batch() {
+        let raw = "@badges=;color=;display-name=Rich;emotes=;flags=;id=abc;\
+                   login=rich;mod=0;msg-id=submysterygift;\
+                   msg-param-mass-gift-count=50;msg-param-origin-id=xyz;\
+                   msg-param-sender-count=100;msg-param-sub-plan=1000;\
+                   room-id=1;subscriber=0;system-msg=gift;\
+                   tmi-sent-ts=1581713640019;user-id=2;user-type= \
+                   :tmi.twitch.tv USERNOTICE #chan";
+        let details = usernotice_details(&parse_usernotice(raw));
+        assert_eq!(details.actor.as_deref(), Some("Rich"));
+        assert_eq!(details.compact.as_deref(), Some("gifted 50 subs · Tier 1"));
+        assert_eq!(details.gift_count, Some(50));
+        assert_eq!(details.gifter.as_deref(), Some("rich"));
+    }
+
+    #[test]
+    fn sub_gift_details_carry_the_recipient() {
+        let raw = "@badges=;color=;display-name=Rich;emotes=;flags=;id=abc;\
+                   login=rich;mod=0;msg-id=subgift;msg-param-months=1;\
+                   msg-param-recipient-display-name=Lucky;\
+                   msg-param-recipient-id=3;msg-param-recipient-user-name=lucky;\
+                   msg-param-sub-plan-name=Channel;msg-param-sub-plan=1000;\
+                   msg-param-gift-months=1;room-id=1;subscriber=0;\
+                   system-msg=gift;tmi-sent-ts=1581713640019;user-id=2;user-type= \
+                   :tmi.twitch.tv USERNOTICE #chan";
+        let details = usernotice_details(&parse_usernotice(raw));
+        assert_eq!(details.actor.as_deref(), Some("Rich"));
+        assert_eq!(
+            details.compact.as_deref(),
+            Some("gifted a sub to Lucky · Tier 1")
+        );
+        assert_eq!(details.gifter.as_deref(), Some("rich"));
+        assert_eq!(details.recipient.as_deref(), Some("Lucky"));
+        assert_eq!(details.gift_count, None);
+    }
+
 }

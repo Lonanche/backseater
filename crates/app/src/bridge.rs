@@ -496,6 +496,7 @@ fn resolve_chat_event(registry: &EmoteRegistry, badges: &BadgeMap, event: ChatEv
             text,
             timestamp,
             message,
+            details,
         } => ChatEvent::Event {
             platform,
             kind,
@@ -505,6 +506,7 @@ fn resolve_chat_event(registry: &EmoteRegistry, badges: &BadgeMap, event: ChatEv
                 resolve_message(&mut msg, registry, badges);
                 msg
             }),
+            details,
         },
         // A pinned message renders like a chat line in the banner, so it gets
         // the same emote/badge resolution.

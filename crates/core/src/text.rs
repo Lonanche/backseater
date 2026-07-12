@@ -11,6 +11,20 @@ pub fn plural(n: u64, one: &'static str, many: &'static str) -> &'static str {
     }
 }
 
+/// Formats a count with thousands separators (`1234567` → `"1,234,567"`) —
+/// viewer readouts, raid sizes, bits-badge tiers.
+pub fn format_count(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// Strips a channel name to its bare form: trims surrounding whitespace and a
 /// leading `#` (as Twitch IRC uses), preserving case. Use this when you need the
 /// channel's display name; use [`channel_login`] for API/lookup keys.
@@ -62,6 +76,15 @@ mod tests {
     #[test]
     fn channel_login_lowercases() {
         assert_eq!(channel_login("  #ChanName "), "channame");
+    }
+
+    #[test]
+    fn format_count_groups_thousands() {
+        assert_eq!(format_count(0), "0");
+        assert_eq!(format_count(999), "999");
+        assert_eq!(format_count(1000), "1,000");
+        assert_eq!(format_count(12345), "12,345");
+        assert_eq!(format_count(1234567), "1,234,567");
     }
 
     #[test]

@@ -423,6 +423,8 @@ pub fn item_to_event(channel: &str, item: &Value) -> Option<ChatEvent> {
             text,
             timestamp,
             message,
+            // No condensed form yet: the panel falls back to the full text.
+            details: Default::default(),
         }),
         ParsedItem::Ignored => None,
     }

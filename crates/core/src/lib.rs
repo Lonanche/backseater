@@ -22,6 +22,6 @@ pub use message::{
     Platform, ReplyParent,
 };
 pub use scale::{preferred_scale, set_preferred_scale};
-pub use text::{channel_login, encode_url_component, plural, strip_channel};
+pub use text::{channel_login, encode_url_component, format_count, plural, strip_channel};
 pub use theme::{is_dark_theme, set_dark_theme};
 pub use time::{parse_rfc3339, reconnect_delay};

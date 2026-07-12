@@ -9,7 +9,7 @@
 use anyhow::Context;
 use async_trait::async_trait;
 use bks_core::{plural, Message, Platform};
-use bks_platform::{ChannelMeta, ChatEvent, ChatSink, ChatSource, ChatStream, EventKind};
+use bks_platform::{ChannelMeta, ChatEvent, ChatSink, ChatSource, ChatStream, EventDetails, EventKind};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::mpsc;
@@ -498,6 +498,7 @@ async fn run_client(channel: String, tx: ChatSink, fetch_history: bool) -> anyho
                         text: sub_event_text(&ev),
                         timestamp: chrono::Utc::now(),
                         message,
+                        details: sub_event_details(&ev),
                     });
                 }
             }
@@ -510,6 +511,7 @@ async fn run_client(channel: String, tx: ChatSink, fetch_history: bool) -> anyho
                             text,
                             timestamp: chrono::Utc::now(),
                             message: None,
+                            details: gift_event_details(&ev),
                         });
                     }
                 }
@@ -523,6 +525,11 @@ async fn run_client(channel: String, tx: ChatSink, fetch_history: bool) -> anyho
                         text: host_event_text(&ev),
                         timestamp: chrono::Utc::now(),
                         message: None,
+                        details: EventDetails {
+                            actor: Some(ev.host_username.clone()),
+                            compact: Some(format!("hosted · {} viewers", ev.number_viewers)),
+                            ..Default::default()
+                        },
                     });
                 }
             }
@@ -535,6 +542,7 @@ async fn run_client(channel: String, tx: ChatSink, fetch_history: bool) -> anyho
                         text: kicks_event_text(&ev),
                         timestamp: chrono::Utc::now(),
                         message: None,
+                        details: kicks_event_details(&ev),
                     });
                 }
             }
@@ -567,6 +575,15 @@ async fn run_client(channel: String, tx: ChatSink, fetch_history: bool) -> anyho
                         text: reward_event_text(&ev),
                         timestamp: chrono::Utc::now(),
                         message: None,
+                        details: EventDetails {
+                            actor: Some(ev.username.clone()),
+                            compact: Some(format!("redeemed {}", if ev.reward_title.is_empty() {
+                                "a reward"
+                            } else {
+                                &ev.reward_title
+                            })),
+                            ..Default::default()
+                        },
                     });
                 }
             }
@@ -727,6 +744,62 @@ fn sub_event_text(ev: &SubscriptionEvent) -> String {
     let months = ev.months.max(1);
     let unit = plural(months, "month", "months");
     format!("{} subscribed for {months} {unit}.", ev.username)
+}
+
+/// Condensed panel form of [`sub_event_text`]: "subscribed" for a first month,
+/// "resubbed · N mo" after.
+fn sub_event_details(ev: &SubscriptionEvent) -> EventDetails {
+    let months = ev.months.max(1);
+    let compact = if months > 1 {
+        format!("resubbed · {months} mo")
+    } else {
+        "subscribed".to_string()
+    };
+    EventDetails {
+        actor: Some(ev.username.clone()),
+        compact: Some(compact),
+        ..Default::default()
+    }
+}
+
+/// Condensed panel form of [`gift_event_text`]. Kick sends the whole batch as
+/// one event, so the recipients ride the announcement directly (no
+/// per-recipient children to group).
+fn gift_event_details(ev: &GiftedSubscriptionsEvent) -> EventDetails {
+    let actor = Some(
+        ev.gifter_username
+            .clone()
+            .unwrap_or_else(|| "An anonymous user".to_string()),
+    );
+    match ev.gifted_usernames.as_slice() {
+        [single] => EventDetails {
+            actor,
+            compact: Some(format!("gifted a sub to {single}")),
+            ..Default::default()
+        },
+        many => EventDetails {
+            actor,
+            compact: Some(format!("gifted {} subs", many.len())),
+            gift_count: Some(many.len() as u32),
+            recipients: many.to_vec(),
+            ..Default::default()
+        },
+    }
+}
+
+/// Condensed panel form of [`kicks_event_text`]: "gifted GiftName · N Kicks".
+fn kicks_event_details(ev: &KicksGiftedEvent) -> EventDetails {
+    let n = ev.gift.amount;
+    let compact = if ev.gift.name.is_empty() {
+        format!("gifted {n} {}", plural(n, "Kick", "Kicks"))
+    } else {
+        format!("gifted {} · {n} {}", ev.gift.name, plural(n, "Kick", "Kicks"))
+    };
+    EventDetails {
+        actor: Some(ev.sender.username.clone()),
+        compact: Some(compact),
+        ..Default::default()
+    }
 }
 
 /// Builds the chat-line [`Message`] for a resub's attached message, so it renders

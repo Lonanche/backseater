@@ -48,6 +48,12 @@ pub struct RetainedEvent {
     pub text: String,
     pub timestamp: DateTime<Utc>,
     pub message: Option<Box<Message>>,
+    /// Structured extras for the panel's compact rows (see [`EventDetails`]).
+    pub details: bks_platform::EventDetails,
+    /// For a mass gift's per-recipient event: the sequence number of the batch
+    /// announcement it belongs to (see [`gift_group`]). Views collapsing gift
+    /// batches hide these rows and list their recipients under the summary.
+    pub group: Option<u64>,
 }
 
 /// Identifies a channel set: the (normalized) Twitch / Kick / YouTube sources a
@@ -122,6 +128,10 @@ pub struct ChannelModel {
     /// its current index`, so views can reference events across trims (their
     /// virtualized events panels store sequence numbers, not indices).
     pub events_base: u64,
+    /// Mass-gift batches still expecting per-recipient events, keyed by
+    /// `(platform, gifter login)` → (the announcement's seq, gifts remaining).
+    /// See [`gift_group`].
+    pending_gifts: HashMap<(Platform, String), (u64, u32)>,
     /// Keys of rows present, so a reconnect's refetched history can't duplicate a
     /// row already shown (deduped once here, not per view).
     row_keys: HashSet<u64>,
@@ -408,15 +418,24 @@ impl ChannelModel {
                 text,
                 timestamp,
                 message,
+                details,
             } => {
                 // Retain the event in its own buffer (survives chat-ring trimming)
                 // for the events panel, then also push the inline log row.
+                let group = gift_group(
+                    &mut self.pending_gifts,
+                    &details,
+                    platform,
+                    self.events_base + self.events.len() as u64,
+                );
                 self.events.push_back(RetainedEvent {
                     platform,
                     kind,
                     text: text.clone(),
                     timestamp,
                     message: message.clone(),
+                    details,
+                    group,
                 });
                 cx.emit(ChannelEvent::EventAppended {
                     seq: self.events_base + self.events.len() as u64 - 1,
@@ -699,6 +718,7 @@ fn build_model(
             rows: VecDeque::new(),
             events: VecDeque::new(),
             events_base: 0,
+            pending_gifts: HashMap::new(),
             row_keys: HashSet::new(),
             struck_ids: HashMap::new(),
             struck_authors: HashMap::new(),
@@ -719,4 +739,123 @@ fn build_model(
             _drain: drain,
         }
     })
+}
+
+/// Assigns a mass gift's per-recipient event to its batch announcement.
+///
+/// Twitch sends a community gift as one "X is gifting 50 subs" USERNOTICE
+/// followed by 50 individual "gifted a sub to Y" USERNOTICEs, with no reliable
+/// id tying them together at the IRC surface — so the store counts instead
+/// (Chatterino does the same): a batch announcement (`gift_count > 1`)
+/// registers `(its seq, count)` under its gifter, and each following
+/// per-recipient gift from that gifter consumes one slot and returns the
+/// announcement's seq as its group. Single gifts (no pending batch) stay
+/// ungrouped; a batch that never completes (missed frames) leaves a stale
+/// pending entry that the gifter's next announcement replaces — harmless.
+fn gift_group(
+    pending: &mut HashMap<(Platform, String), (u64, u32)>,
+    details: &bks_platform::EventDetails,
+    platform: Platform,
+    next_seq: u64,
+) -> Option<u64> {
+    let gifter = details.gifter.clone()?;
+    let key = (platform, gifter);
+    if let Some(count) = details.gift_count {
+        // Even a count-1 batch registers: its one per-recipient event must
+        // group under the announcement or both would show.
+        if count > 0 {
+            pending.insert(key, (next_seq, count));
+        }
+        return None;
+    }
+    if details.recipient.is_some() {
+        if let Some((seq, remaining)) = pending.get_mut(&key) {
+            let group = Some(*seq);
+            *remaining -= 1;
+            if *remaining == 0 {
+                pending.remove(&key);
+            }
+            return group;
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bks_platform::EventDetails;
+
+    fn summary(gifter: &str, count: u32) -> EventDetails {
+        EventDetails {
+            gift_count: Some(count),
+            gifter: Some(gifter.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn child(gifter: &str, recipient: &str) -> EventDetails {
+        EventDetails {
+            gifter: Some(gifter.to_string()),
+            recipient: Some(recipient.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn gift_children_group_under_their_announcement() {
+        let mut pending = HashMap::new();
+        let p = Platform::Twitch;
+        assert_eq!(gift_group(&mut pending, &summary("rich", 2), p, 10), None);
+        assert_eq!(
+            gift_group(&mut pending, &child("rich", "a"), p, 11),
+            Some(10)
+        );
+        assert_eq!(
+            gift_group(&mut pending, &child("rich", "b"), p, 12),
+            Some(10)
+        );
+        // Batch exhausted: a later single gift from the same gifter is its own row.
+        assert_eq!(gift_group(&mut pending, &child("rich", "c"), p, 13), None);
+    }
+
+    #[test]
+    fn unrelated_gifters_and_platforms_do_not_group() {
+        let mut pending = HashMap::new();
+        assert_eq!(
+            gift_group(&mut pending, &summary("rich", 5), Platform::Twitch, 1),
+            None
+        );
+        // Different gifter: no group.
+        assert_eq!(
+            gift_group(&mut pending, &child("other", "a"), Platform::Twitch, 2),
+            None
+        );
+        // Same gifter, different platform: no group.
+        assert_eq!(
+            gift_group(&mut pending, &child("rich", "a"), Platform::Kick, 3),
+            None
+        );
+        // Events without gift data never touch the map.
+        assert_eq!(
+            gift_group(
+                &mut pending,
+                &EventDetails::default(),
+                Platform::Twitch,
+                4
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn count_one_batch_still_groups_its_single_child() {
+        let mut pending = HashMap::new();
+        let p = Platform::Twitch;
+        // Twitch sends "is gifting 1 sub" + one per-recipient event; the child
+        // must fold under the announcement or both rows would show.
+        assert_eq!(gift_group(&mut pending, &summary("rich", 1), p, 1), None);
+        assert_eq!(gift_group(&mut pending, &child("rich", "a"), p, 2), Some(1));
+        assert!(pending.is_empty());
+    }
 }

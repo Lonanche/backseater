@@ -302,6 +302,12 @@ impl Layout {
     }
 }
 
+/// serde default for settings that ship enabled (a `bool` field's plain
+/// `#[serde(default)]` would silently turn them off for existing configs).
+fn default_true() -> bool {
+    true
+}
+
 /// One tab's persisted configuration.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TabConfig {
@@ -320,6 +326,15 @@ pub struct TabConfig {
     /// events appear *only* in the panel. Off by default (events show in both).
     #[serde(default)]
     pub events_only: bool,
+    /// Hide a sub/resub's attached chat message in the events panel (the sub
+    /// info still shows; the chat log keeps the full event). Off by default.
+    #[serde(default)]
+    pub hide_sub_messages: bool,
+    /// Collapse a mass gift's per-recipient rows in the events panel under its
+    /// "gifted N subs" announcement (expandable to the recipient list). On by
+    /// default; the chat log always shows the individual rows.
+    #[serde(default = "default_true")]
+    pub collapse_gift_subs: bool,
     /// The mentions panel shows every tab's mentions (each under a "#channel"
     /// tag that jumps to its tab) instead of just this tab's. Off by default.
     #[serde(default)]
@@ -352,6 +367,8 @@ impl TabConfig {
             youtube_channel: String::new(),
             event_kinds: EventFilter::default(),
             events_only: false,
+            hide_sub_messages: false,
+            collapse_gift_subs: true,
             mentions_all_tabs: false,
             custom_mentions: Vec::new(),
             ignored_terms: Vec::new(),

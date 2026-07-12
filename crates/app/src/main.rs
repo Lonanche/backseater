@@ -1433,14 +1433,20 @@ impl BackseaterApp {
     }
 
     /// Pushes tab `ix`'s (already-mutated) events filters to its live view and
-    /// persists — shared tail of the two filter setters below.
+    /// persists — shared tail of the filter setters below.
     fn push_events_filter(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(ix) else {
             return;
         };
-        let (kinds, only) = (tab.config.event_kinds, tab.config.events_only);
-        tab.view
-            .update(cx, |view, cx| view.set_events_filter(kinds, only, cx));
+        let (kinds, only, hide_msgs, collapse) = (
+            tab.config.event_kinds,
+            tab.config.events_only,
+            tab.config.hide_sub_messages,
+            tab.config.collapse_gift_subs,
+        );
+        tab.view.update(cx, |view, cx| {
+            view.set_events_filter(kinds, only, hide_msgs, collapse, cx)
+        });
         self.persist();
         cx.notify();
     }
@@ -1460,6 +1466,24 @@ impl BackseaterApp {
             return;
         };
         tab.config.events_only = only;
+        self.push_events_filter(ix, cx);
+    }
+
+    /// Toggles hiding sub/resub attached messages in tab `ix`'s events panel.
+    fn set_hide_sub_messages(&mut self, ix: usize, hide: bool, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get_mut(ix) else {
+            return;
+        };
+        tab.config.hide_sub_messages = hide;
+        self.push_events_filter(ix, cx);
+    }
+
+    /// Toggles collapsing mass-gift batches in tab `ix`'s events panel.
+    fn set_collapse_gift_subs(&mut self, ix: usize, collapse: bool, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get_mut(ix) else {
+            return;
+        };
+        tab.config.collapse_gift_subs = collapse;
         self.push_events_filter(ix, cx);
     }
 
@@ -1649,6 +1673,30 @@ impl BackseaterApp {
                     .checked(events_only)
                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                         this.set_events_only(ix, *checked, cx);
+                    }))
+                    .into_any_element(),
+            ));
+
+            card = card.child(card_divider()).child(setting_row(
+                "Hide sub messages",
+                Some("Show only the sub info in the panel, without the attached chat message."),
+                Switch::new("hide-sub-messages")
+                    .small()
+                    .checked(tab.config.hide_sub_messages)
+                    .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                        this.set_hide_sub_messages(ix, *checked, cx);
+                    }))
+                    .into_any_element(),
+            ));
+
+            card = card.child(card_divider()).child(setting_row(
+                "Collapse gift batches",
+                Some("One \"gifted 50 subs\" row, expandable to the recipients, instead of 50 rows."),
+                Switch::new("collapse-gift-subs")
+                    .small()
+                    .checked(tab.config.collapse_gift_subs)
+                    .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                        this.set_collapse_gift_subs(ix, *checked, cx);
                     }))
                     .into_any_element(),
             ));
@@ -4076,7 +4124,7 @@ fn live_tooltip_content(platforms: &[TipPlatform]) -> gpui::Div {
                 stats.push(format_uptime(now - started));
             }
             if let Some(n) = p.viewers {
-                stats.push(format!("{} viewers", chatview::format_count(n)));
+                stats.push(format!("{} viewers", bks_core::format_count(n)));
             }
             let game = info.game.trim();
             if !game.is_empty() {

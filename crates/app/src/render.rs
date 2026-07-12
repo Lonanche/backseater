@@ -2052,6 +2052,144 @@ pub fn render_event(
         })
 }
 
+/// Per-kind accent for the events panel's dot markers — one hue per event
+/// class so a glance sorts subs from gifts from raids. Medium saturation,
+/// legible on both themes.
+fn event_kind_color(kind: EventKind) -> u32 {
+    match kind {
+        EventKind::Sub => 0xa970ff,
+        EventKind::Gift => 0x2ecc71,
+        EventKind::Raid => 0xff8a3d,
+        EventKind::Bits => 0x00bcd4,
+        EventKind::Reward => 0x4a90e2,
+        EventKind::WatchStreak => 0xffb340,
+        EventKind::Other => 0x8a919e,
+    }
+}
+
+/// One events-panel row's inputs for [`render_event_compact`].
+pub struct PanelEvent<'a> {
+    pub platform: Platform,
+    pub kind: EventKind,
+    pub text: &'a str,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub details: &'a bks_platform::EventDetails,
+    /// The attached sub message — pre-gated by the tab's "hide sub messages".
+    pub message: Option<&'a Message>,
+    /// Whether the row hides an expandable recipient list (draws the chevron;
+    /// the panel makes the row itself clickable).
+    pub expandable: bool,
+    /// The recipient names to reveal — `Some` while expanded.
+    pub expanded_names: Option<Vec<String>>,
+}
+
+/// The redesigned events-panel row: compact and information-first. A
+/// kind-colored dot, a small timestamp, and the platform logo prefix the
+/// condensed "Actor did-thing" line built from [`bks_platform::EventDetails`]
+/// (emphasized actor, muted detail), falling back to the full pre-formatted
+/// text for events without structured data. A collapsed mass gift shows a
+/// chevron and, while expanded, its recipient list underneath; a sub's
+/// attached message renders as a normal chat line below unless the tab hides
+/// them.
+pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElement {
+    let scale = Scale::new(font_size);
+    let p = palette();
+    let row_id = stable_id(ev.text);
+
+    let dot = (scale.font * 0.45).round().max(5.0);
+    let time = ev
+        .timestamp
+        .with_timezone(&chrono::Local)
+        .format("%H:%M")
+        .to_string();
+
+    // The condensed actor + detail line, or the full text as wrapping word
+    // tokens (same tokenization as `render_event` so long lines wrap at word
+    // boundaries; each word keeps its trailing space as the gap).
+    let words = |text: &str, muted: bool| -> Vec<gpui::AnyElement> {
+        split_words(text)
+            .into_iter()
+            .filter(|word| !word.trim().is_empty())
+            .map(|word| {
+                div()
+                    .when(muted, |d| d.text_color(rgb(p.timestamp)))
+                    .child(SharedString::from(word.to_string()))
+                    .into_any_element()
+            })
+            .collect()
+    };
+    let mut content = h_flex().flex_1().min_w_0().flex_wrap().items_center();
+    content = match (&ev.details.actor, &ev.details.compact) {
+        (Some(actor), Some(detail)) => content
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .mr_1()
+                    .child(SharedString::from(actor.clone())),
+            )
+            .children(words(detail, true)),
+        _ => content.children(words(ev.text, false)),
+    };
+    if ev.expandable {
+        content = content.child(
+            div()
+                .ml_1()
+                .text_size(px(scale.small))
+                .text_color(rgb(p.timestamp))
+                .child(SharedString::from(if ev.expanded_names.is_some() {
+                    "▾"
+                } else {
+                    "▸"
+                })),
+        );
+    }
+
+    let mut col = v_flex()
+        .w_full()
+        .min_w_0()
+        .py_0p5()
+        .text_size(px(scale.font))
+        .child(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .items_start()
+                .gap_1p5()
+                .child(
+                    image_line_box(scale, dot)
+                        .flex_none()
+                        .child(div().size(px(dot)).rounded_full().bg(rgb(event_kind_color(ev.kind)))),
+                )
+                .child(
+                    line_box(scale)
+                        .flex_none()
+                        .text_size(px(scale.small))
+                        .text_color(rgb(p.timestamp))
+                        .child(SharedString::from(time)),
+                )
+                .child(platform_badge(ev.platform, scale).flex_none())
+                .child(content),
+        );
+
+    if let Some(names) = ev.expanded_names {
+        col = col.child(
+            div()
+                .w_full()
+                .min_w_0()
+                .pl_4()
+                .text_size(px(scale.small))
+                .text_color(rgb(p.timestamp))
+                .child(SharedString::from(format!("→ {}", names.join(", ")))),
+        );
+    }
+
+    if let Some(msg) = ev.message {
+        col = col.child(event_message_line(msg, scale, row_id));
+    }
+
+    col
+}
+
 /// The chat line shown under a sub/resub's system text: the chatter's attached
 /// message rendered like a normal chat row — timestamp, author badges, bold
 /// colored name, then the body's words/emotes — but non-interactive, matching the

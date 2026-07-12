@@ -457,6 +457,9 @@ pub(crate) struct ChatView {
     /// message id)` — dismissing hides *that one pin* for this session; the next
     /// pinned message shows again.
     dismissed_pins: std::collections::HashSet<(bks_core::Platform, String)>,
+    /// Mass-gift summary rows (by event seq) the user expanded in the events
+    /// panel to see the recipient list. Session-only, per view.
+    expanded_gifts: std::collections::HashSet<u64>,
     /// Per-platform status-bar viewer-count animation: when a fresh count lands,
     /// the shown number counts up/down to it (Twitch-style) instead of snapping.
     /// Presentation-only, so it lives on the view (popouts animate their own).
@@ -635,7 +638,8 @@ impl ChatView {
         // buffer's current events that pass this tab's kind filter.
         let events_list_state = ListState::new(0, ListAlignment::Bottom, px(200.));
         events_list_state.set_follow_mode(FollowMode::Tail);
-        let events_shown = filtered_event_seqs(channel.read(cx), config.event_kinds);
+        let events_shown =
+            filtered_event_seqs(channel.read(cx), config.event_kinds, config.collapse_gift_subs);
         events_list_state.reset(events_shown.len());
 
         // The placeholder is kept current by `composer_placeholder` on render
@@ -704,6 +708,7 @@ impl ChatView {
             _mention_sub,
             ignore,
             dismissed_pins: std::collections::HashSet::new(),
+            expanded_gifts: std::collections::HashSet::new(),
             viewer_anims: HashMap::new(),
             viewer_anim_tick_pending: false,
             usercard: None,
@@ -768,11 +773,10 @@ impl ChatView {
                 // Filter-passing events append to this view's events panel.
                 // Looked up by stable sequence number: `None` means a burst
                 // already trimmed it past MAX_EVENTS — nothing to show.
-                let passes = self
-                    .channel
-                    .read(cx)
-                    .event_at(*seq)
-                    .is_some_and(|ev| self.config.event_kinds.enabled(ev.kind));
+                let passes = self.channel.read(cx).event_at(*seq).is_some_and(|ev| {
+                    self.config.event_kinds.enabled(ev.kind)
+                        && !(self.config.collapse_gift_subs && ev.group.is_some())
+                });
                 if passes {
                     let ix = self.events_shown.len();
                     self.events_shown.push_back(*seq);
@@ -879,7 +883,11 @@ impl ChatView {
     /// Re-derives the events panel's filtered rows from the shared buffer —
     /// after a kind-filter change or a reconnect to a different channel.
     fn rebuild_events_shown(&mut self, cx: &mut Context<Self>) {
-        self.events_shown = filtered_event_seqs(self.channel.read(cx), self.config.event_kinds);
+        self.events_shown = filtered_event_seqs(
+            self.channel.read(cx),
+            self.config.event_kinds,
+            self.config.collapse_gift_subs,
+        );
         self.events_list_state.reset(self.events_shown.len());
     }
 
@@ -980,15 +988,20 @@ impl ChatView {
         self.layout_changed(cx);
     }
 
-    /// Updates the events panel's filters (kind checklist + "events only") live.
+    /// Updates the events panel's filters (kind checklist, "events only",
+    /// hide-sub-messages, gift collapsing) live.
     pub(crate) fn set_events_filter(
         &mut self,
         kinds: tabs::EventFilter,
         events_only: bool,
+        hide_sub_messages: bool,
+        collapse_gift_subs: bool,
         cx: &mut Context<Self>,
     ) {
         self.config.event_kinds = kinds;
         self.config.events_only = events_only;
+        self.config.hide_sub_messages = hide_sub_messages;
+        self.config.collapse_gift_subs = collapse_gift_subs;
         self.rebuild_events_shown(cx);
         // "Events only" adds/removes rows from the main log: re-measure.
         self.layout_changed(cx);
@@ -1405,7 +1418,7 @@ impl ChatView {
                 .text_size(px(self.font_size * 0.9))
                 .children(segments.into_iter().map(|(platform, channel, viewers)| {
                     let readout = match viewers {
-                        Some(n) => format!("{} viewers", format_count(n)),
+                        Some(n) => format!("{} viewers", bks_core::format_count(n)),
                         None => "LIVE".to_string(),
                     };
                     h_flex()
@@ -1441,7 +1454,7 @@ impl ChatView {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(SharedString::from(format!(
                                     "{} viewers",
-                                    format_count(total)
+                                    bks_core::format_count(total)
                                 ))),
                         )
                 }))
@@ -2875,6 +2888,8 @@ impl ChatView {
 
     fn render_events_panel(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let font_size = self.font_size;
+        let hide_msgs = self.config.hide_sub_messages;
+        let collapse = self.config.collapse_gift_subs;
         // Virtualized like the log: only on-screen event rows are built per
         // frame. The retained buffer holds up to MAX_EVENTS rows, and building
         // them all each frame (the old plain scroll column) re-laid-out — and
@@ -2887,31 +2902,64 @@ impl ChatView {
             move |ix, _window, cx: &mut gpui::App| {
                 let this = view.read(cx);
                 let model = this.channel.read(cx);
-                let row = this
-                    .events_shown
-                    .get(ix)
-                    .and_then(|&seq| model.event_at(seq));
-                let Some(ev) = row else {
+                let Some(&seq) = this.events_shown.get(ix) else {
                     return div().into_any_element();
                 };
-                // Per-row gap + the horizontal inset the old rows container
-                // carried (`panel = true`: each pill draws its own tint — see
-                // `render_event`).
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .px(px(6.0))
-                    .pb_1()
-                    .child(render::render_event(
-                        ev.platform,
-                        ev.kind,
-                        &ev.text,
-                        Some(ev.timestamp),
-                        ev.message.as_deref(),
-                        font_size,
-                        true,
-                    ))
-                    .into_any_element()
+                let Some(ev) = model.event_at(seq) else {
+                    return div().into_any_element();
+                };
+                // A mass-gift summary can reveal its recipients: the ones sent
+                // inline on the announcement (Kick) plus the collapsed
+                // per-recipient rows grouped under it (Twitch). Only collapse
+                // mode hides those rows, so only it lists them here.
+                let is_summary = ev.details.gift_count.is_some();
+                let mut names = ev.details.recipients.clone();
+                if is_summary && collapse {
+                    names.extend(
+                        model
+                            .events
+                            .iter()
+                            .filter(|e| e.group == Some(seq))
+                            .filter_map(|e| e.details.recipient.clone()),
+                    );
+                }
+                let expandable = is_summary && !names.is_empty();
+                let expanded = expandable && this.expanded_gifts.contains(&seq);
+                let row = render::render_event_compact(
+                    render::PanelEvent {
+                        platform: ev.platform,
+                        kind: ev.kind,
+                        text: &ev.text,
+                        timestamp: ev.timestamp,
+                        details: &ev.details,
+                        message: if hide_msgs { None } else { ev.message.as_deref() },
+                        expandable,
+                        expanded_names: expanded.then_some(names),
+                    },
+                    font_size,
+                );
+                let wrapper = div().w_full().min_w_0().px(px(6.0));
+                if expandable {
+                    let view = view.clone();
+                    wrapper
+                        .id(("event-row", ix))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(render::row_hover()))
+                        .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                if !this.expanded_gifts.remove(&seq) {
+                                    this.expanded_gifts.insert(seq);
+                                }
+                                // The row's height changed: re-measure just it.
+                                this.events_list_state.splice(ix..ix + 1, 1);
+                                cx.notify();
+                            });
+                        })
+                        .child(row)
+                        .into_any_element()
+                } else {
+                    wrapper.child(row).into_any_element()
+                }
             },
         )
         .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
@@ -3860,20 +3908,6 @@ impl ChatView {
     }
 }
 
-/// Formats a count with thousands separators ("1234567" → "1,234,567"), for the
-/// status bar's and tooltip's viewer readouts.
-pub(crate) fn format_count(n: u64) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
-}
-
 /// Byte offset where the word ending at `cursor` starts: just past the last
 /// whitespace before the cursor, or 0. The one place the "word at the cursor"
 /// scan lives (Tab completion, the autocomplete popup, and the `:`-stem check
@@ -3920,12 +3954,16 @@ fn starts_with_ci(name: &str, stem_lc: &str) -> bool {
 fn filtered_event_seqs(
     model: &crate::channel_store::ChannelModel,
     filter: tabs::EventFilter,
+    collapse_gifts: bool,
 ) -> std::collections::VecDeque<u64> {
     model
         .events
         .iter()
         .enumerate()
         .filter(|(_, ev)| filter.enabled(ev.kind))
+        // Collapsing hides a mass gift's per-recipient rows; their names show
+        // under the batch's summary row instead.
+        .filter(|(_, ev)| !(collapse_gifts && ev.group.is_some()))
         .map(|(i, _)| model.events_base + i as u64)
         .collect()
 }
@@ -4207,12 +4245,4 @@ mod tests {
         assert!(rolling.done(now + VIEWER_ANIM_DURATION));
     }
 
-    #[test]
-    fn format_count_groups_thousands() {
-        assert_eq!(format_count(0), "0");
-        assert_eq!(format_count(999), "999");
-        assert_eq!(format_count(1000), "1,000");
-        assert_eq!(format_count(12345), "12,345");
-        assert_eq!(format_count(1234567), "1,234,567");
-    }
 }

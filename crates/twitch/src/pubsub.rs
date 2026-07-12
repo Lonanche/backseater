@@ -237,6 +237,7 @@ pub async fn run(channel_id: String, tx: ChatSink) -> anyhow::Result<()> {
                     text: redeem_text(&data.redemption),
                     timestamp: chrono::Utc::now(),
                     message: None,
+                    details: redeem_details(&data.redemption),
                 }
             }
             // A new pin, or an existing pin's duration updated — both carry the
@@ -370,6 +371,15 @@ fn redeem_text(r: &Redemption) -> String {
         "{} redeemed {} ({} {unit}).",
         r.user.display_name, r.reward.title, r.reward.cost
     )
+}
+
+/// Condensed form for the events panel: "redeemed <reward> · N pts".
+fn redeem_details(r: &Redemption) -> bks_platform::EventDetails {
+    bks_platform::EventDetails {
+        actor: Some(r.user.display_name.clone()),
+        compact: Some(format!("redeemed {} · {} pts", r.reward.title, r.reward.cost)),
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]
