@@ -3,6 +3,17 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.4.0-beta.2
+
+### Fixes
+
+- Kick mod actions (usercard ban/timeout panel, the mod-button strip, mod-only
+  command autocomplete) now show only when you actually moderate the Kick
+  channel, checked automatically at connect and login (the broadcaster always
+  counts) and refreshed from your own messages' badges — previously any Kick
+  login showed them everywhere. No mod on either platform = no button-strip
+  space reserved at all.
+
 ## v0.4.0-beta.1
 
 ### Features
