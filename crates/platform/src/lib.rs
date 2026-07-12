@@ -99,6 +99,36 @@ pub struct EventDetails {
     pub recipients: Vec<String>,
 }
 
+/// A channel's active chat-restriction modes, platform-agnostic. Always a
+/// *full snapshot* — a connector whose platform sends partial updates (Twitch's
+/// ROOMSTATE carries only the changed tag) merges them into its current state
+/// before emitting, so the UI never needs platform-specific delta semantics.
+/// The default (everything off) is the unrestricted state; the mode bar hides
+/// when no platform has any mode active. Maps onto both Twitch (ROOMSTATE) and
+/// Kick (`ChatroomUpdatedEvent`'s slow/subscribers/followers/emotes modes);
+/// `unique` is Twitch-only (r9k) and simply stays `false` elsewhere.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChatModes {
+    /// Messages may only contain emotes.
+    pub emote_only: bool,
+    /// Only subscribers may chat.
+    pub subscribers_only: bool,
+    /// Only followers may chat: `None` = off, `Some(d)` = on requiring a follow
+    /// age of at least `d` (zero = any follower).
+    pub followers_only: Option<std::time::Duration>,
+    /// Minimum interval between one user's messages: `None` = off.
+    pub slow: Option<std::time::Duration>,
+    /// Only unique messages may be sent (Twitch r9k).
+    pub unique: bool,
+}
+
+impl ChatModes {
+    /// Whether any restriction is active (the bar only shows active ones).
+    pub fn any(&self) -> bool {
+        *self != Self::default()
+    }
+}
+
 /// Something that happened in a channel. The connector pushes these onto a
 /// [`ChatStream`]; the UI drains them.
 #[derive(Clone, Debug)]
@@ -261,6 +291,12 @@ pub enum ChatEvent {
         last_stream: Option<LastStream>,
         link: Option<String>,
     },
+    /// The channel's chat-restriction modes changed on `platform` (follower-only,
+    /// emote-only, slow, sub-only, unique). Always a full snapshot (see
+    /// [`ChatModes`]); connectors emit one only when something actually changed
+    /// from what they last emitted. Shown in the mode bar above the composer —
+    /// not a chat row.
+    ChatModes { platform: Platform, modes: ChatModes },
     /// A periodic concurrent-viewer-count update for the platform's stream,
     /// separate from [`ChatEvent::Live`] so a count refresh can't clobber the
     /// live-status metadata (title/game/last stream). `None` = unknown or

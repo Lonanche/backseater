@@ -69,6 +69,26 @@ pub fn parse_duration(s: &str) -> Option<u64> {
     Some(total)
 }
 
+/// Formats a second count compactly, the inverse of [`parse_duration`]:
+/// `90` → `"1m30s"`, `600` → `"10m"`, `5400` → `"1h30m"`, `0` → `"0s"`. Used
+/// by the chat-mode bar ("Slow (5s)", "Followers-only (10m)") and anywhere a
+/// duration is shown back to the user.
+pub fn format_duration(secs: u64) -> String {
+    if secs == 0 {
+        return "0s".to_string();
+    }
+    let mut out = String::new();
+    let mut rest = secs;
+    for (unit, label) in [(604_800, 'w'), (86_400, 'd'), (3600, 'h'), (60, 'm'), (1, 's')] {
+        let n = rest / unit;
+        if n > 0 {
+            out.push_str(&format!("{n}{label}"));
+            rest %= unit;
+        }
+    }
+    out
+}
+
 /// Parses an RFC-3339 timestamp into a UTC instant, returning `None` on an empty
 /// or unparseable string.
 pub fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
@@ -125,6 +145,17 @@ mod tests {
         assert_eq!(parse_duration("1h30"), None);
         // Overflow-safe.
         assert_eq!(parse_duration("99999999999999999999w"), None);
+    }
+
+    #[test]
+    fn format_duration_compact_and_roundtrips() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(5), "5s");
+        assert_eq!(format_duration(90), "1m30s");
+        assert_eq!(format_duration(600), "10m");
+        assert_eq!(format_duration(5400), "1h30m");
+        assert_eq!(format_duration(1_209_600), "2w");
+        assert_eq!(parse_duration(&format_duration(129_600)), Some(129_600));
     }
 
     #[test]

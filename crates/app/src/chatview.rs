@@ -849,6 +849,12 @@ impl ChatView {
                 cx.notify();
                 return;
             }
+            // Same deal for the mode bar above the composer: chrome outside the
+            // cached log, repaint only.
+            ChannelEvent::ChatModesChanged => {
+                cx.notify();
+                return;
+            }
         }
         // An emote (re)load may have changed the picker's source. The picker is
         // per-view, so each view refilters its own when open; the picker reads
@@ -1497,6 +1503,92 @@ impl ChatView {
                 // the composer).
                 .child(div().flex_1())
                 .children(self.viewerlist_button(cx))
+                .into_any_element(),
+        )
+    }
+
+    /// The chat-mode bar directly above the composer's input row: one group per
+    /// platform with any chat restriction active — platform icon + a chip per
+    /// active mode ("Followers-only (10m)", "Sub-only", "Emote-only",
+    /// "Slow (5s)", "Unique"). `None` (no bar, nothing allocated) when no
+    /// platform restricts anything — the common case. Platform-agnostic by
+    /// construction: it renders whatever `ChannelModel::chat_modes` holds, so a
+    /// connector that starts emitting `ChatEvent::ChatModes` (Kick later) shows
+    /// up here with zero UI changes.
+    fn render_mode_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let model = self.channel.read(cx);
+        if model.chat_modes.is_empty() {
+            return None;
+        }
+        let mut groups: Vec<(bks_core::Platform, Vec<String>)> = Vec::new();
+        for platform in [
+            bks_core::Platform::Twitch,
+            bks_core::Platform::Kick,
+            bks_core::Platform::YouTube,
+        ] {
+            let Some(modes) = model.chat_modes.get(&platform) else {
+                continue;
+            };
+            let mut chips = Vec::new();
+            if let Some(min) = modes.followers_only {
+                chips.push(if min.is_zero() {
+                    "Followers-only".to_string()
+                } else {
+                    format!(
+                        "Followers-only ({})",
+                        bks_core::format_duration(min.as_secs())
+                    )
+                });
+            }
+            if modes.subscribers_only {
+                chips.push("Sub-only".to_string());
+            }
+            if modes.emote_only {
+                chips.push("Emote-only".to_string());
+            }
+            if let Some(gap) = modes.slow {
+                chips.push(format!("Slow ({})", bks_core::format_duration(gap.as_secs())));
+            }
+            if modes.unique {
+                chips.push("Unique".to_string());
+            }
+            if !chips.is_empty() {
+                groups.push((platform, chips));
+            }
+        }
+        if groups.is_empty() {
+            return None;
+        }
+        let chip_text = px(self.font_size * 0.85);
+        Some(
+            h_flex()
+                .w_full()
+                .px_2()
+                .py_1()
+                .gap_3()
+                .flex_wrap()
+                .items_center()
+                // Same chrome tone as the input bar below it; the hairline above
+                // separates it from the log.
+                .bg(gpui::rgb(render::tab_bar_bg()))
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .children(groups.into_iter().map(|(platform, chips)| {
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .child(crate::platform_icon(platform, 14.))
+                        .children(chips.into_iter().map(|label| {
+                            div()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded(px(4.))
+                                .bg(cx.theme().muted)
+                                .text_color(cx.theme().muted_foreground)
+                                .text_size(chip_text)
+                                .child(SharedString::from(label))
+                        }))
+                }))
                 .into_any_element(),
         )
     }
@@ -4000,6 +4092,8 @@ impl ChatView {
             .when(self.picker_open, |col| {
                 col.child(self.render_emote_picker(cx))
             })
+            // Active chat restrictions (follower-only, slow, ...), when any.
+            .children(self.render_mode_bar(cx))
             // The "replying to" bar, when a reply is pending, sits just above input.
             .children(self.render_reply_bar(cx))
             .child(

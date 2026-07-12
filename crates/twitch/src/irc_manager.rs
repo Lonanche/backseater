@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use bks_core::Platform;
-use bks_platform::{ChatEvent, ChatSink};
+use bks_platform::{ChatEvent, ChatModes, ChatSink};
 use tokio::sync::mpsc;
 
 use crate::connector::{
@@ -177,6 +177,14 @@ struct Channel {
     /// the first PRIVMSG) — so a reconnect's fresh ROOMSTATE doesn't re-emit it
     /// (which would re-fetch emotes/badges + re-run history).
     channel_meta_sent: bool,
+    /// The channel's current chat-restriction modes, merged from (partial)
+    /// ROOMSTATEs so each emitted `ChatEvent::ChatModes` is a full snapshot.
+    modes: ChatModes,
+    /// Whether this session has emitted a modes snapshot yet. The first
+    /// ROOMSTATE of a session always emits (even if nothing differs from our
+    /// merged state) so a mode toggled while we were disconnected can't leave
+    /// the UI stale; after that only real changes emit.
+    modes_synced: bool,
 }
 
 /// A leaky-bucket rate limiter for JOINs (budget tokens per cooldown
@@ -232,6 +240,7 @@ async fn socket_task(auth: Option<TwitchAuth>, mut commands: mpsc::UnboundedRece
         // flag (but keep the channels + sinks).
         for ch in channels.values_mut() {
             ch.channel_meta_sent = false;
+            ch.modes_synced = false;
         }
         match outcome {
             SessionOutcome::Shutdown => break, // command sender dropped — task retired
@@ -314,6 +323,8 @@ async fn run_session(
                     channels.insert(channel.clone(), Channel {
                         sink,
                         channel_meta_sent: false,
+                        modes: ChatModes::default(),
+                        modes_synced: false,
                     });
                     if let Err(err) = join_channel(&mut read, &channel, &mut join_bucket).await {
                         return SessionOutcome::Transient(err);
@@ -415,6 +426,13 @@ async fn handle_read(
                         rs.channel(),
                         rs.channel_id(),
                     )));
+                }
+                if merge_roomstate(&mut ch.modes, &rs) || !ch.modes_synced {
+                    ch.modes_synced = true;
+                    let _ = ch.sink.send(ChatEvent::ChatModes {
+                        platform: Platform::Twitch,
+                        modes: ch.modes,
+                    });
                 }
             }
         }
@@ -525,6 +543,34 @@ async fn send_message(
     }
 }
 
+/// Merges a ROOMSTATE into the channel's current modes, returning whether
+/// anything changed. Twitch's ROOMSTATE is a *delta*: the one sent on JOIN
+/// carries every tag, later ones only the changed tag (tmi maps a missing tag
+/// to `None` = no change). `followers-only` folds its enabled-with-no-minimum
+/// case into a zero duration; a zero `slow` means slow mode is off.
+fn merge_roomstate(modes: &mut ChatModes, rs: &tmi::RoomState) -> bool {
+    let before = *modes;
+    if let Some(on) = rs.emote_only() {
+        modes.emote_only = on;
+    }
+    if let Some(fo) = rs.followers_only() {
+        modes.followers_only = match fo {
+            tmi::FollowersOnly::Disabled => None,
+            tmi::FollowersOnly::Enabled(min) => Some(min.unwrap_or_default()),
+        };
+    }
+    if let Some(on) = rs.r9k() {
+        modes.unique = on;
+    }
+    if let Some(d) = rs.slow() {
+        modes.slow = (!d.is_zero()).then_some(d);
+    }
+    if let Some(on) = rs.subs_only() {
+        modes.subscribers_only = on;
+    }
+    before != *modes
+}
+
 /// The routing key for a channel: `#name` lowercased, matching how tabs register.
 fn channel_key(channel: &str) -> String {
     format!("#{}", bks_core::channel_login(channel))
@@ -539,5 +585,68 @@ async fn sleep_or_shutdown(
     tokio::select! {
         _ = tokio::time::sleep(dur) => false,
         cmd = commands.recv() => cmd.is_none(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tmi::{FromIrc, IrcMessageRef};
+
+    fn roomstate(tags: &str) -> tmi::RoomState<'static> {
+        let raw = format!("@room-id=12345;{tags} :tmi.twitch.tv ROOMSTATE #oilrats");
+        let irc = IrcMessageRef::parse(&raw).unwrap();
+        tmi::RoomState::from_irc(irc).unwrap().into_owned()
+    }
+
+    #[test]
+    fn full_roomstate_sets_every_mode() {
+        let mut modes = ChatModes::default();
+        let changed = merge_roomstate(
+            &mut modes,
+            &roomstate("emote-only=1;followers-only=10;r9k=1;slow=5;subs-only=1"),
+        );
+        assert!(changed);
+        assert_eq!(
+            modes,
+            ChatModes {
+                emote_only: true,
+                subscribers_only: true,
+                followers_only: Some(Duration::from_secs(600)),
+                slow: Some(Duration::from_secs(5)),
+                unique: true,
+            }
+        );
+    }
+
+    #[test]
+    fn delta_roomstate_touches_only_its_tag() {
+        let mut modes = ChatModes {
+            slow: Some(Duration::from_secs(5)),
+            ..Default::default()
+        };
+        // Emote-only flips on; slow (absent = no change) must survive.
+        assert!(merge_roomstate(&mut modes, &roomstate("emote-only=1")));
+        assert!(modes.emote_only);
+        assert_eq!(modes.slow, Some(Duration::from_secs(5)));
+        // slow=0 turns slow mode off.
+        assert!(merge_roomstate(&mut modes, &roomstate("slow=0")));
+        assert_eq!(modes.slow, None);
+        // followers-only=-1 is off, =0 is "any follower" (zero minimum).
+        assert!(merge_roomstate(&mut modes, &roomstate("followers-only=0")));
+        assert_eq!(modes.followers_only, Some(Duration::ZERO));
+        assert!(merge_roomstate(&mut modes, &roomstate("followers-only=-1")));
+        assert_eq!(modes.followers_only, None);
+    }
+
+    #[test]
+    fn unchanged_roomstate_reports_no_change() {
+        let mut modes = ChatModes::default();
+        assert!(!merge_roomstate(
+            &mut modes,
+            &roomstate("emote-only=0;followers-only=-1;r9k=0;slow=0;subs-only=0"),
+        ));
+        assert!(!modes.any());
     }
 }

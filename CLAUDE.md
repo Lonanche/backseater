@@ -160,6 +160,24 @@ platform = implement one trait + one message builder, with zero UI changes**.
   900ms ease-out, repainting on a coalesced 50ms per-view timer that a settled `from == to`
   anim never arms — the log stays cached, only the chrome repaints; the first count and a
   platform re-appearing show as-is).
+- **Chat-mode bar (Twitch today, multi-platform by design)**: a slim bar directly above the
+  composer's input row shows each platform's active chat restrictions as chips — platform icon +
+  "Followers-only (10m)", "Sub-only", "Emote-only", "Slow (5s)", "Unique" — hidden entirely when
+  nothing is restricted (the common case). The seam is generic: `bks_platform::ChatModes` is a
+  platform-agnostic struct and `ChatEvent::ChatModes { platform, modes }` always carries a **full
+  snapshot** (a connector whose platform sends deltas merges them itself), stored per-platform in
+  `ChannelModel.chat_modes` (deduped; empty modes remove the entry) and fanned out as
+  `ChannelEvent::ChatModesChanged`, which views answer with a bare repaint — NOT `Changed` (no log
+  re-measure), same rule as `ViewersChanged`. Rendered by `ChatView::render_mode_bar`. Twitch
+  feeds it anonymously from IRC ROOMSTATE (`irc_manager.rs::merge_roomstate` + per-`Channel`
+  `modes`/`modes_synced` state): the join ROOMSTATE carries every tag, later ones only the changed
+  tag (tmi maps missing → `None` = no change); `followers-only` -1/0/N maps to off / zero minimum
+  / N minutes, `slow=0` is off; the first ROOMSTATE of each session re-emits unconditionally so a
+  mode flipped while disconnected can't leave the bar stale (the store's dedupe eats the no-op
+  case). **Kick later**: emit `ChatModes` from the Pusher `ChatroomUpdatedEvent`
+  (slow/subscribers/followers/emotes modes; currently in the ignored bucket) + seed from the
+  channel lookup's `chatroom` fields — zero UI changes needed. Durations format via
+  `bks_core::format_duration` (compact "1h30m", the inverse of `parse_duration`).
 - **Dark + light + custom themes**, switched live in the Appearance/Themes settings tabs
   (persisted in `settings.json`). The kit chrome switches via `gpui_component::Theme::change`; the chat
   log's own colors come from a `render::palette()` (`DARK`/`LIGHT`) selected by the process-wide
@@ -287,7 +305,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
   back onto the next stable. CI runs in ~5 min warm (`rust-cache`, `shared-key: build`); a
   version bump rewrites Cargo.lock → cache re-key → that one run takes ~15 min (expected, once
   per release).
-- 236 passing unit tests (`cargo test`).
+- 240 passing unit tests (`cargo test`).
 
 **Not done yet (designed for, not built):**
 - TikTok connector.

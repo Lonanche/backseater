@@ -121,6 +121,11 @@ pub enum ChannelEvent {
     /// tooltip read it — views answer with a bare repaint, NOT the log re-measure
     /// `Changed` triggers.
     ViewersChanged,
+    /// A platform's chat-restriction modes changed (follower-only, emote-only,
+    /// slow, ...). Like [`ViewersChanged`](Self::ViewersChanged): only the mode
+    /// bar above the composer reads it, so views answer with a bare repaint,
+    /// never the log re-measure `Changed` triggers.
+    ChatModesChanged,
 }
 
 /// One channel's shared model: the message buffer + connection + per-channel state.
@@ -171,6 +176,9 @@ pub struct ChannelModel {
     /// Latest concurrent viewer count per platform (for the status bar), fed by
     /// the periodic `ChatEvent::Viewers` updates; absent = unknown or offline.
     pub viewer_counts: HashMap<Platform, u64>,
+    /// Active chat-restriction modes per platform (for the mode bar above the
+    /// composer); a platform with nothing restricted has no entry.
+    pub chat_modes: HashMap<Platform, bks_platform::ChatModes>,
     /// Picker emote sets per platform (channel 7TV + native).
     pub emotes_twitch: Vec<bks_core::Emote>,
     pub emotes_kick: Vec<bks_core::Emote>,
@@ -628,6 +636,19 @@ impl ChannelModel {
                     cx.emit(ChannelEvent::ViewersChanged);
                 }
             }
+            ChatEvent::ChatModes { platform, modes } => {
+                // Deduped: a reconnect's first ROOMSTATE re-emits the snapshot
+                // unconditionally (so a mode toggled while disconnected can't
+                // go stale), which must not fan out repaints when nothing moved.
+                let changed = if modes.any() {
+                    self.chat_modes.insert(platform, modes) != Some(modes)
+                } else {
+                    self.chat_modes.remove(&platform).is_some()
+                };
+                if changed {
+                    cx.emit(ChannelEvent::ChatModesChanged);
+                }
+            }
             ChatEvent::Emotes { platform, emotes } => {
                 match platform {
                     Platform::Kick => self.emotes_kick = emotes,
@@ -752,6 +773,7 @@ fn build_model(
             pins: HashMap::new(),
             live_status: HashMap::new(),
             viewer_counts: HashMap::new(),
+            chat_modes: HashMap::new(),
             emotes_twitch: Vec::new(),
             emotes_kick: Vec::new(),
             emotes_youtube: Vec::new(),
