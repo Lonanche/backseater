@@ -50,6 +50,8 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 - The tab live tooltip is a compact stream card, so long category names no longer
   overflow it.
 - The global Mentions tab can be renamed in Highlights settings.
+- Twitch usercards have a Warn section: type a reason and the chatter must
+  acknowledge the warning before they can chat again.
 
 ### Fixes
 
@@ -65,6 +67,11 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 - In the autocomplete popup, Tab now inserts the highlighted candidate and Up/Down
   navigate the list; pressing Down with a typed draft (outside history browsing)
   clears it.
+- `/followers` reads a bare number as minutes like twitch.tv (`/followers 10` =
+  10 minutes, previously seconds) and accepts `0` for no minimum follow age.
+- Every announcement color (`/announceblue` `/announcegreen` `/announceorange`
+  `/announcepurple`) is listed in the autocomplete popup, and completing a color
+  no longer inserts `/announceblue` in its place.
 
 ## v0.2.2
 

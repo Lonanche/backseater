@@ -13,7 +13,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-version = "0.3.0-beta.3"
+version = "0.3.0"
 license = "MIT"
 # Floor set by `u64::is_multiple_of` (stabilized 1.87); gives a clear error
 # instead of a bare unresolved-method on older toolchains.
