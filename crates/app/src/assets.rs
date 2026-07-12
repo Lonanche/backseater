@@ -54,22 +54,38 @@ macro_rules! app_icons {
 }
 
 const APP_ICONS: &[(&str, &[u8])] = app_icons![
-    "bell-off", "ban", "clock", "trash-2", "pin", "message-square-off",
+    "bell-off",
+    "ban",
+    "clock",
+    "timer",
+    "hourglass",
+    "alarm-clock",
+    "trash-2",
+    "circle-alert",
+    "octagon-alert",
+    "pin",
+    "message-square-off",
 ];
 
 /// Mod-button icon names the settings editor offers and `render` resolves:
 /// short name → the SVG asset path (ours or the kit's). A [`ModButton::icon`]
 /// matching a name here draws the vector icon; anything else draws as text.
 /// One icon per mod action — ban / timeout / delete / warn / pin, plus
-/// monitor + restrict for when those commands exist. `clock`/`trash` keep
-/// their lucide names because seeded default buttons in saved settings
-/// reference them.
+/// monitor + restrict for when those commands exist — with extra timeout and
+/// warn variants so several buttons of the same kind (e.g. 10m vs 1h timeouts)
+/// stay distinguishable. `clock`/`trash` keep their lucide names because
+/// seeded default buttons in saved settings reference them.
 pub const MOD_ICONS: &[(&str, &str)] = &[
     ("ban", "icons/ban.svg"),
     ("clock", "icons/clock.svg"),
+    ("timer", "icons/timer.svg"),
+    ("hourglass", "icons/hourglass.svg"),
+    ("alarm", "icons/alarm-clock.svg"),
     ("trash", "icons/trash-2.svg"),
     // Kit-shipped SVG.
     ("warn", "icons/triangle-alert.svg"),
+    ("warn-circle", "icons/circle-alert.svg"),
+    ("warn-octagon", "icons/octagon-alert.svg"),
     ("pin", "icons/pin.svg"),
     // Kit-shipped SVG.
     ("monitor", "icons/eye.svg"),
