@@ -3,6 +3,45 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.4.0-beta.3
+
+### Features
+
+- @mentions in chat are clickable: clicking `@name` in any message opens that
+  user's usercard on the message's platform, whether or not they've chatted —
+  someone we've seen gets a fully filled card right away, anyone else gets a
+  card whose account stats load in (or report that no such user exists).
+- Pause chat on hover (Settings → Appearance, off by default): the log holds
+  still while your pointer is over it — a "Chat paused" pill shows — and jumps
+  to the newest messages when you move away. A log you scrolled up yourself
+  never pauses or jumps.
+- A suppress tier next to ignore (Settings → Highlights): messages matching a
+  suppress term stay in chat but render at a configurable low opacity, so
+  they're easy to skip while still readable.
+- Channel-point redemptions that include a message now show that message under
+  the "X redeemed …" notification, with badges and emotes intact.
+- Custom mod buttons can be added to the usercard's moderation panel
+  (user-targeting commands only), scoped per platform.
+- Message timestamps can be hidden independently for the chat log, events
+  panel, and mentions panel (Settings → Appearance).
+- Tabs redesigned as compact chips: the active tab gets an accent tint and
+  underline, inactive ones a recessed fill, and closing a tab moved into its
+  right-click menu so it can't be hit by accident.
+- Command aliases (`/untimeout`, `/viewers`, `/user`, …) are listed as their
+  own rows in the `/` autocomplete popup so they're discoverable.
+
+### Fixes
+
+- Slash commands taking a user or channel accept a leading `@` (`/unban @name`,
+  `/ban`, `/timeout`, `/warn`, `/shoutout`, `/raid`, …) instead of failing to
+  find the account.
+- A Kick-only tab defaults its send target to Kick, and the send-target toggle
+  only appears when the tab has both a Twitch and a Kick channel.
+- Hover effects and tooltips no longer stick around when the mouse leaves the
+  window.
+- The tab tooltip's uptime/last-seen rolls into days at 24h, so 46h reads
+  "1d22h" instead.
+
 ## v0.4.0-beta.2
 
 ### Fixes
