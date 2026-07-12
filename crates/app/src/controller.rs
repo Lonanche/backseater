@@ -807,7 +807,7 @@ impl Controller {
         match cmd.as_str() {
             "ban" => match args.split_first() {
                 Some((user, reason)) => self.moderate(target, ModAction::Ban {
-                    user: user.to_string(),
+                    user: user_arg(user),
                     reason: join(reason),
                 }),
                 None => self.notice("usage: /ban <user> [reason]"),
@@ -818,7 +818,7 @@ impl Controller {
                     .and_then(|secs| u32::try_from(secs).ok())
                 {
                     Some(secs) => self.moderate(target, ModAction::Timeout {
-                        user: user.to_string(),
+                        user: user_arg(user),
                         secs,
                         reason: join(reason),
                     }),
@@ -830,9 +830,9 @@ impl Controller {
             },
             "unban" | "untimeout" => match args.first() {
                 Some(user) => self.moderate(target, ModAction::Unban {
-                    user: user.to_string(),
+                    user: user_arg(user),
                 }),
-                None => self.notice("usage: /unban <user>"),
+                None => self.notice(format!("usage: /{cmd} <user>")),
             },
             "delete" => match args.first() {
                 Some(id) => self.moderate(target, ModAction::Delete {
@@ -866,7 +866,7 @@ impl Controller {
                     target,
                     &cmd,
                     TwitchCmd::Warn {
-                        user: user.to_string(),
+                        user: user_arg(user),
                         reason: reason.join(" "),
                     },
                 ),
@@ -965,7 +965,7 @@ impl Controller {
                             Role::Moderator
                         },
                         grant: !cmd.starts_with("un"),
-                        user: user.to_string(),
+                        user: user_arg(user),
                     },
                 ),
                 None => self.notice(format!("usage: /{cmd} <user>")),
@@ -975,7 +975,7 @@ impl Controller {
                     target,
                     &cmd,
                     TwitchCmd::Shoutout {
-                        user: user.to_string(),
+                        user: user_arg(user),
                     },
                 ),
                 None => self.notice("usage: /shoutout <channel>"),
@@ -985,7 +985,7 @@ impl Controller {
                     target,
                     &cmd,
                     TwitchCmd::Raid {
-                        target: raid_target.to_string(),
+                        target: user_arg(raid_target),
                     },
                 ),
                 None => self.notice("usage: /raid <channel>"),
@@ -1302,4 +1302,11 @@ fn join(parts: &[&str]) -> Option<String> {
     } else {
         Some(parts.join(" "))
     }
+}
+
+/// A typed user/channel argument, cleaned: the mention autocomplete inserts
+/// `@name` (and typing the `@` by hand is habit), but Helix login lookups
+/// reject it and the Kick `login → id` map is keyed on bare names.
+fn user_arg(arg: &str) -> String {
+    arg.trim_start_matches('@').to_string()
 }
