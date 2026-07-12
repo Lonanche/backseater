@@ -41,18 +41,36 @@ impl Platform {
 
     /// The logo's display size `(w, h)` for a nominal square icon size: each
     /// bundled asset keeps its natural aspect instead of being stretched into a
-    /// square (Twitch is 55×64, YouTube's play button 57×41), and the wide
-    /// YouTube logo is optically balanced a touch shorter so its visual mass
-    /// matches the square-ish ones.
+    /// square (Twitch is 55×64, YouTube's play button 57×41), and each is
+    /// optically balanced so their visual mass matches — the wide YouTube logo
+    /// runs a touch shorter, the full-bleed Kick square a touch smaller than
+    /// the tight-cropped Twitch glyph.
     pub fn icon_size(self, nominal: f32) -> (f32, f32) {
         match self {
             Platform::Twitch => (nominal * 55.0 / 64.0, nominal),
+            Platform::Kick => (nominal * 0.92, nominal * 0.92),
             Platform::YouTube => {
                 let h = nominal * 0.84;
                 (h * 57.0 / 41.0, h)
             }
             _ => (nominal, nominal),
         }
+    }
+
+    /// The width of the fixed slot chat rows reserve for the platform logo: the
+    /// widest platform's display width at this nominal size. Logos of different
+    /// aspects center inside equal space, so the timestamp after the icon
+    /// starts at the same x on every row no matter the platform.
+    pub fn icon_slot_width(nominal: f32) -> f32 {
+        [
+            Platform::Twitch,
+            Platform::Kick,
+            Platform::YouTube,
+            Platform::TikTok,
+        ]
+        .into_iter()
+        .map(|p| p.icon_size(nominal).0)
+        .fold(0.0, f32::max)
     }
 
     /// A single-character glyph marking a message's source. Used as the icon when

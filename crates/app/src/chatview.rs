@@ -419,6 +419,9 @@ pub(crate) struct ChatView {
     /// `ListAlignment::Bottom` + `FollowMode::Tail` give chat-style bottom-stick.
     list_state: ListState,
     input: Entity<InputState>,
+    /// The last placeholder pushed onto the input ("Send a message to …"), so
+    /// render only calls `set_placeholder` (which notifies) on a real change.
+    input_placeholder: String,
     /// The shared connection handle (send/moderation), cloned from the model.
     controller: Controller,
     config: TabConfig,
@@ -634,10 +637,9 @@ impl ChatView {
         let events_shown = filtered_event_seqs(channel.read(cx), config.event_kinds);
         events_list_state.reset(events_shown.len());
 
-        let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Message (or /login, /ban, /timeout, /unban, /delete)")
-        });
+        // The placeholder is kept current by `composer_placeholder` on render
+        // ("Send a message to Twitch + Kick", a login hint when logged out).
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(" Send a message"));
         let _input_sub = cx.subscribe_in(&input, window, Self::on_input_event);
 
         let picker_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search emotes…"));
@@ -688,6 +690,7 @@ impl ChatView {
             session,
             list_state,
             input,
+            input_placeholder: String::new(),
             controller,
             config,
             font_size,
@@ -1347,6 +1350,11 @@ impl ChatView {
                                 ))),
                         )
                 }))
+                // The viewer-list button rides the bar's right edge (a
+                // while-live, mods-only feature — it doesn't earn a spot in
+                // the composer).
+                .child(div().flex_1())
+                .children(self.viewerlist_button(cx))
                 .into_any_element(),
         )
     }
@@ -1411,15 +1419,9 @@ impl ChatView {
         if cards.is_empty() && collapsed == 0 {
             return None;
         }
-        let mut col = v_flex()
-            .absolute()
-            .top_0()
-            .left_0()
-            // Stay clear of the overlay scrollbar's gutter.
-            .right(px(crate::SCROLLBAR_WIDTH))
-            .p_1()
-            .gap_1()
-            .children(cards);
+        // Full-bleed banners pinned to the chat's top edge; the collapsed-pin
+        // chip floats at the top-right below them.
+        let mut col = v_flex().absolute().top_0().left_0().right_0().children(cards);
         if collapsed > 0 {
             let label = if collapsed > 1 {
                 format!("📌 {collapsed}")
@@ -1427,9 +1429,12 @@ impl ChatView {
                 "📌".to_string()
             };
             col = col.child(
-                h_flex().justify_end().child(
+                h_flex().justify_end().pt_1().pr_2().child(
                     div()
                         .id("restore-pins")
+                        // Block the row (and its hover reply/pin buttons)
+                        // painted underneath from also receiving the click.
+                        .occlude()
                         .px_2()
                         .py_0p5()
                         .rounded_full()
@@ -1449,6 +1454,7 @@ impl ChatView {
                             cx.listener(|this, _, _, cx| {
                                 this.dismissed_pins.clear();
                                 cx.notify();
+                                cx.stop_propagation();
                             }),
                         ),
                 ),
@@ -1486,15 +1492,16 @@ impl ChatView {
         };
         let msg_id = pin.message.id.clone();
 
-        // A floating card over the log (not a full-width bar): rounded, accent
-        // left bar, and a shadow so it reads as pinned *on top of* the chat.
+        // A full-width banner flush to the chat's top edge, floating over the
+        // log (the shadow separates it from the rows scrolling underneath).
+        // `occlude` keeps clicks on it from also hitting the row below.
         let mut banner = h_flex()
+            .occlude()
             .w_full()
             .items_start()
             .gap_2()
             .px_2()
             .py_1()
-            .rounded_md()
             .bg(gpui::rgb(p.event_bg))
             .border_l_2()
             .border_color(gpui::rgb(p.event_text))
@@ -2598,17 +2605,19 @@ impl ChatView {
             })
         });
         let tip = SharedString::from(tip);
+        // Compact — it sits *inside* the input box as its prefix: a small pill
+        // ringed in the active platform's color, click cycles the target.
         Some(
             h_flex()
                 .id("send-target")
                 .gap_1()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .bg(cx.theme().background)
+                .px_1p5()
+                .py_0p5()
+                .rounded_sm()
                 .border_1()
                 .border_color(gpui::rgb(ring))
                 .cursor_pointer()
+                .hover(|s| s.bg(render::chrome_hover()))
                 .children(icons)
                 .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                 .on_mouse_down(
@@ -2622,8 +2631,10 @@ impl ChatView {
         )
     }
 
-    /// The input-bar button opening the Twitch viewer list — only when this tab
-    /// has a Twitch channel (Kick/YouTube expose no chatters API at all).
+    /// The status-bar button opening the Twitch viewer list — only when this tab
+    /// has a Twitch channel (Kick/YouTube expose no chatters API at all). Lives
+    /// on the status bar (a while-live, mods-only feature), and `/viewers` /
+    /// `/chatters` still open it any time.
     fn viewerlist_button(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if self.config.twitch_channel.is_empty() {
             return None;
@@ -2631,9 +2642,8 @@ impl ChatView {
         Some(
             div()
                 .id("viewer-list-toggle")
-                .px_2()
-                .py_1()
-                .rounded_md()
+                .px_1p5()
+                .rounded_sm()
                 .cursor_pointer()
                 .text_color(cx.theme().muted_foreground)
                 .hover(|s| {
@@ -3103,23 +3113,21 @@ impl ChatView {
                             .child(log)
                             .children(self.render_pin_overlay(cx))
                             .into_any_element();
-                        if single_panel {
-                            // Chat alone: no header (nothing to move; saves a row).
-                            log
-                        } else {
-                            // A header like the other panels': move buttons now,
-                            // and the natural spot for live status later (viewer
-                            // count, uptime, …).
-                            v_flex()
-                                .size_full()
-                                .min_h_0()
+                        // The composer lives under the log *inside* this cell,
+                        // so with side panels open the input spans the chat
+                        // column, not the whole window.
+                        let mut col = v_flex().size_full().min_h_0();
+                        if !single_panel {
+                            // A header like the other panels' (move buttons).
+                            col = col
                                 .bg(gpui::rgb(render::chat_bg()))
                                 .pt_2()
-                                .gap_1()
                                 .child(self.panel_header("Chat", tabs::PanelKind::Chat, cx))
-                                .child(log)
-                                .into_any_element()
+                                .child(div().h_1());
                         }
+                        col.child(log)
+                            .child(self.render_composer(cx))
+                            .into_any_element()
                     }
                     tabs::PanelKind::Events => self.render_events_panel(cx),
                     tabs::PanelKind::Mentions => self.render_mentions_panel(cx),
@@ -3568,6 +3576,16 @@ impl Render for ChatView {
                 ));
         }
 
+        // Keep the input's placeholder naming where a message will go ("Send a
+        // message to Twitch + Kick"), guarded so the (notifying) setter only
+        // runs on a real change (send-target cycle, login flip).
+        let placeholder = self.composer_placeholder();
+        if placeholder != self.input_placeholder {
+            self.input_placeholder = placeholder.clone();
+            self.input
+                .update(cx, |state, cx| state.set_placeholder(placeholder, window, cx));
+        }
+
         let emote_popup_overlay = self.render_emote_popup(window, cx);
 
         let layout_grid = self.render_layout_grid(cx);
@@ -3577,10 +3595,77 @@ impl Render for ChatView {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             // Live viewer-count status bar above the panels; pinned messages
-            // float *inside* the chat log (see `render_pin_overlay`).
+            // float *inside* the chat log (see `render_pin_overlay`) and the
+            // composer sits inside the chat panel (see `render_composer`).
             .children(self.render_status_bar(cx))
             .child(layout_grid)
-            // The emote picker, when open, sits between the feed and the input bar.
+            .children(emote_popup_overlay)
+    }
+}
+
+impl ChatView {
+    /// The input's placeholder text: names where a plain message goes, from the
+    /// tab's channels + logins + send target. Not logged in anywhere → a login
+    /// hint instead. The leading space keeps the muted text clear of the caret,
+    /// which the kit blinks exactly on the first glyph's left edge.
+    fn composer_placeholder(&self) -> String {
+        let has_twitch = !self.config.twitch_channel.trim().is_empty();
+        let has_kick = !self.config.kick_channel.trim().is_empty();
+        let twitch = has_twitch && self.controller.twitch_logged_in();
+        let kick = has_kick && self.controller.kick_logged_in();
+        let text = match (twitch, kick) {
+            (true, true) => match self.controller.send_target() {
+                controller::SendTarget::Twitch => "Send a message to Twitch",
+                controller::SendTarget::Kick => "Send a message to Kick",
+                controller::SendTarget::Both => "Send a message to Twitch + Kick",
+            },
+            (true, false) => "Send a message to Twitch",
+            (false, true) => "Send a message to Kick",
+            (false, false) => "Log in from Settings (⚙) → Account to chat",
+        };
+        format!(" {text}")
+    }
+
+    /// The composer under the chat log: the emote picker (when open), the
+    /// "replying to" bar, and the input row. Rendered inside the chat panel's
+    /// cell so it spans the chat column — with side panels open the input stays
+    /// under the chat, not stretched across the whole window. The send-target
+    /// toggle and the emote-picker button live *inside* the input box
+    /// (prefix/suffix), so there's no button row to misalign.
+    fn render_composer(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        // Tab completion. A single-line `Input` binds Tab to its
+        // `IndentInline` action, which for a non-indentable input
+        // just *propagates* (no-op) — so the keystroke falls through
+        // to Root's Tab → focus_next, moving focus away. We catch
+        // that same `IndentInline` action on this ancestor (it runs
+        // after the input's no-op) and run completion instead,
+        // stopping propagation so focus doesn't move. Raw key
+        // listeners can't be used here: gpui dispatches action
+        // bindings before raw KeyDown listeners, and the input
+        // consumes the keystroke as an action first.
+        //
+        // The autocomplete popup's keys need `capture_action`
+        // instead: unlike Tab, the input *consumes* Up/Down/
+        // Enter/Escape (single-line MoveUp/MoveDown return
+        // without propagating; Enter emits PressEnter = send),
+        // so a bubble-phase listener here never sees them.
+        // Capture runs before the input's handler; when the
+        // popup is closed each handler does nothing and the key
+        // flows through normally.
+        // The kit pads the input 12px each side; tighten the left so the
+        // send-target pill hugs the box's edge (the right side is re-asserted
+        // by the kit when a suffix is set — the picker button carries a
+        // negative margin instead).
+        let mut input = Input::new(&self.input)
+            .pl(px(6.))
+            .suffix(self.picker_button(cx));
+        if let Some(toggle) = self.send_target_toggle(cx) {
+            input = input.prefix(toggle);
+        }
+        v_flex()
+            .w_full()
+            .flex_none()
+            // The emote picker, when open, sits between the feed and the input.
             .when(self.picker_open, |col| {
                 col.child(self.render_emote_picker(cx))
             })
@@ -3592,7 +3677,6 @@ impl Render for ChatView {
                     .relative()
                     .px_2()
                     .py_1p5()
-                    .gap_1p5()
                     .items_center()
                     // The input bar sits on the chrome tone (one elevation step
                     // above the log), separated by a hairline instead of a
@@ -3600,29 +3684,7 @@ impl Render for ChatView {
                     .bg(gpui::rgb(render::tab_bar_bg()))
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .children(self.send_target_toggle(cx))
-                    .child(self.picker_button(cx))
-                    .children(self.viewerlist_button(cx))
                     .child(
-                        // Tab completion. A single-line `Input` binds Tab to its
-                        // `IndentInline` action, which for a non-indentable input
-                        // just *propagates* (no-op) — so the keystroke falls through
-                        // to Root's Tab → focus_next, moving focus away. We catch
-                        // that same `IndentInline` action on this ancestor (it runs
-                        // after the input's no-op) and run completion instead,
-                        // stopping propagation so focus doesn't move. Raw key
-                        // listeners can't be used here: gpui dispatches action
-                        // bindings before raw KeyDown listeners, and the input
-                        // consumes the keystroke as an action first.
-                        //
-                        // The autocomplete popup's keys need `capture_action`
-                        // instead: unlike Tab, the input *consumes* Up/Down/
-                        // Enter/Escape (single-line MoveUp/MoveDown return
-                        // without propagating; Enter emits PressEnter = send),
-                        // so a bubble-phase listener here never sees them.
-                        // Capture runs before the input's handler; when the
-                        // popup is closed each handler does nothing and the key
-                        // flows through normally.
                         div()
                             .flex_1()
                             .on_action(cx.listener(
@@ -3679,11 +3741,11 @@ impl Render for ChatView {
                                     }
                                 },
                             ))
-                            .child(Input::new(&self.input)),
+                            .child(input),
                     )
                     .children(self.render_input_popup(cx)),
             )
-            .children(emote_popup_overlay)
+            .into_any_element()
     }
 }
 

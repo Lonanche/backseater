@@ -220,6 +220,11 @@ impl Controller {
         self.session.kick_logged_in()
     }
 
+    /// Whether the user is logged into Twitch (the composer's placeholder).
+    pub fn twitch_logged_in(&self) -> bool {
+        self.session.login_state().twitch()
+    }
+
     /// Whether this tab has a Kick channel set (the toggle is only useful then).
     pub fn has_kick(&self) -> bool {
         !self.kick_channel.is_empty()
@@ -255,7 +260,7 @@ impl Controller {
     async fn twitch_actions_or_hint(&self) -> Option<Arc<TwitchActions>> {
         let actions = self.session.twitch_actions().await;
         if actions.is_none() {
-            self.notice("log into Twitch first: /login");
+            self.notice("log into Twitch first (Settings → Account)");
         }
         actions
     }
@@ -264,7 +269,7 @@ impl Controller {
     async fn kick_actions_or_hint(&self) -> Option<Arc<KickActions>> {
         let actions = self.session.kick_actions().await;
         if actions.is_none() {
-            self.notice("log into Kick first: /kicklogin");
+            self.notice("log into Kick first (Settings → Account)");
         }
         actions
     }
@@ -375,8 +380,8 @@ impl Controller {
             let result = match this.session.twitch_actions().await {
                 Some(actions) => actions.chatters(&this.twitch_channel).await,
                 None => Err(anyhow::anyhow!(
-                    "log into Twitch (/login) to fetch the viewer list — Twitch \
-                     only shows it to the broadcaster and moderators"
+                    "log into Twitch (Settings → Account) to fetch the viewer list — \
+                     Twitch only shows it to the broadcaster and moderators"
                 )),
             };
             let _ = reply.send(result).await;
@@ -584,12 +589,6 @@ impl Controller {
         let cmd = parts.next().unwrap_or("");
         let args: Vec<&str> = parts.collect();
         match cmd {
-            // Login/logout only mutate the shared Session; every tab (including
-            // this one) reacts via the login-change subscription in `start`.
-            "login" => self.session.twitch_login(self.events.clone()),
-            "logout" => self.session.twitch_logout(),
-            "kicklogin" => self.session.kick_login(self.events.clone()),
-            "kicklogout" => self.session.kick_logout(),
             "ban" => match args.split_first() {
                 Some((user, reason)) => self.moderate(ModAction::Ban {
                     user: user.to_string(),
@@ -643,7 +642,7 @@ impl Controller {
             {
                 match this.session.kick_actions().await {
                     Some(actions) => this.send_kick(&actions, &text, None).await,
-                    None => this.notice("not logged into Kick (/kicklogin)"),
+                    None => this.notice("not logged into Kick (Settings → Account)"),
                 }
             }
         });

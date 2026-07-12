@@ -608,19 +608,23 @@ fn image_line_box(scale: Scale, image_h: f32) -> gpui::Div {
 /// the platform's real logo when it has one ([`Platform::icon_url`]), otherwise
 /// a brand-colored glyph. Sized from the row's [`Scale`] so it tracks the font.
 fn platform_badge(platform: Platform, scale: Scale) -> gpui::Div {
+    // All platforms share one fixed-width slot (the widest logo's width at this
+    // scale) with the logo centered inside, so the timestamp after the icon
+    // starts at the same x on every row regardless of which platform's logo
+    // (they differ in aspect) precedes it.
+    let slot = px(Platform::icon_slot_width(scale.icon));
     match platform.icon_url() {
         Some(url) => {
             let (w, h) = platform.icon_size(scale.icon);
-            image_line_box(scale, h).child(
+            image_line_box(scale, h).w(slot).justify_center().child(
                 img(SharedString::from(url))
                     .id(SharedString::from(platform.label()))
                     .h(px(h))
                     .w(px(w)),
             )
         }
-        None => line_box(scale).child(
+        None => line_box(scale).w(slot).justify_center().child(
             div()
-                .px_1()
                 .rounded_sm()
                 .text_size(px(scale.small))
                 .font_weight(FontWeight::BOLD)

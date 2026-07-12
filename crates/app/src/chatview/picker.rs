@@ -500,11 +500,14 @@ impl ChatView {
 
     /// The input-bar button that opens/closes the emote picker.
     pub(super) fn picker_button(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        // Compact — it sits *inside* the input box as its suffix. The negative
+        // margin pulls it toward the box's right edge: the kit re-asserts its
+        // 12px padding when a suffix is set, which read as a stray gap.
         div()
             .id("emote-picker-toggle")
-            .px_2()
-            .py_1()
-            .rounded_md()
+            .px_1p5()
+            .mr(px(-6.))
+            .rounded_sm()
             .cursor_pointer()
             .text_color(cx.theme().muted_foreground)
             .hover(|s| {
