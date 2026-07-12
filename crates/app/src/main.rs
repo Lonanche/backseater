@@ -231,6 +231,41 @@ impl SettingsCategory {
     }
 }
 
+/// The tab-settings categories — the same sidebar-rail layout as the app
+/// settings, scoped to one tab.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TabSettingsCategory {
+    Channels,
+    Panels,
+    Highlights,
+}
+
+impl TabSettingsCategory {
+    /// The categories, in sidebar order.
+    const ALL: [TabSettingsCategory; 3] = [
+        TabSettingsCategory::Channels,
+        TabSettingsCategory::Panels,
+        TabSettingsCategory::Highlights,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            TabSettingsCategory::Channels => "Channels",
+            TabSettingsCategory::Panels => "Panels",
+            TabSettingsCategory::Highlights => "Highlights",
+        }
+    }
+
+    /// The sidebar entry's icon (the kit's bundled lucide set).
+    fn icon(self) -> IconName {
+        match self {
+            TabSettingsCategory::Channels => IconName::Globe,
+            TabSettingsCategory::Panels => IconName::LayoutDashboard,
+            TabSettingsCategory::Highlights => IconName::Bell,
+        }
+    }
+}
+
 /// One editable color in the custom-theme editor. Each maps to a field on
 /// [`settings::CustomTheme`] and gets its own window-bound `ColorPickerState`
 /// (see [`BackseaterApp::theme_pickers`]). The order here is the order shown.
@@ -527,6 +562,9 @@ pub(crate) struct BackseaterApp {
     mentions_window: Option<AnyWindowHandle>,
     /// Which category the app-settings panel's sidebar has selected.
     settings_category: SettingsCategory,
+    /// Which category the tab-settings panel's sidebar has selected. Reset to
+    /// Channels on each open — that's what a right-click → Settings is for.
+    tab_settings_category: TabSettingsCategory,
     /// Watches the session so the account UI re-renders when login changes
     /// (e.g. after the browser OAuth round-trip completes).
     _login_watch: Task<()>,
@@ -745,6 +783,7 @@ impl BackseaterApp {
             popouts: Vec::new(),
             mentions_window: None,
             settings_category: SettingsCategory::Account,
+            tab_settings_category: TabSettingsCategory::Channels,
             _login_watch,
             obs_running,
             _obs_watch,
@@ -1131,6 +1170,7 @@ impl BackseaterApp {
         if self.tabs.get(ix).is_none() {
             return;
         }
+        self.tab_settings_category = TabSettingsCategory::Channels;
         self.show_settings_panel(Panel::Tab(ix), cx);
     }
 
@@ -1323,13 +1363,7 @@ impl BackseaterApp {
     fn settings_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         match self.settings_window {
             Some((_, Panel::App)) => self.app_settings_body(cx),
-            Some((_, Panel::Tab(ix))) => div()
-                .id("tab-settings-scroll")
-                .size_full()
-                .overflow_y_scroll()
-                .p_4()
-                .child(self.tab_settings_body(ix, cx))
-                .into_any_element(),
+            Some((_, Panel::Tab(ix))) => self.tab_settings_body(ix, cx),
             None => gpui::Empty.into_any_element(),
         }
     }
@@ -1511,45 +1545,11 @@ impl BackseaterApp {
     /// category name. Built fresh each render so it tracks live login/size/theme
     /// changes.
     fn app_settings_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use gpui_component::Icon;
-
         let selected = self.settings_category;
-        let sidebar = v_flex()
-            .flex_none()
-            .w(px(150.))
-            .h_full()
-            .gap_0p5()
-            .p_2()
-            .bg(cx.theme().sidebar)
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
-            .children(SettingsCategory::ALL.into_iter().map(|cat| {
-                let is_sel = cat == selected;
-                h_flex()
-                    .id(SharedString::from(format!("settings-cat-{}", cat.label())))
-                    .w_full()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_1p5()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(px(13.))
-                    .when(is_sel, |s| {
-                        s.bg(cx.theme().secondary).font_weight(FontWeight::MEDIUM)
-                    })
-                    .when(!is_sel, |s| s.text_color(cx.theme().muted_foreground))
-                    .hover(|s| s.bg(cx.theme().secondary))
-                    .child(
-                        Icon::new(cat.icon())
-                            .size(px(15.))
-                            .text_color(if is_sel {
-                                cx.theme().foreground
-                            } else {
-                                cx.theme().muted_foreground
-                            }),
-                    )
-                    .child(SharedString::from(cat.label()))
+        let rail: Vec<gpui::AnyElement> = SettingsCategory::ALL
+            .into_iter()
+            .map(|cat| {
+                rail_item(cat.icon(), cat.label(), cat == selected, cx)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
@@ -1557,7 +1557,9 @@ impl BackseaterApp {
                             cx.notify();
                         }),
                     )
-            }));
+                    .into_any_element()
+            })
+            .collect();
 
         let body = match selected {
             SettingsCategory::Account => v_flex().gap_5().child(self.account_section(cx)),
@@ -1572,58 +1574,73 @@ impl BackseaterApp {
             SettingsCategory::About => v_flex().gap_5().child(self.about_section(cx)),
         };
 
-        h_flex()
-            .size_full()
-            .items_stretch()
-            .child(sidebar)
-            .child(
-                div()
-                    .id("settings-scroll")
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .overflow_y_scroll()
-                    .px_5()
-                    .py_4()
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .max_w(px(520.))
-                            .gap_4()
-                            .child(
-                                div()
-                                    .text_size(px(17.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(SharedString::from(selected.label())),
-                            )
-                            .child(body),
-                    ),
-            )
-            .into_any_element()
+        settings_shell(
+            rail,
+            selected.label(),
+            body.into_any_element(),
+            "settings-scroll",
+            cx,
+        )
     }
 
-    /// The body of a tab-settings panel: the name + channel fields and a Save
-    /// button that applies them to tab `ix` and closes the panel.
+    /// The body of a tab-settings panel: the same sidebar-rail shell as the app
+    /// settings, with Channels (name + channel fields + Save), Panels (the
+    /// events/mentions panel card), and Highlights (this tab's terms).
     fn tab_settings_body(&mut self, ix: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let selected = self.tab_settings_category;
+        let rail: Vec<gpui::AnyElement> = TabSettingsCategory::ALL
+            .into_iter()
+            .map(|cat| {
+                rail_item(cat.icon(), cat.label(), cat == selected, cx)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.tab_settings_category = cat;
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        let body = match selected {
+            TabSettingsCategory::Channels => {
+                v_flex().gap_5().child(self.tab_channels_section(ix, cx))
+            }
+            TabSettingsCategory::Panels => {
+                v_flex().gap_5().child(self.events_panel_section(ix, cx))
+            }
+            TabSettingsCategory::Highlights => v_flex()
+                .gap_5()
+                .child(self.term_list_section(TermList::tab(TermKind::Mentions, ix), cx))
+                .child(self.term_list_section(TermList::tab(TermKind::Ignore, ix), cx)),
+        };
+
+        settings_shell(
+            rail,
+            selected.label(),
+            body.into_any_element(),
+            "tab-settings-scroll",
+            cx,
+        )
+    }
+
+    /// The Channels category of a tab's settings: the tab name + one channel
+    /// field per platform, applied by Save (unlike the live-toggling switches,
+    /// a channel change reconnects the tab, so it waits for an explicit apply).
+    fn tab_channels_section(&self, ix: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         v_flex()
-            .gap_4()
+            .gap_2()
+            .child(field("Name", &self.settings_inputs.name))
+            .child(field("Twitch channel", &self.settings_inputs.twitch))
+            .child(field("Kick channel", &self.settings_inputs.kick))
+            .child(field("YouTube channel", &self.settings_inputs.youtube))
             .child(
-                v_flex()
-                    .gap_2()
-                    .child(section_title("Tab"))
-                    .child(field("Name", &self.settings_inputs.name))
-                    .child(field("Twitch channel", &self.settings_inputs.twitch))
-                    .child(field("Kick channel", &self.settings_inputs.kick))
-                    .child(field("YouTube channel", &self.settings_inputs.youtube)),
-            )
-            .child(self.events_panel_section(ix, cx))
-            .child(self.term_list_section(TermList::tab(TermKind::Mentions, ix), cx))
-            .child(self.term_list_section(TermList::tab(TermKind::Ignore, ix), cx))
-            .child(
-                h_flex().justify_end().child(
+                h_flex().justify_end().mt_2().child(
                     Button::new("save-tab-settings")
                         .label("Save")
                         .primary()
+                        .small()
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.apply_settings(ix, cx);
                             // This button lives in the settings window; closing
@@ -3780,6 +3797,89 @@ fn setting_card() -> gpui::Div {
 /// The hairline between two rows of a [`setting_card`].
 fn card_divider() -> impl IntoElement {
     div().h(px(1.)).w_full().bg(gpui::rgb(render::panel_border()))
+}
+
+/// One entry of a settings window's category rail (icon + label, selected or
+/// muted). The caller attaches the click handler.
+fn rail_item(
+    icon: IconName,
+    label: &'static str,
+    is_sel: bool,
+    cx: &App,
+) -> gpui::Stateful<gpui::Div> {
+    use gpui_component::Icon;
+    h_flex()
+        .id(SharedString::from(format!("settings-cat-{label}")))
+        .w_full()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .py_1p5()
+        .rounded_md()
+        .cursor_pointer()
+        .text_size(px(13.))
+        .when(is_sel, |s| {
+            s.bg(cx.theme().secondary).font_weight(FontWeight::MEDIUM)
+        })
+        .when(!is_sel, |s| s.text_color(cx.theme().muted_foreground))
+        .hover(|s| s.bg(cx.theme().secondary))
+        .child(Icon::new(icon).size(px(15.)).text_color(if is_sel {
+            cx.theme().foreground
+        } else {
+            cx.theme().muted_foreground
+        }))
+        .child(SharedString::from(label))
+}
+
+/// The settings windows' shared chrome: a fixed category rail on the left, an
+/// independently scrolling content pane headed by the selected category's name
+/// on the right. Both the app and tab settings render through this.
+fn settings_shell(
+    rail: Vec<gpui::AnyElement>,
+    title: &'static str,
+    body: gpui::AnyElement,
+    scroll_id: &'static str,
+    cx: &App,
+) -> gpui::AnyElement {
+    h_flex()
+        .size_full()
+        .items_stretch()
+        .child(
+            v_flex()
+                .flex_none()
+                .w(px(150.))
+                .h_full()
+                .gap_0p5()
+                .p_2()
+                .bg(cx.theme().sidebar)
+                .border_r_1()
+                .border_color(cx.theme().sidebar_border)
+                .children(rail),
+        )
+        .child(
+            div()
+                .id(scroll_id)
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .overflow_y_scroll()
+                .px_5()
+                .py_4()
+                .child(
+                    v_flex()
+                        .w_full()
+                        .max_w(px(520.))
+                        .gap_4()
+                        .child(
+                            div()
+                                .text_size(px(17.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(SharedString::from(title)),
+                        )
+                        .child(body),
+                ),
+        )
+        .into_any_element()
 }
 
 /// One settings row: label (+ optional muted description under it) on the left,
