@@ -3986,7 +3986,8 @@ impl ChatView {
     /// Twitch, a Warn reason box and Mod/VIP grant toggles). Built to fit the card's default width — small
     /// chips that wrap rather than a single overflowing row. Shown only when the
     /// logged-in user can moderate the card's platform: Twitch needs `twitch_mod`;
-    /// Kick needs a Kick login (its API has ban/timeout/unban, no role grants).
+    /// Kick needs real mod status too (resolved from the logged-in account's own
+    /// usercard; its API has ban/timeout/unban, no role grants).
     fn usercard_actions(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(card) = &self.usercard else {
             return div().into_any_element();

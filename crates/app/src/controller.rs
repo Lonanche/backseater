@@ -211,6 +211,7 @@ impl Controller {
             let mut prev = rx.borrow().clone();
             // Initial connect with whatever's logged in right now.
             this.reconnect_twitch().await;
+            this.refresh_kick_mod_status().await;
             while rx.changed().await.is_ok() {
                 // The session outlives every tab, so `changed()` alone would keep
                 // this task (and a reconnect per login flip) alive forever after
@@ -226,8 +227,78 @@ impl Controller {
                 if prev.kick() && !now.kick() {
                     this.reset_target_off_kick();
                 }
+                // Compare the account, not just the flag, so a re-login as a
+                // different Kick user re-resolves too.
+                if now.kick != prev.kick {
+                    this.refresh_kick_mod_status().await;
+                }
                 prev = now;
             }
+        });
+    }
+
+    /// Resolves whether the logged-in Kick account moderates this tab's Kick
+    /// channel and reports it as a `ModStatus` event (Kick's equivalent of the
+    /// Twitch USERSTATE flag — it gates the usercard mod panel + mod-button
+    /// strip via `ChannelModel::can_moderate`). Logged out = not a mod; the
+    /// broadcaster is a mod by definition (their own usercard doesn't carry the
+    /// flag); anyone else is answered by the anonymous per-channel usercard
+    /// lookup. A failed lookup keeps the previous state — a transient
+    /// Cloudflare hiccup shouldn't strip a real mod's buttons — and mid-session
+    /// grants/removals are corrected from our own messages' badges
+    /// (`sync_kick_mod_from_message`).
+    async fn refresh_kick_mod_status(&self) {
+        if self.kick_channel.is_empty() {
+            return;
+        }
+        let (is_mod, is_broadcaster) = match self.session.login_state().kick {
+            None => (false, false),
+            Some(_) if self.kick_is_broadcaster() => (true, true),
+            Some(login) => match bks_kick::fetch_user_info(&self.kick_channel, &login).await {
+                Ok(info) => (info.is_moderator, false),
+                Err(err) => {
+                    tracing::warn!(
+                        "kick mod-status lookup for {} in {} failed: {err:#}",
+                        login,
+                        self.kick_channel
+                    );
+                    return;
+                }
+            },
+        };
+        let _ = self
+            .events
+            .send(ChatEvent::ModStatus {
+                platform: bks_core::Platform::Kick,
+                is_mod,
+                is_broadcaster,
+            })
+            .await;
+    }
+
+    /// Keeps Kick mod status live between logins: every Kick message carries its
+    /// author's badges, so the logged-in account's own lines (Kick echoes our
+    /// sends back over Pusher) answer "do I mod here?" more freshly than the
+    /// login-time lookup — being modded or demodded mid-session corrects itself
+    /// the moment the user chats. Historical (backlog) messages are skipped:
+    /// their badges are as old as the message. The store dedupes, so re-asserts
+    /// with the same value never re-measure the log.
+    pub fn sync_kick_mod_from_message(&self, msg: &bks_core::Message) {
+        if msg.historical {
+            return;
+        }
+        let Some(login) = self.session.login_state().kick else {
+            return;
+        };
+        if bks_kick::slugify(&login) != bks_kick::slugify(&msg.author.login) {
+            return;
+        }
+        let is_broadcaster = msg.author.badges.iter().any(|b| b.id == "broadcaster");
+        let is_mod = is_broadcaster || msg.author.badges.iter().any(|b| b.id == "moderator");
+        let _ = self.events.try_send(ChatEvent::ModStatus {
+            platform: bks_core::Platform::Kick,
+            is_mod,
+            is_broadcaster,
         });
     }
 

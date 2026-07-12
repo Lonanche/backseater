@@ -189,6 +189,10 @@ pub struct ChannelModel {
     /// Whether the logged-in user owns the Twitch channel. Only the broadcaster
     /// can grant/revoke mod + VIP, so those buttons gate on this, not `twitch_mod`.
     pub twitch_broadcaster: bool,
+    /// Whether the logged-in user moderates the Kick channel. Resolved by the
+    /// controller (own-usercard lookup at connect/login, refreshed from our own
+    /// messages' badges) and delivered as `ModStatus`, like Twitch's USERSTATE.
+    pub kick_mod: bool,
     /// Platforms whose rich moderator feed (Twitch EventSub) is live — suppresses
     /// the generic ban/timeout notice fallback.
     pub rich_mod_feed: HashSet<Platform>,
@@ -215,13 +219,14 @@ impl ChannelModel {
     }
 
     /// Whether the logged-in user can moderate (pin/ban/timeout) on `platform`.
-    /// Twitch knows real mod status (IRC USERSTATE); for Kick a login is the best
-    /// signal — a non-mod's attempt fails with the API error surfaced as a notice.
-    /// The one place this predicate lives, so adding a platform touches one arm.
+    /// Both flags hold real mod status: Twitch from IRC USERSTATE, Kick from the
+    /// controller's own-usercard lookup (+ our own messages' badges) — see the
+    /// field docs. The one place this predicate lives, so adding a platform
+    /// touches one arm.
     pub fn can_moderate(&self, platform: Platform) -> bool {
         match platform {
             Platform::Twitch => self.twitch_mod,
-            Platform::Kick => self.controller.kick_logged_in(),
+            Platform::Kick => self.kick_mod,
             _ => false,
         }
     }
@@ -231,8 +236,7 @@ impl ChannelModel {
     /// applicable to *any* of them (ghost slots where a button doesn't apply
     /// to a row's own platform), so rows of different platforms in a merged
     /// feed keep their message text horizontally aligned — see
-    /// `render::ModStrip`. The Kick arm needs the channel-presence check:
-    /// `can_moderate(Kick)` is just "logged in", not tied to this tab.
+    /// `render::ModStrip`.
     pub fn mod_platforms(&self) -> Vec<Platform> {
         [Platform::Twitch, Platform::Kick]
             .into_iter()
@@ -564,9 +568,25 @@ impl ChannelModel {
                 is_mod,
                 is_broadcaster,
             } => {
-                if platform == Platform::Twitch {
-                    self.twitch_mod = is_mod;
-                    self.twitch_broadcaster = is_broadcaster;
+                // Only a real flip re-measures the log (`Changed` resets every
+                // view's list) — Kick re-asserts this from each of our own
+                // messages, and Twitch on every reconnect.
+                let changed = match platform {
+                    Platform::Twitch => {
+                        let changed =
+                            self.twitch_mod != is_mod || self.twitch_broadcaster != is_broadcaster;
+                        self.twitch_mod = is_mod;
+                        self.twitch_broadcaster = is_broadcaster;
+                        changed
+                    }
+                    Platform::Kick => {
+                        let changed = self.kick_mod != is_mod;
+                        self.kick_mod = is_mod;
+                        changed
+                    }
+                    _ => false,
+                };
+                if changed {
                     cx.emit(ChannelEvent::Changed);
                 }
             }
@@ -809,6 +829,7 @@ fn build_model(
             emotes_youtube: Vec::new(),
             twitch_mod: false,
             twitch_broadcaster: false,
+            kick_mod: false,
             // Kick's connector always posts its own rich ban/timeout/unban notices
             // (`kick/connector.rs`), so it's a "rich mod feed" from the start —
             // seeded here so the generic-notice suppression below needn't name it.

@@ -755,6 +755,8 @@ async fn run_kick(source: Arc<KickSource>, channel: String, tx: Sink, controller
                 if let Ok(id) = msg.author.user_id.parse::<u64>() {
                     controller.note_kick_user(msg.author.login.clone(), id);
                 }
+                // Our own messages carry our badges — the freshest mod signal.
+                controller.sync_kick_mod_from_message(&msg);
                 if !registry.is_empty() {
                     msg.elements = registry.resolve_elements(&msg.channel, msg.elements);
                 }

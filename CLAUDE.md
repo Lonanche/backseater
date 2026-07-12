@@ -82,7 +82,9 @@ platform = implement one trait + one message builder, with zero UI changes**.
   entries onto it). Typing `/` at the **start of the line** opens the same autocomplete popup as
   `@`/`:` listing the **send target platform's** commands only (Kick sees just Kick's; Both shows
   the disabled notice), with **mod-only commands hidden unless the user can moderate** that
-  channel (`ChannelModel::can_moderate` — Twitch = IRC USERSTATE mod flag, Kick = logged in) and
+  channel (`ChannelModel::can_moderate` — Twitch = IRC USERSTATE mod flag, Kick = the logged-in
+  account's own per-channel usercard `is_moderator` lookup at connect/login, kept fresh from our
+  own messages' badges, broadcaster counts as mod — `Controller::refresh_kick_mod_status`) and
   **broadcaster-only ones (`/raid` `/unraid` `/mod` `/unmod` `/vip` `/unvip`) hidden unless they
   own it** (`ChannelModel::is_broadcaster` — Twitch = USERSTATE broadcaster badge, Kick = login
   slug == channel slug; typing a hidden command anyway still runs it, the API returns the real
