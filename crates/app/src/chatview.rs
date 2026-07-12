@@ -30,7 +30,8 @@ use crate::image_cache::LruImageCache;
 use crate::session::Session;
 use crate::tabs::{self, TabConfig};
 use crate::{
-    child_window, controller, render, selectable, usercard, viewerlist, USERCARD_MESSAGES,
+    child_window, commands, controller, render, selectable, usercard, viewerlist,
+    USERCARD_MESSAGES,
 };
 use log::LogView;
 use picker::{EmoteCell, PickerRow};
@@ -588,6 +589,11 @@ pub(crate) struct ChatView {
     /// The duration selected in the open pin-confirmation dialog (`None` =
     /// until the stream ends). Reset to the default on each dialog open.
     pin_duration_choice: Option<u32>,
+    /// The message id of the row currently showing its mod-button strip in
+    /// "On hover" mode (`None` in the other modes / when no row is hovered).
+    /// Tracked view-side and applied on the next log render — a group-hover
+    /// display switch inside the row panics when hover flips mid-frame.
+    hover_strip_row: Option<String>,
     /// Set once the personal Twitch emotes have been fetched, so we only hit
     /// Helix the first time the picker opens (not on every toggle).
     emotes_fetched: bool,
@@ -787,6 +793,7 @@ impl ChatView {
             completion: None,
             popup: None,
             pin_duration_choice: Some(controller::Controller::PIN_DURATION_SECS),
+            hover_strip_row: None,
             emotes_fetched: false,
             sent_history: Vec::new(),
             history_index: None,
@@ -1368,6 +1375,43 @@ impl ChatView {
         });
         self.input.update(cx, |this, cx| this.focus(window, cx));
         cx.notify();
+    }
+
+    /// Runs a moderation button's command against message `msg_id`: substitutes
+    /// `{user}` (the author's login) and `{msg-id}` in the template and
+    /// dispatches the line at the *row's* platform — a button on a Kick message
+    /// moderates Kick no matter where the composer is sending.
+    /// The placeholders are optional for known commands: a template without any
+    /// gets the row's target inserted right after the command name, per the
+    /// registry's usage shape (`commands::implicit_target`) — "/timeout 600
+    /// spam" acts on the message's author, a bare "/delete" on the message.
+    fn run_mod_button(&mut self, msg_id: &str, command: &str, cx: &mut Context<Self>) {
+        let Some(msg) = self.message_by_id(msg_id, cx) else {
+            return;
+        };
+        let mut template = command.to_string();
+        if !command.contains("{user}") && !command.contains("{msg-id}") {
+            let target = command
+                .strip_prefix('/')
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(commands::implicit_target);
+            if let Some(target) = target {
+                let placeholder = match target {
+                    commands::ImplicitTarget::User => "{user}",
+                    commands::ImplicitTarget::MessageId => "{msg-id}",
+                };
+                let mut parts = command.splitn(2, char::is_whitespace);
+                let head = parts.next().unwrap_or_default();
+                template = match parts.next() {
+                    Some(rest) => format!("{head} {placeholder} {rest}"),
+                    None => format!("{head} {placeholder}"),
+                };
+            }
+        }
+        let line = template
+            .replace("{user}", &msg.author.login)
+            .replace("{msg-id}", &msg.id);
+        self.controller.handle_input_at(&line, msg.platform);
     }
 
     /// Opens the pin confirmation dialog for message `msg_id`: the message is
@@ -4605,6 +4649,21 @@ fn reply_click_for(entity: &Entity<ChatView>, msg: &Message) -> render::ReplyCli
     std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
         entity.update(cx, |this, cx| {
             this.start_reply(&msg_id, window, cx);
+        });
+    })
+}
+
+/// Builds the mod-button-strip callback for one message (only called for rows
+/// whose platform the user can moderate): receives the clicked button's command
+/// template and runs it through [`ChatView::run_mod_button`], which resolves
+/// the author from the still-present row and dispatches at the row's platform.
+fn mod_click_for(entity: &Entity<ChatView>, msg: &Message) -> render::ModClick {
+    let entity = entity.clone();
+    let msg_id = msg.id.clone();
+    std::rc::Rc::new(move |command: &str, _window: &mut Window, cx: &mut App| {
+        let command = command.to_string();
+        entity.update(cx, |this, cx| {
+            this.run_mod_button(&msg_id, &command, cx);
         });
     })
 }

@@ -113,8 +113,9 @@ pub const COMMANDS: &[CommandDef] = &[
         name: "delete",
         aliases: &[],
         usage: "/delete <message-id>",
+        // Twitch = Helix; Kick = the site API (its public API has no delete).
         description: "Delete a single message",
-        platforms: TWITCH,
+        platforms: TWITCH_KICK,
         broadcaster_only: false,
         mod_only: true,
     },
@@ -238,7 +239,7 @@ pub const COMMANDS: &[CommandDef] = &[
     CommandDef {
         name: "timeout",
         aliases: &[],
-        usage: "/timeout <user> <duration>",
+        usage: "/timeout <user> <duration> [reason]",
         description: "Time a user out (600, 30m, 1h, 3d, 1w)",
         platforms: TWITCH_KICK,
         broadcaster_only: false,
@@ -336,6 +337,50 @@ pub const COMMANDS: &[CommandDef] = &[
     },
 ];
 
+/// What a command implicitly acts on — derived from its usage line's first
+/// argument (`<user>` / `<message-id>`), so the registry stays the single
+/// source of truth. The mod buttons use this to spare users the placeholders:
+/// a button command like "/timeout 600 spam" (no `{user}`/`{msg-id}` typed)
+/// gets the row's target inserted right after the command name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ImplicitTarget {
+    User,
+    MessageId,
+}
+
+/// The implicit target of the command named `name` (an alias works too), or
+/// `None` for commands that don't lead with `<user>`/`<message-id>` — those
+/// need explicit placeholders on a mod button (or take no target at all).
+pub fn implicit_target(name: &str) -> Option<ImplicitTarget> {
+    let name = name.to_lowercase();
+    let cmd = COMMANDS
+        .iter()
+        .find(|c| c.name == name || c.aliases.contains(&name.as_str()))?;
+    match cmd.usage.split_whitespace().nth(1) {
+        Some("<user>") => Some(ImplicitTarget::User),
+        Some("<message-id>") => Some(ImplicitTarget::MessageId),
+        _ => None,
+    }
+}
+
+/// Whether a mod button's command template needs the row's real message id:
+/// an explicit `{msg-id}`, or a leading known command whose implicit target is
+/// the message (a bare "/delete"). Such buttons ghost on local-echo rows —
+/// their synthetic id is accepted by no API.
+pub fn needs_msg_id(template: &str) -> bool {
+    if template.contains("{msg-id}") {
+        return true;
+    }
+    if template.contains("{user}") {
+        return false;
+    }
+    template
+        .strip_prefix('/')
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(implicit_target)
+        == Some(ImplicitTarget::MessageId)
+}
+
 /// The commands available on `platform` whose canonical name (or an alias)
 /// starts with `stem` (already-typed text after the `/`, matched
 /// case-insensitively) — the autocomplete popup's candidate list.
@@ -353,6 +398,33 @@ pub fn matching(platform: Platform, stem: &str) -> Vec<&'static CommandDef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn implicit_target_follows_the_usage_shape() {
+        assert_eq!(implicit_target("timeout"), Some(ImplicitTarget::User));
+        assert_eq!(implicit_target("ban"), Some(ImplicitTarget::User));
+        assert_eq!(implicit_target("warn"), Some(ImplicitTarget::User));
+        // Aliases and case resolve like canonical names.
+        assert_eq!(implicit_target("untimeout"), Some(ImplicitTarget::User));
+        assert_eq!(implicit_target("BAN"), Some(ImplicitTarget::User));
+        assert_eq!(implicit_target("delete"), Some(ImplicitTarget::MessageId));
+        // No leading <user>/<message-id> argument → no implicit target.
+        assert_eq!(implicit_target("announce"), None);
+        assert_eq!(implicit_target("slow"), None);
+        assert_eq!(implicit_target("raid"), None); // <channel>, not <user>
+        assert_eq!(implicit_target("nonsense"), None);
+    }
+
+    #[test]
+    fn needs_msg_id_covers_explicit_and_implicit_forms() {
+        assert!(needs_msg_id("/delete"));
+        assert!(needs_msg_id("/delete {msg-id}"));
+        assert!(needs_msg_id("!log {msg-id}"));
+        assert!(!needs_msg_id("/ban"));
+        assert!(!needs_msg_id("/timeout 600 spam"));
+        assert!(!needs_msg_id("!so {user}"));
+        assert!(!needs_msg_id("plain chat text"));
+    }
 
     #[test]
     fn matching_filters_by_platform() {

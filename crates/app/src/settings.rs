@@ -72,6 +72,67 @@ pub enum StreamerModeChoice {
     Auto,
 }
 
+/// How the per-message moderation buttons show: on every row the user can
+/// moderate, only while the row is hovered, or not at all. `Hover` still
+/// reserves the strip's width so message text doesn't shift as the pointer moves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModButtonMode {
+    Off,
+    #[default]
+    Always,
+    Hover,
+}
+
+/// One moderation button in the chat rows' left-side strip. Clicking it runs
+/// `command` with `{user}` replaced by the message author's login and
+/// `{msg-id}` by the message id, targeted at the message's platform — any
+/// slash command works, and plain text is sent to that platform's chat (e.g. a
+/// bot command). The stock delete/ban/timeout are ordinary entries seeded on
+/// first run ([`default_mod_buttons`]), so users reorder/edit/remove them too.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModButton {
+    /// Shown as the button's tooltip.
+    pub name: String,
+    /// A bundled icon name (e.g. "gavel", "clock") or free text/emoji drawn as
+    /// the button face (see `render::mod_icon_path`).
+    pub icon: String,
+    /// The command template, e.g. "/timeout {user} 1h spam".
+    pub command: String,
+    /// `None` = the button shows on every platform's rows.
+    #[serde(default)]
+    pub platform: Option<bks_core::Platform>,
+}
+
+/// The stock mod buttons, seeded into [`Settings::mod_buttons`] on first run
+/// and restored by the settings panel's "Reset to defaults". No placeholders
+/// needed: known commands get the row's target injected from the registry's
+/// usage shape (`commands::implicit_target`) — "/delete" acts on the message
+/// (which also ghosts it on local-echo rows, `commands::needs_msg_id`), the
+/// others on its author.
+pub fn default_mod_buttons() -> Vec<ModButton> {
+    vec![
+        ModButton {
+            name: "Delete message".into(),
+            icon: "trash".into(),
+            command: "/delete".into(),
+            platform: None,
+        },
+        ModButton {
+            name: "Ban".into(),
+            icon: "ban".into(),
+            command: "/ban".into(),
+            platform: None,
+        },
+        ModButton {
+            name: "Timeout 10m".into(),
+            icon: "clock".into(),
+            command: "/timeout 600".into(),
+            platform: None,
+        },
+    ]
+}
+
 /// The smallest / largest chat font size the UI offers, in pixels.
 pub const MIN_FONT_SIZE: f32 = 12.0;
 pub const MAX_FONT_SIZE: f32 = 28.0;
@@ -147,6 +208,17 @@ pub struct Settings {
     /// live shouldn't leak pings into the stream unless the user opts out.
     #[serde(default = "default_true")]
     pub streamer_mute_sounds: bool,
+    /// How the per-message moderation buttons show (always / on hover / off).
+    #[serde(default)]
+    pub mod_button_mode: ModButtonMode,
+    /// The moderation buttons, in strip order — the stock three seeded on
+    /// first run, plus whatever the user added/edited/reordered.
+    #[serde(default)]
+    pub mod_buttons: Vec<ModButton>,
+    /// Whether the stock buttons were seeded into [`mod_buttons`](Self::mod_buttons)
+    /// yet, so an intentionally emptied list stays empty on later launches.
+    #[serde(default)]
+    pub mod_buttons_seeded: bool,
 }
 
 fn default_font_size() -> f32 {
@@ -177,6 +249,9 @@ impl Default for Settings {
             mention_sound: false,
             muted_mentions: Vec::new(),
             streamer_mute_sounds: true,
+            mod_button_mode: ModButtonMode::default(),
+            mod_buttons: default_mod_buttons(),
+            mod_buttons_seeded: true,
         }
     }
 }
@@ -185,7 +260,18 @@ impl Settings {
     /// Loads saved settings, falling back to defaults if none are saved.
     pub fn load() -> Self {
         match bks_auth::store::load::<Settings>(STORE_NAME) {
-            Ok(Some(s)) => s,
+            Ok(Some(mut s)) => {
+                // One-time seed of the stock mod buttons into a pre-existing
+                // settings file (fresh installs get them via `Default`). Not
+                // saved here — idempotent on every launch until the next save.
+                if !s.mod_buttons_seeded {
+                    let mut buttons = default_mod_buttons();
+                    buttons.append(&mut s.mod_buttons);
+                    s.mod_buttons = buttons;
+                    s.mod_buttons_seeded = true;
+                }
+                s
+            }
             _ => Settings::default(),
         }
     }
@@ -225,6 +311,30 @@ impl Settings {
         MENTION_SOUND.store(self.mention_sound, Ordering::Relaxed);
         STREAMER_MUTE.store(self.streamer_mute_sounds, Ordering::Relaxed);
     }
+
+    /// Pushes the mod-button mode + custom button list into the process-wide
+    /// state the chat rows render against. Call on load and after every edit.
+    pub fn apply_mod_buttons(&self) {
+        *MOD_BUTTONS.write().unwrap() = (
+            self.mod_button_mode,
+            Some(Arc::new(self.mod_buttons.clone())),
+        );
+    }
+}
+
+// `Option` because `Arc::new` isn't const; `None` (pre-`apply_mod_buttons`)
+// reads as an empty list.
+static MOD_BUTTONS: RwLock<(ModButtonMode, Option<Arc<Vec<ModButton>>>)> =
+    RwLock::new((ModButtonMode::Always, None));
+
+/// The active mod-button visibility mode (process-wide, like the theme flag).
+pub fn mod_button_mode() -> ModButtonMode {
+    MOD_BUTTONS.read().unwrap().0
+}
+
+/// The mod buttons in strip order (a cheap `Arc` clone per row render).
+pub fn mod_buttons() -> Arc<Vec<ModButton>> {
+    MOD_BUTTONS.read().unwrap().1.clone().unwrap_or_default()
 }
 
 /// Whether the mention ping is enabled at all (the master toggle).
@@ -241,7 +351,7 @@ static MENTION_SOUND: AtomicBool = AtomicBool::new(false);
 static STREAMER_MUTE: AtomicBool = AtomicBool::new(true);
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 static SHOW_PINNED_TWITCH: AtomicBool = AtomicBool::new(true);
 static SHOW_PINNED_KICK: AtomicBool = AtomicBool::new(true);

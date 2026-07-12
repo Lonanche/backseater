@@ -750,6 +750,7 @@ const KIND_BADGE: usize = 1 << (usize::BITS - 4);
 const KIND_EMOTE: usize = 2 << (usize::BITS - 4);
 const KIND_PIN: usize = 3 << (usize::BITS - 4);
 const KIND_REPLY: usize = 4 << (usize::BITS - 4);
+const KIND_MOD: usize = 5 << (usize::BITS - 4);
 
 impl RowIds {
     /// Call sites with an owned `String` (the `format!` bases of error/automod
@@ -780,6 +781,10 @@ impl RowIds {
 
     fn pin(&self) -> (SharedString, usize) {
         self.keyed(KIND_PIN, 0)
+    }
+
+    fn mod_button(&self, index: usize) -> (SharedString, usize) {
+        self.keyed(KIND_MOD, index)
     }
 
     fn reply(&self) -> (SharedString, usize) {
@@ -1288,6 +1293,27 @@ pub type PinClick = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
 /// [`PinClick`]), for the chip builder.
 type RowAction = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
 
+/// A callback run when one of a row's moderation buttons is clicked, with that
+/// button's command template ("/timeout {user} 600"). The view substitutes the
+/// placeholders from the row's message and dispatches at the row's platform.
+/// Built per-row, only when the user can moderate the row's platform.
+pub type ModClick = std::rc::Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
+/// Everything a row needs to render its moderation-button strip. The strip is
+/// a **uniform gutter across the whole view**: one slot per button applicable
+/// to *any* of `platforms`, with slots that don't apply to this row (wrong
+/// platform / local echo / row not moderated at all) rendered as invisible
+/// ghosts of the same width — so in a merged Twitch+Kick feed every message
+/// starts at the same x no matter how many buttons its platform really gets.
+pub struct ModStrip {
+    pub click: ModClick,
+    /// The platforms this view moderates (`ChannelModel::mod_platforms`).
+    pub platforms: Vec<Platform>,
+    /// Whether this row's own platform is moderated (`false` = the whole strip
+    /// is ghosts — the row only keeps the gutter for alignment).
+    pub row_moderated: bool,
+}
+
 /// The per-row interaction callbacks the view supplies (none in contexts like the
 /// usercard list, where rows aren't interactive). `name_click` opens the clicked
 /// chatter's usercard; `link_hover` repaints so a wrapped link underlines as one;
@@ -1302,6 +1328,10 @@ pub struct RowHandlers {
     /// Set only when the logged-in user can moderate this row's platform — the
     /// pin button renders (on hover) only then.
     pub pin_click: Option<PinClick>,
+    /// Set when this row should carry the left-side moderation-button strip
+    /// (the view resolves the visibility mode + hover tracking + which
+    /// platforms it moderates — see [`ModStrip`]).
+    pub mod_strip: Option<ModStrip>,
 }
 
 /// Per-message display flags, set by the view from the row's state.
@@ -1342,6 +1372,7 @@ pub fn render_message(
         seventv_link_click,
         reply_click,
         pin_click,
+        mod_strip,
     } = handlers;
     let RowFlags {
         struck,
@@ -1520,6 +1551,11 @@ pub fn render_message(
         })
         .collect();
 
+    // The left-side moderation-button strip. The view supplies the context only
+    // when the strip should show on this row (visibility mode + hover tracking
+    // resolved there — see `LogView`).
+    let mod_strip = mod_strip.map(|ctx| mod_button_strip(msg, &ids, scale, ctx));
+
     // No row gap: body words carry their own whitespace (so copy is exact and
     // words wrap individually). The structural prefix — icon, time, badges, name
     // — gets explicit right margins instead, and emotes their own.
@@ -1533,6 +1569,7 @@ pub fn render_message(
         .items_start()
         // Banned/timed-out: strike through the whole row and fade it.
         .when(struck, |row| row.line_through().opacity(STRUCK_OPACITY))
+        .children(mod_strip)
         .child(platform_badge(msg.platform, scale).mr_1())
         // The timestamp is chat-font-sized: full-size text fills the line box, so it shares the
         // body text's baseline exactly — a smaller size can't be made to align
@@ -1664,6 +1701,111 @@ pub fn render_message(
             col.child(reply_line(reply, scale))
         })
         .child(body)
+}
+
+/// A row's left-side moderation-button strip: the user's button list in list
+/// order (the stock delete/ban/timeout are seeded entries in it —
+/// `settings::mod_buttons`), one slot per button applicable to any of the
+/// view's moderated platforms. A slot renders as a real button when it applies
+/// to this row, else as an invisible ghost of the same width (wrong platform;
+/// `{msg-id}` commands on local-echo rows, whose synthetic id no API accepts;
+/// or the row's platform isn't moderated at all) — the constant gutter width
+/// keeps every message's text at the same x across a merged multi-platform feed.
+/// ⚠️ Whether the strip exists is decided per frame by the *view* (mode +
+/// hover tracking) — do NOT hide/show it here with a `group_hover` display
+/// switch: hover state can flip between prepaint and paint, and painting a
+/// subtree that skipped prepaint panics ("must call prepaint before paint").
+fn mod_button_strip(msg: &Message, ids: &RowIds, scale: Scale, ctx: ModStrip) -> gpui::AnyElement {
+    let list = crate::settings::mod_buttons();
+    let echo = msg.id.starts_with("echo-");
+    let buttons: Vec<gpui::AnyElement> = list
+        .iter()
+        .filter(|b| b.platform.is_none_or(|p| ctx.platforms.contains(&p)))
+        .enumerate()
+        .map(|(i, b)| {
+            let real = ctx.row_moderated
+                && b.platform.is_none_or(|p| p == msg.platform)
+                && !(echo && crate::commands::needs_msg_id(&b.command));
+            mod_button_chip(ids.mod_button(i), b, scale, ctx.click.clone(), !real)
+        })
+        .collect();
+    // An emptied list leaves no box behind — an empty line box + margin would
+    // still indent the message.
+    if buttons.is_empty() {
+        return gpui::Empty.into_any_element();
+    }
+    let size = mod_button_size(scale);
+    image_line_box(scale, size)
+        .flex_none()
+        .mr_1()
+        .child(h_flex().gap_px().children(buttons))
+        .into_any_element()
+}
+
+/// One moderation button's square size at this font scale.
+fn mod_button_size(scale: Scale) -> f32 {
+    scale.badge + 4.0
+}
+
+/// One moderation button: a vector icon when the button's `icon` names one
+/// (see `assets::mod_icon_path`), else the text/emoji itself. Tooltip = the
+/// button's name; mouse-down fires the command callback with propagation
+/// stopped (like the hover chips, so the click doesn't start a selection).
+/// A `ghost` renders the same face invisible — identical width (it IS the
+/// button, just not painted), no listeners (gpui skips a hidden element's) —
+/// keeping the strip's gutter width constant across platforms.
+fn mod_button_chip(
+    id: (SharedString, usize),
+    button: &crate::settings::ModButton,
+    scale: Scale,
+    cb: ModClick,
+    ghost: bool,
+) -> gpui::AnyElement {
+    let size = mod_button_size(scale);
+    let command = SharedString::from(button.command.clone());
+    let tip = SharedString::from(if button.name.is_empty() {
+        button.command.clone()
+    } else {
+        button.name.clone()
+    });
+    let face = match crate::assets::mod_icon_path(&button.icon) {
+        // gpui's `svg()` paints only when the svg element ITSELF has a text
+        // color (`svg.rs::paint` zips the path with its own `style.text.color`
+        // — nothing cascades from the wrapper), so set it here, not above.
+        Some(path) => gpui::svg()
+            .path(path)
+            .size(px(scale.badge * 0.8))
+            .flex_none()
+            .text_color(rgb(palette().timestamp))
+            .into_any_element(),
+        None => div()
+            .text_size(px(scale.small * 0.9))
+            .child(SharedString::from(button.icon.clone()))
+            .into_any_element(),
+    };
+    let base = div()
+        .id(id)
+        .flex_none()
+        .min_w(px(size))
+        .h(px(size))
+        .px_0p5()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .child(face);
+    if ghost {
+        return base.invisible().into_any_element();
+    }
+    base.cursor_pointer()
+        .text_color(rgb(palette().timestamp))
+        .hover(|s| s.bg(chrome_hover()).text_color(rgb(palette().default_name)))
+        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            cb(&command, window, cx);
+        })
+        .into_any_element()
 }
 
 /// One action chip in a row's hover overlay ("↩ reply", "📌 pin"): highlighted

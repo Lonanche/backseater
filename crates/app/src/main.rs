@@ -129,6 +129,9 @@ enum SettingsInput {
     TabMention,
     TabIgnore,
     MentionsTabName,
+    ModName,
+    ModIcon,
+    ModCommand,
 }
 
 /// The font-family dropdown's state type: a searchable list of font names.
@@ -156,6 +159,9 @@ struct SettingsInputs {
     tab_mention: Entity<InputState>,
     tab_ignore: Entity<InputState>,
     mentions_tab_name: Entity<InputState>,
+    mod_name: Entity<InputState>,
+    mod_icon: Entity<InputState>,
+    mod_command: Entity<InputState>,
 }
 
 impl SettingsInputs {
@@ -170,6 +176,9 @@ impl SettingsInputs {
             tab_mention: settings_input(SettingsInput::TabMention, window, cx),
             tab_ignore: settings_input(SettingsInput::TabIgnore, window, cx),
             mentions_tab_name: settings_input(SettingsInput::MentionsTabName, window, cx),
+            mod_name: settings_input(SettingsInput::ModName, window, cx),
+            mod_icon: settings_input(SettingsInput::ModIcon, window, cx),
+            mod_command: settings_input(SettingsInput::ModCommand, window, cx),
         }
     }
 }
@@ -186,6 +195,9 @@ fn settings_input(which: SettingsInput, window: &mut Window, cx: &mut App) -> En
         SettingsInput::TabMention => "Add a term for this tab",
         SettingsInput::TabIgnore => "Word, phrase, or re:<regex>",
         SettingsInput::MentionsTabName => "Mentions",
+        SettingsInput::ModName => "Button name (the tooltip)",
+        SettingsInput::ModIcon => "Icon — pick below or type text/emoji",
+        SettingsInput::ModCommand => "/timeout 1h reason",
     };
     cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
 }
@@ -198,17 +210,19 @@ enum SettingsCategory {
     Appearance,
     Themes,
     Highlights,
+    ModButtons,
     Streamer,
     About,
 }
 
 impl SettingsCategory {
     /// The categories, in sidebar order.
-    const ALL: [SettingsCategory; 6] = [
+    const ALL: [SettingsCategory; 7] = [
         SettingsCategory::Account,
         SettingsCategory::Appearance,
         SettingsCategory::Themes,
         SettingsCategory::Highlights,
+        SettingsCategory::ModButtons,
         SettingsCategory::Streamer,
         SettingsCategory::About,
     ];
@@ -219,6 +233,7 @@ impl SettingsCategory {
             SettingsCategory::Appearance => "Appearance",
             SettingsCategory::Themes => "Themes",
             SettingsCategory::Highlights => "Highlights",
+            SettingsCategory::ModButtons => "Mod Buttons",
             SettingsCategory::Streamer => "Streamer Mode",
             SettingsCategory::About => "About",
         }
@@ -231,6 +246,7 @@ impl SettingsCategory {
             SettingsCategory::Appearance => IconName::ALargeSmall,
             SettingsCategory::Themes => IconName::Palette,
             SettingsCategory::Highlights => IconName::Bell,
+            SettingsCategory::ModButtons => IconName::TriangleAlert,
             SettingsCategory::Streamer => IconName::EyeOff,
             SettingsCategory::About => IconName::Info,
         }
@@ -585,6 +601,13 @@ pub(crate) struct BackseaterApp {
     mentions_window: Option<AnyWindowHandle>,
     /// Which category the app-settings panel's sidebar has selected.
     settings_category: SettingsCategory,
+    /// The custom-mod-button editor's platform choice (`None` = both platforms),
+    /// applied to the next added button.
+    mod_button_platform: Option<bks_core::Platform>,
+    /// The list index of the mod button loaded into the editor by its ✎ (the
+    /// row stays in place — highlighted — until Save replaces it in its slot;
+    /// Cancel or closing the settings window leaves it untouched).
+    editing_mod_button: Option<usize>,
     /// Which category the tab-settings panel's sidebar has selected. Reset to
     /// Channels on each open — that's what a right-click → Settings is for.
     tab_settings_category: TabSettingsCategory,
@@ -648,6 +671,8 @@ impl BackseaterApp {
         settings.apply_visibility_flags();
         // And the mention-sound master + streamer-mute flags the play path reads.
         settings.apply_sound_flags();
+        // And the mod-button strip's mode + custom buttons the chat rows read.
+        settings.apply_mod_buttons();
         // Apply the persisted color theme to both the kit (window chrome, buttons,
         // settings) and the chat-log palette (via the bks-core flag `render` reads).
         apply_theme(&settings, window, cx);
@@ -821,6 +846,8 @@ impl BackseaterApp {
             popouts: Vec::new(),
             mentions_window: None,
             settings_category: SettingsCategory::Account,
+            mod_button_platform: None,
+            editing_mod_button: None,
             tab_settings_category: TabSettingsCategory::Channels,
             _login_watch,
             obs_running,
@@ -844,6 +871,9 @@ impl BackseaterApp {
     /// wouldn't get focus/blur/cursor events in a child window.
     fn rebind_settings_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_inputs = SettingsInputs::build(window, cx);
+        // The rebuilt inputs are empty, so a mod-button edit left open when the
+        // window last closed is implicitly cancelled with them.
+        self.editing_mod_button = None;
         if let Some(name) = self.settings.mentions_tab_name.clone() {
             self.settings_inputs
                 .mentions_tab_name
@@ -1649,6 +1679,9 @@ impl BackseaterApp {
                 .child(self.term_list_section(TermList::global(TermKind::Mentions), cx))
                 .child(self.mentions_tab_section(cx))
                 .child(self.term_list_section(TermList::global(TermKind::Ignore), cx)),
+            SettingsCategory::ModButtons => {
+                v_flex().gap_5().child(self.mod_buttons_section(cx))
+            }
             SettingsCategory::Streamer => v_flex().gap_5().child(self.streamer_section(cx)),
             SettingsCategory::About => v_flex().gap_5().child(self.about_section(cx)),
         };
@@ -2294,6 +2327,435 @@ impl BackseaterApp {
 
     /// Renders the Streamer Mode section: an Off / On / Auto segmented toggle
     /// (Auto = on while OBS & co. run), a description, and the live status.
+    /// The Mod Buttons settings category: the strip's visibility mode and the
+    /// custom-button editor (name / icon / command template / platform).
+    fn mod_buttons_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use settings::ModButtonMode;
+        let current = self.settings.mod_button_mode;
+        let mode_seg = |choice: ModButtonMode, label: &'static str, cx: &mut Context<Self>| {
+            let selected = current == choice;
+            div()
+                .id(SharedString::from(format!("mod-mode-{label}")))
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .when(selected, |s| {
+                    s.bg(cx.theme().secondary).font_weight(FontWeight::MEDIUM)
+                })
+                .when(!selected, |s| s.text_color(cx.theme().muted_foreground))
+                .hover(|s| s.bg(cx.theme().secondary))
+                .child(SharedString::from(label))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| this.set_mod_button_mode(choice, cx)),
+                )
+        };
+
+        // A small glyph action on a button row (▲ ▼ ✎ ✕); disabled ones render
+        // muted and inert (the first row's ▲, the last row's ▼).
+        fn row_action(
+            id: String,
+            glyph: &'static str,
+            enabled: bool,
+            on_click: impl Fn(&mut BackseaterApp, &mut Window, &mut Context<BackseaterApp>)
+                + 'static,
+            cx: &mut Context<BackseaterApp>,
+        ) -> gpui::AnyElement {
+            let base = div()
+                .id(SharedString::from(id))
+                .px_1()
+                .rounded_sm()
+                .child(SharedString::from(glyph));
+            if !enabled {
+                return base.opacity(0.3).into_any_element();
+            }
+            base.cursor_pointer()
+                .text_color(cx.theme().muted_foreground)
+                .hover(|s| s.bg(cx.theme().secondary))
+                .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
+                .into_any_element()
+        }
+
+        // Every button (the seeded stock ones included) as one editable row:
+        // icon · name · command · platform, with reorder/edit/remove actions.
+        // The row an open edit came from stays put, tinted, until Save/Cancel.
+        let editing = self.editing_mod_button;
+        let count = self.settings.mod_buttons.len();
+        let mut button_rows: Vec<gpui::AnyElement> = Vec::new();
+        for (ix, b) in self.settings.mod_buttons.iter().enumerate() {
+            if ix > 0 {
+                button_rows.push(card_divider().into_any_element());
+            }
+            let icon = match assets::mod_icon_path(&b.icon) {
+                Some(path) => gpui::svg()
+                    .path(path)
+                    .size(px(14.))
+                    .flex_none()
+                    .text_color(cx.theme().foreground)
+                    .into_any_element(),
+                None => div()
+                    .text_xs()
+                    .flex_none()
+                    .child(SharedString::from(b.icon.clone()))
+                    .into_any_element(),
+            };
+            let platform = match b.platform {
+                Some(p) => p.label(),
+                None => "Both",
+            };
+            button_rows.push(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_1p5()
+                    .when(editing == Some(ix), |r| r.bg(cx.theme().secondary))
+                    .child(div().flex_none().w(px(18.)).flex().justify_center().child(icon))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(13.))
+                            .child(SharedString::from(b.name.clone())),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(format!("{} · {platform}", b.command))),
+                    )
+                    .child(row_action(
+                        format!("mod-btn-up-{ix}"),
+                        "▲",
+                        ix > 0,
+                        move |this, _, cx| this.move_mod_button(ix, ix.wrapping_sub(1), cx),
+                        cx,
+                    ))
+                    .child(row_action(
+                        format!("mod-btn-down-{ix}"),
+                        "▼",
+                        ix + 1 < count,
+                        move |this, _, cx| this.move_mod_button(ix, ix + 1, cx),
+                        cx,
+                    ))
+                    .child(row_action(
+                        format!("mod-btn-edit-{ix}"),
+                        "✎",
+                        true,
+                        move |this, window, cx| this.edit_mod_button(ix, window, cx),
+                        cx,
+                    ))
+                    .child(row_action(
+                        format!("mod-btn-rm-{ix}"),
+                        "✕",
+                        true,
+                        move |this, _, cx| this.remove_mod_button(ix, cx),
+                        cx,
+                    ))
+                    .into_any_element(),
+            );
+        }
+
+        // The curated icon set as clickable presets that fill the icon field.
+        let icon_value = self.settings_inputs.mod_icon.read(cx).value().to_string();
+        let icon_presets: Vec<gpui::AnyElement> = assets::MOD_ICONS
+            .iter()
+            .map(|(name, path)| {
+                let name: &'static str = name;
+                let selected = icon_value == *name;
+                div()
+                    .id(SharedString::from(format!("mod-icon-{name}")))
+                    .p_1p5()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(selected, |s| s.bg(cx.theme().secondary))
+                    .hover(|s| s.bg(cx.theme().secondary))
+                    .child(
+                        gpui::svg()
+                            .path(*path)
+                            .size(px(16.))
+                            .flex_none()
+                            .text_color(cx.theme().foreground),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.settings_inputs
+                            .mod_icon
+                            .update(cx, |s, cx| s.set_value(name, window, cx));
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+
+        let platform_seg =
+            |choice: Option<bks_core::Platform>, label: &'static str, cx: &mut Context<Self>| {
+                let selected = self.mod_button_platform == choice;
+                div()
+                    .id(SharedString::from(format!("mod-platform-{label}")))
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(selected, |s| {
+                        s.bg(cx.theme().secondary).font_weight(FontWeight::MEDIUM)
+                    })
+                    .when(!selected, |s| s.text_color(cx.theme().muted_foreground))
+                    .hover(|s| s.bg(cx.theme().secondary))
+                    .child(SharedString::from(label))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.mod_button_platform = choice;
+                            cx.notify();
+                        }),
+                    )
+            };
+
+        v_flex()
+            .gap_2()
+            .child(section_title("Mod Buttons"))
+            .child(
+                setting_card().child(setting_row(
+                    "Show mod buttons",
+                    Some(
+                        "Moderation buttons at the left of each message in channels \
+                         you moderate. \"On hover\" shows them only while the mouse \
+                         is over a message.",
+                    ),
+                    h_flex()
+                        .gap_1()
+                        .p_0p5()
+                        .rounded_lg()
+                        .bg(cx.theme().muted)
+                        .child(mode_seg(ModButtonMode::Off, "Off", cx))
+                        .child(mode_seg(ModButtonMode::Always, "Always", cx))
+                        .child(mode_seg(ModButtonMode::Hover, "On hover", cx))
+                        .into_any_element(),
+                )),
+            )
+            .child(div().h_1())
+            .child(section_title("Buttons"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(
+                        "In strip order - reorder, edit, or remove any of them (the stock \
+                         three included). A button runs any slash command or chat text on \
+                         the message's platform, targeting it automatically - \
+                         \"/timeout 1h spam\" times out the author, \"/delete\" deletes \
+                         the message. For custom placement or plain text, {user} is the \
+                         author's name and {msg-id} the message id, e.g. \"!so {user}\".",
+                    )),
+            )
+            .child(if button_rows.is_empty() {
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(
+                        "No buttons - add one below, or Reset to defaults.",
+                    ))
+                    .into_any_element()
+            } else {
+                setting_card().children(button_rows).into_any_element()
+            })
+            .child(field("Name", &self.settings_inputs.mod_name))
+            .child(field("Command", &self.settings_inputs.mod_command))
+            .child(field("Icon", &self.settings_inputs.mod_icon))
+            .child(h_flex().flex_wrap().gap_1().children(icon_presets))
+            .child(
+                h_flex()
+                    .w_full()
+                    .flex_wrap()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .p_0p5()
+                            .rounded_lg()
+                            .bg(cx.theme().muted)
+                            .child(platform_seg(None, "Both", cx))
+                            .child(platform_seg(Some(bks_core::Platform::Twitch), "Twitch", cx))
+                            .child(platform_seg(Some(bks_core::Platform::Kick), "Kick", cx)),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("reset-mod-buttons")
+                            .label("Reset to defaults")
+                            .small()
+                            .outline()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.reset_mod_buttons(cx);
+                            })),
+                    )
+                    .when(editing.is_some(), |row| {
+                        row.child(
+                            Button::new("cancel-mod-edit")
+                                .label("Cancel")
+                                .small()
+                                .outline()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.cancel_mod_button_edit(window, cx);
+                                })),
+                        )
+                    })
+                    .child(
+                        Button::new("add-mod-button")
+                            .label(if editing.is_some() { "Save" } else { "Add" })
+                            .primary()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.add_mod_button(window, cx);
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// Applies a mod-button visibility change: persist, push the process-wide
+    /// flag, and re-measure every log (the strip changes row widths, so wrapped
+    /// heights change too).
+    fn set_mod_button_mode(&mut self, mode: settings::ModButtonMode, cx: &mut Context<Self>) {
+        if self.settings.mod_button_mode == mode {
+            return;
+        }
+        self.settings.mod_button_mode = mode;
+        self.save_mod_buttons(cx);
+    }
+
+    /// Adds a custom mod button from the editor fields. Only the command is
+    /// required; an empty name falls back to the command, an empty icon to the
+    /// gavel.
+    fn add_mod_button(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.settings_inputs.mod_name.read(cx).value().trim().to_string();
+        let icon = self.settings_inputs.mod_icon.read(cx).value().trim().to_string();
+        let command = self
+            .settings_inputs
+            .mod_command
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        if command.is_empty() {
+            return;
+        }
+        let button = settings::ModButton {
+            name: if name.is_empty() { command.clone() } else { name },
+            icon: if icon.is_empty() { "gavel".into() } else { icon },
+            command,
+            platform: self.mod_button_platform,
+        };
+        // Saving an open edit replaces the button in its original slot; a
+        // plain Add appends.
+        match self.editing_mod_button.take() {
+            Some(ix) if ix < self.settings.mod_buttons.len() => {
+                self.settings.mod_buttons[ix] = button;
+            }
+            _ => self.settings.mod_buttons.push(button),
+        }
+        self.clear_mod_button_editor(window, cx);
+        self.save_mod_buttons(cx);
+    }
+
+    /// Removes the mod button at `ix` (a row's ✕).
+    fn remove_mod_button(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix >= self.settings.mod_buttons.len() {
+            return;
+        }
+        self.settings.mod_buttons.remove(ix);
+        // The edited row's index may have shifted (or vanished) — drop the
+        // edit marker; the form keeps its text, Save would append.
+        self.editing_mod_button = None;
+        self.save_mod_buttons(cx);
+    }
+
+    /// Swaps the mod button at `ix` with the one at `other` (a row's ▲/▼).
+    fn move_mod_button(&mut self, ix: usize, other: usize, cx: &mut Context<Self>) {
+        let len = self.settings.mod_buttons.len();
+        if ix >= len || other >= len || ix == other {
+            return;
+        }
+        self.settings.mod_buttons.swap(ix, other);
+        // Keep an open edit pointed at the row it was started on.
+        self.editing_mod_button = match self.editing_mod_button {
+            Some(e) if e == ix => Some(other),
+            Some(e) if e == other => Some(ix),
+            keep => keep,
+        };
+        self.save_mod_buttons(cx);
+    }
+
+    /// Loads the mod button at `ix` into the editor fields, leaving its row in
+    /// place (highlighted) — Save replaces it in its slot, Cancel (or closing
+    /// the window) changes nothing.
+    fn edit_mod_button(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(b) = self.settings.mod_buttons.get(ix).cloned() else {
+            return;
+        };
+        self.settings_inputs
+            .mod_name
+            .update(cx, |s, cx| s.set_value(b.name, window, cx));
+        self.settings_inputs
+            .mod_icon
+            .update(cx, |s, cx| s.set_value(b.icon, window, cx));
+        self.settings_inputs
+            .mod_command
+            .update(cx, |s, cx| s.set_value(b.command, window, cx));
+        self.mod_button_platform = b.platform;
+        self.editing_mod_button = Some(ix);
+        cx.notify();
+    }
+
+    /// Cancels an open mod-button edit: clears the marker and empties the form.
+    fn cancel_mod_button_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing_mod_button = None;
+        self.clear_mod_button_editor(window, cx);
+        cx.notify();
+    }
+
+    /// Empties the editor fields and resets the platform choice.
+    fn clear_mod_button_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for input in [
+            &self.settings_inputs.mod_name,
+            &self.settings_inputs.mod_icon,
+            &self.settings_inputs.mod_command,
+        ] {
+            input.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        self.mod_button_platform = None;
+    }
+
+    /// Replaces the button list with the stock three (the editor's "Reset to
+    /// defaults").
+    fn reset_mod_buttons(&mut self, cx: &mut Context<Self>) {
+        self.settings.mod_buttons = settings::default_mod_buttons();
+        self.settings.mod_buttons_seeded = true;
+        self.editing_mod_button = None;
+        self.save_mod_buttons(cx);
+    }
+
+    /// The shared tail of every mod-button edit: persist, push the process-wide
+    /// state the rows render against, and re-measure every log (the strip
+    /// changes row widths, so wrapped heights change too).
+    fn save_mod_buttons(&mut self, cx: &mut Context<Self>) {
+        self.settings.save();
+        self.settings.apply_mod_buttons();
+        self.remeasure_tabs(cx);
+        cx.notify();
+    }
+
+    /// Re-measures every tab's log — for process-wide changes that alter row
+    /// layout outside the rows' own data (the mod-button strip).
+    fn remeasure_tabs(&self, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            tab.view.update(cx, |view, cx| view.remeasure(cx));
+        }
+    }
+
     fn streamer_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         use settings::StreamerModeChoice;
         let current = self.settings.streamer_mode;

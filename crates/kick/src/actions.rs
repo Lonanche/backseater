@@ -317,6 +317,25 @@ impl KickActions {
         ensure_ok_edge(resp, "pin").await
     }
 
+    /// Deletes the chat message `message_id` in `slug`'s chat via the site API
+    /// (`DELETE /api/v2/chatrooms/{chatroom_id}/messages/{message_id}` — the
+    /// *public* API has no delete endpoint; captured from the web client).
+    /// Same auth caveat as [`pin_message`](Self::pin_message).
+    pub async fn delete_message(&self, slug: &str, message_id: &str) -> anyhow::Result<()> {
+        // The chatrooms resource keys on the Pusher `chatroom.id`, not the
+        // history endpoint's `channel_id`.
+        let info = crate::api::fetch_channel_info(slug).await?;
+        let xsrf = crate::api::csrf_token(slug).await?;
+        let (xsrf, chatroom_id) = (&xsrf, info.chatroom_id);
+        let resp = self
+            .send_authed_edge("delete", |token| async move {
+                crate::api::delete_message_request(&token, xsrf, slug, chatroom_id, message_id)
+                    .await
+            })
+            .await?;
+        ensure_ok_edge(resp, "delete").await
+    }
+
     /// Unpins `slug`'s current pinned message (site API `DELETE`; same auth
     /// caveat as [`pin_message`](Self::pin_message)).
     pub async fn unpin_message(&self, slug: &str) -> anyhow::Result<()> {

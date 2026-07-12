@@ -444,6 +444,33 @@ pub(crate) async fn pin_message_request(
         .await
 }
 
+/// Deletes one chat message — `DELETE /api/v2/chatrooms/{chatroom_id}/
+/// messages/{message_id}` (the *public* API has no delete endpoint), same
+/// authed edge path as [`pin_message_request`]. `chatroom_id` is the Pusher
+/// `chatroom.id` (the id the WS subscribes on and chat events carry as
+/// `chatroom_id`), NOT the history endpoint's `channel_id` — from a live
+/// capture of the web client's request.
+pub(crate) async fn delete_message_request(
+    token: &str,
+    xsrf: &str,
+    slug: &str,
+    chatroom_id: u64,
+    message_id: &str,
+) -> wreq::Result<wreq::Response> {
+    CLIENT
+        .delete(format!(
+            "https://kick.com/api/v2/chatrooms/{chatroom_id}/messages/{}",
+            bks_core::encode_url_component(message_id)
+        ))
+        .header("accept", "application/json")
+        .header("accept-language", "en-US,en;q=0.9")
+        .header("referer", format!("https://kick.com/{slug}"))
+        .header("authorization", format!("Bearer {token}"))
+        .header("x-xsrf-token", xsrf)
+        .send()
+        .await
+}
+
 /// Unpins `slug`'s current pinned message — `DELETE /api/v2/channels/{slug}/
 /// pinned-message`, same authed edge path as [`pin_message_request`].
 pub(crate) async fn unpin_message_request(

@@ -54,6 +54,7 @@ enum ModAction {
     Timeout {
         user: String,
         secs: u32,
+        reason: Option<String>,
     },
     Unban {
         user: String,
@@ -297,6 +298,11 @@ impl Controller {
         !self.kick_channel.is_empty()
     }
 
+    /// Whether this tab has a Twitch channel set.
+    pub fn has_twitch(&self) -> bool {
+        !self.twitch_channel.is_empty()
+    }
+
     /// Cycles the send target Twitch → Kick → Both (only meaningful when logged
     /// into Kick and this tab has a Kick channel).
     pub fn cycle_send_target(&self) {
@@ -375,7 +381,11 @@ impl Controller {
 
     /// Times `user` out on Twitch for `secs` seconds (per-message mod button).
     pub fn timeout_twitch(&self, user: String, secs: u32) {
-        self.spawn_twitch_mod(ModAction::Timeout { user, secs });
+        self.spawn_twitch_mod(ModAction::Timeout {
+            user,
+            secs,
+            reason: None,
+        });
     }
 
     /// Lifts a ban/timeout on `user` on Twitch (usercard Unban button).
@@ -587,7 +597,11 @@ impl Controller {
 
     /// Times `user` out on Kick for `secs` seconds (usercard preset button).
     pub fn timeout_kick(&self, user: String, secs: u32) {
-        self.spawn_kick_mod(ModAction::Timeout { user, secs });
+        self.spawn_kick_mod(ModAction::Timeout {
+            user,
+            secs,
+            reason: None,
+        });
     }
 
     /// Lifts a Kick ban/timeout on `user` (usercard Unban button).
@@ -698,20 +712,42 @@ impl Controller {
             return;
         }
         if let Some(rest) = line.strip_prefix('/') {
-            self.handle_command(rest);
+            self.handle_command(rest, self.send_target());
         } else if let Some(reply) = reply {
             self.send_reply(line.to_string(), reply);
         } else {
-            self.send(line.to_string());
+            self.send(line.to_string(), self.send_target());
         }
     }
 
-    fn handle_command(&self, rest: &str) {
+    /// Like [`handle_input`](Self::handle_input) but targeted at an explicit
+    /// platform instead of the send-target toggle — the per-message mod buttons
+    /// act on the *row's* platform (a button on a Kick message moderates Kick
+    /// even while the composer sends to Twitch). Plain text is sent to that
+    /// platform's chat.
+    pub fn handle_input_at(&self, line: &str, platform: bks_core::Platform) {
+        let line = line.trim();
+        if line.is_empty() {
+            return;
+        }
+        let target = match platform {
+            bks_core::Platform::Twitch => SendTarget::Twitch,
+            bks_core::Platform::Kick => SendTarget::Kick,
+            _ => return self.notice("mod actions aren't supported on this platform"),
+        };
+        if let Some(rest) = line.strip_prefix('/') {
+            self.handle_command(rest, target);
+        } else {
+            self.send(line.to_string(), target);
+        }
+    }
+
+    fn handle_command(&self, rest: &str, target: SendTarget) {
         let mut parts = rest.split_whitespace();
         let cmd = parts.next().unwrap_or("").to_lowercase();
         let args: Vec<&str> = parts.collect();
         // Commands act on ONE chat; in Both mode there's no unambiguous target.
-        if self.send_target() == SendTarget::Both {
+        if target == SendTarget::Both {
             return self.notice(
                 "commands don't work while sending to both platforms — \
                  switch the send target to one",
@@ -719,7 +755,7 @@ impl Controller {
         }
         match cmd.as_str() {
             "ban" => match args.split_first() {
-                Some((user, reason)) => self.moderate(ModAction::Ban {
+                Some((user, reason)) => self.moderate(target, ModAction::Ban {
                     user: user.to_string(),
                     reason: join(reason),
                 }),
@@ -727,31 +763,34 @@ impl Controller {
             },
             // Timeout is in seconds here; converted to minutes for Kick downstream.
             "timeout" => match args.as_slice() {
-                [user, duration, ..] => match bks_core::parse_duration(duration)
+                [user, duration, reason @ ..] => match bks_core::parse_duration(duration)
                     .and_then(|secs| u32::try_from(secs).ok())
                 {
-                    Some(secs) => self.moderate(ModAction::Timeout {
+                    Some(secs) => self.moderate(target, ModAction::Timeout {
                         user: user.to_string(),
                         secs,
+                        reason: join(reason),
                     }),
-                    None => self.notice("usage: /timeout <user> <duration — 600, 30m, 1h, 3d, 1w>"),
+                    None => self.notice(
+                        "usage: /timeout <user> <duration — 600, 30m, 1h, 3d, 1w> [reason]",
+                    ),
                 },
-                _ => self.notice("usage: /timeout <user> <duration — 600, 30m, 1h, 3d, 1w>"),
+                _ => self.notice("usage: /timeout <user> <duration — 600, 30m, 1h, 3d, 1w> [reason]"),
             },
             "unban" | "untimeout" => match args.first() {
-                Some(user) => self.moderate(ModAction::Unban {
+                Some(user) => self.moderate(target, ModAction::Unban {
                     user: user.to_string(),
                 }),
                 None => self.notice("usage: /unban <user>"),
             },
             "delete" => match args.first() {
-                Some(id) => self.moderate(ModAction::Delete {
+                Some(id) => self.moderate(target, ModAction::Delete {
                     message_id: id.to_string(),
                 }),
                 None => self.notice("usage: /delete <message-id>"),
             },
             "me" => match join(&args) {
-                Some(text) => self.send_me(text),
+                Some(text) => self.send_me(text, target),
                 None => self.notice("usage: /me <message>"),
             },
             "announce" | "announceblue" | "announcegreen" | "announceorange"
@@ -767,12 +806,13 @@ impl Controller {
                             _ => "purple",
                         }),
                     };
-                    self.twitch_cmd(&cmd, TwitchCmd::Announce { message, color });
+                    self.twitch_cmd(target, &cmd, TwitchCmd::Announce { message, color });
                 }
                 None => self.notice(format!("usage: /{cmd} <message>")),
             },
             "warn" => match args.split_first() {
                 Some((user, reason)) if !reason.is_empty() => self.twitch_cmd(
+                    target,
                     &cmd,
                     TwitchCmd::Warn {
                         user: user.to_string(),
@@ -812,6 +852,7 @@ impl Controller {
                 };
                 match join(message_args) {
                     Some(message) => self.twitch_cmd(
+                        target,
                         &cmd,
                         TwitchCmd::Pin {
                             message,
@@ -825,21 +866,21 @@ impl Controller {
                     ),
                 }
             }
-            "clear" => self.twitch_cmd(&cmd, TwitchCmd::Clear),
+            "clear" => self.twitch_cmd(target, &cmd, TwitchCmd::Clear),
             "slow" => match args.first() {
                 // Twitch web's default wait time.
-                None => self.twitch_cmd(&cmd, TwitchCmd::Slow(Some(30))),
+                None => self.twitch_cmd(target, &cmd, TwitchCmd::Slow(Some(30))),
                 Some(arg) => match bks_core::parse_duration(arg)
                     .and_then(|secs| u32::try_from(secs).ok())
                 {
-                    Some(secs) => self.twitch_cmd(&cmd, TwitchCmd::Slow(Some(secs))),
+                    Some(secs) => self.twitch_cmd(target, &cmd, TwitchCmd::Slow(Some(secs))),
                     None => self.notice("usage: /slow [seconds — 3 to 120]"),
                 },
             },
-            "slowoff" => self.twitch_cmd(&cmd, TwitchCmd::Slow(None)),
+            "slowoff" => self.twitch_cmd(target, &cmd, TwitchCmd::Slow(None)),
             "followers" => match args.first() {
                 // No minimum follow age — any follower can chat.
-                None => self.twitch_cmd(&cmd, TwitchCmd::Followers(Some(0))),
+                None => self.twitch_cmd(target, &cmd, TwitchCmd::Followers(Some(0))),
                 // A bare number is minutes (Helix's unit, like twitch.tv's
                 // command — and unlike /timeout's seconds); 0 = any follower.
                 Some(arg) => match arg
@@ -849,21 +890,22 @@ impl Controller {
                         bks_core::parse_duration(arg)
                             .map(|secs| u32::try_from(secs.div_ceil(60)).unwrap_or(u32::MAX))
                     }) {
-                    Some(minutes) => self.twitch_cmd(&cmd, TwitchCmd::Followers(Some(minutes))),
+                    Some(minutes) => self.twitch_cmd(target, &cmd, TwitchCmd::Followers(Some(minutes))),
                     None => {
                         self.notice("usage: /followers [duration — 10 = 10m, 1h, 30d; 0 = any follower]")
                     }
                 },
             },
-            "followersoff" => self.twitch_cmd(&cmd, TwitchCmd::Followers(None)),
-            "subscribers" => self.twitch_cmd(&cmd, TwitchCmd::SubOnly(true)),
-            "subscribersoff" => self.twitch_cmd(&cmd, TwitchCmd::SubOnly(false)),
-            "emoteonly" => self.twitch_cmd(&cmd, TwitchCmd::EmoteOnly(true)),
-            "emoteonlyoff" => self.twitch_cmd(&cmd, TwitchCmd::EmoteOnly(false)),
-            "uniquechat" => self.twitch_cmd(&cmd, TwitchCmd::UniqueChat(true)),
-            "uniquechatoff" => self.twitch_cmd(&cmd, TwitchCmd::UniqueChat(false)),
+            "followersoff" => self.twitch_cmd(target, &cmd, TwitchCmd::Followers(None)),
+            "subscribers" => self.twitch_cmd(target, &cmd, TwitchCmd::SubOnly(true)),
+            "subscribersoff" => self.twitch_cmd(target, &cmd, TwitchCmd::SubOnly(false)),
+            "emoteonly" => self.twitch_cmd(target, &cmd, TwitchCmd::EmoteOnly(true)),
+            "emoteonlyoff" => self.twitch_cmd(target, &cmd, TwitchCmd::EmoteOnly(false)),
+            "uniquechat" => self.twitch_cmd(target, &cmd, TwitchCmd::UniqueChat(true)),
+            "uniquechatoff" => self.twitch_cmd(target, &cmd, TwitchCmd::UniqueChat(false)),
             "mod" | "unmod" | "vip" | "unvip" => match args.first() {
                 Some(user) => self.twitch_cmd(
+                    target,
                     &cmd,
                     TwitchCmd::Role {
                         role: if cmd.ends_with("vip") {
@@ -879,6 +921,7 @@ impl Controller {
             },
             "shoutout" => match args.first() {
                 Some(user) => self.twitch_cmd(
+                    target,
                     &cmd,
                     TwitchCmd::Shoutout {
                         user: user.to_string(),
@@ -887,24 +930,25 @@ impl Controller {
                 None => self.notice("usage: /shoutout <channel>"),
             },
             "raid" => match args.first() {
-                Some(target) => self.twitch_cmd(
+                Some(raid_target) => self.twitch_cmd(
+                    target,
                     &cmd,
                     TwitchCmd::Raid {
-                        target: target.to_string(),
+                        target: raid_target.to_string(),
                     },
                 ),
                 None => self.notice("usage: /raid <channel>"),
             },
-            "unraid" => self.twitch_cmd(&cmd, TwitchCmd::Unraid),
+            "unraid" => self.twitch_cmd(target, &cmd, TwitchCmd::Unraid),
             other => self.notice(format!("unknown command: /{other}")),
         }
     }
 
     /// Runs a Twitch-only command against this tab's Twitch channel — refused
-    /// when the send target is Kick (the Both case is gated in
+    /// when the target is Kick (the Both case is gated in
     /// [`Self::handle_command`]).
-    fn twitch_cmd(&self, name: &str, cmd: TwitchCmd) {
-        if self.send_target() == SendTarget::Kick {
+    fn twitch_cmd(&self, target: SendTarget, name: &str, cmd: TwitchCmd) {
+        if target == SendTarget::Kick {
             return self.notice(format!(
                 "/{name} is Twitch-only — switch the send target to Twitch"
             ));
@@ -978,8 +1022,8 @@ impl Controller {
 
     /// Sends `/me text` as an action message on Twitch (the one slash command
     /// Twitch IRC still interprets inside a PRIVMSG). Kick has no equivalent.
-    fn send_me(&self, text: String) {
-        if self.send_target() == SendTarget::Kick {
+    fn send_me(&self, text: String, target: SendTarget) {
+        if target == SendTarget::Kick {
             return self.notice("/me is Twitch-only — switch the send target to Twitch");
         }
         let this = self.clone();
@@ -1002,10 +1046,9 @@ impl Controller {
         });
     }
 
-    fn send(&self, text: String) {
+    fn send(&self, text: String, target: SendTarget) {
         let this = self.clone();
         self.rt.spawn(async move {
-            let target = this.send_target();
             let twitch = this.state.lock().await.twitch.clone();
             if matches!(target, SendTarget::Twitch | SendTarget::Both)
                 && !this.twitch_channel.is_empty()
@@ -1092,10 +1135,9 @@ impl Controller {
 
     /// Runs a moderation action on this tab's current single-platform target.
     /// Disabled in `Both` mode; reports "log in first" when not authed.
-    fn moderate(&self, action: ModAction) {
+    fn moderate(&self, target: SendTarget, action: ModAction) {
         let this = self.clone();
         self.rt.spawn(async move {
-            let target = this.send_target();
             match target {
                 SendTarget::Both => this.notice("switch to one platform to moderate"),
                 SendTarget::Twitch => {
@@ -1119,7 +1161,9 @@ impl Controller {
         let ch = &self.twitch_channel;
         let result = match action {
             ModAction::Ban { user, reason } => actions.ban(ch, &user, reason.as_deref()).await,
-            ModAction::Timeout { user, secs } => actions.timeout(ch, &user, secs).await,
+            ModAction::Timeout { user, secs, reason } => {
+                actions.timeout(ch, &user, secs, reason.as_deref()).await
+            }
             ModAction::Unban { user } => actions.unban(ch, &user).await,
             ModAction::Delete { message_id } => actions.delete_message(ch, &message_id).await,
         };
@@ -1132,13 +1176,21 @@ impl Controller {
         if !self.require_kick_channel() {
             return;
         }
-        // Kick has no delete endpoint; ban/timeout/unban all need numeric ids
-        // resolved from chatters we've seen (its API can't look up a user by name).
+        // Delete keys on the channel + message id (the site API — Kick's public
+        // API has no delete endpoint), not on a chatter id like the ban family.
+        if let ModAction::Delete { message_id } = &action {
+            if let Err(err) = actions.delete_message(&self.kick_channel, message_id).await {
+                self.report_kick_error(&err);
+            }
+            return;
+        }
+        // Ban/timeout/unban all need numeric ids resolved from chatters we've
+        // seen (Kick's API can't look up a user by name).
         let user = match &action {
             ModAction::Ban { user, .. }
             | ModAction::Timeout { user, .. }
             | ModAction::Unban { user } => user.clone(),
-            ModAction::Delete { .. } => return self.notice("Kick has no delete-message API"),
+            ModAction::Delete { .. } => unreachable!("handled above"),
         };
         let target_id = {
             let s = self.state.lock().await;
@@ -1161,10 +1213,10 @@ impl Controller {
                     .await
             }
             // Twitch /timeout is seconds; Kick wants minutes (round up, min 1).
-            ModAction::Timeout { secs, .. } => {
+            ModAction::Timeout { secs, reason, .. } => {
                 let minutes = secs.div_ceil(60).max(1);
                 actions
-                    .ban(broadcaster_id, target_id, Some(minutes), None)
+                    .ban(broadcaster_id, target_id, Some(minutes), reason.as_deref())
                     .await
             }
             ModAction::Unban { .. } => actions.unban(broadcaster_id, target_id).await,

@@ -41,13 +41,51 @@ const YOUTUBE_ICON: (&str, &[u8]) = (
     include_bytes!("../assets/youtube/youtube.png"),
 );
 
-/// The muted-mention bell (lucide `bell-off`, same ISC icon set the kit
-/// bundles — the kit only ships `bell.svg`). Served next to the kit's icons so
-/// the two bell states come from matching vector art, not ambiguous emoji.
-const BELL_OFF_ICON: (&str, &[u8]) = (
-    "icons/bell-off.svg",
-    include_bytes!("../assets/icons/bell-off.svg"),
-);
+/// Bundled lucide icons the kit doesn't ship (same ISC icon set), served next
+/// to the kit's own `icons/` so both come from matching vector art:
+/// `bell-off` (the muted-mention chip toggle) and the moderation-button set.
+macro_rules! app_icons {
+    ($($name:literal),* $(,)?) => {
+        &[$((
+            concat!("icons/", $name, ".svg"),
+            include_bytes!(concat!("../assets/icons/", $name, ".svg")).as_slice(),
+        )),*]
+    };
+}
+
+const APP_ICONS: &[(&str, &[u8])] = app_icons![
+    "bell-off", "ban", "clock", "flag", "gavel", "shield", "trash-2", "zap",
+];
+
+/// Mod-button icon names the settings editor offers and `render` resolves:
+/// short name → the SVG asset path (ours or the kit's). A [`ModButton::icon`]
+/// matching a name here draws the vector icon; anything else draws as text.
+pub const MOD_ICONS: &[(&str, &str)] = &[
+    ("ban", "icons/ban.svg"),
+    ("clock", "icons/clock.svg"),
+    ("trash", "icons/trash-2.svg"),
+    ("gavel", "icons/gavel.svg"),
+    ("flag", "icons/flag.svg"),
+    ("shield", "icons/shield.svg"),
+    ("zap", "icons/zap.svg"),
+    // Kit-shipped (gpui-component-assets).
+    ("alert", "icons/triangle-alert.svg"),
+    ("eye-off", "icons/eye-off.svg"),
+    ("star", "icons/star.svg"),
+    ("heart", "icons/heart.svg"),
+    ("bell", "icons/bell.svg"),
+    ("circle-x", "icons/circle-x.svg"),
+    ("thumbs-down", "icons/thumbs-down.svg"),
+];
+
+/// The SVG asset path for a mod-button icon name, `None` when `name` isn't a
+/// known icon (the button face renders the name as text/emoji instead).
+pub fn mod_icon_path(name: &str) -> Option<&'static str> {
+    MOD_ICONS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, path)| *path)
+}
 
 const KICK_BADGES: &[(&str, &[u8])] = kick_badges![
     "bot",
@@ -78,8 +116,8 @@ impl AssetSource for Assets {
         if path == YOUTUBE_ICON.0 {
             return Ok(Some(Cow::Borrowed(YOUTUBE_ICON.1)));
         }
-        if path == BELL_OFF_ICON.0 {
-            return Ok(Some(Cow::Borrowed(BELL_OFF_ICON.1)));
+        if let Some((_, bytes)) = APP_ICONS.iter().find(|(p, _)| *p == path) {
+            return Ok(Some(Cow::Borrowed(bytes)));
         }
         if let Some((_, bytes)) = KICK_BADGES.iter().find(|(p, _)| *p == path) {
             return Ok(Some(Cow::Borrowed(bytes)));

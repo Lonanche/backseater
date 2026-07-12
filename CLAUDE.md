@@ -111,7 +111,49 @@ platform = implement one trait + one message builder, with zero UI changes**.
   Twitch-only since Kick's endpoint always wants a number — `pin_duration_chips`, selection on
   `ChatView::pin_duration_choice`, reset to the 20m default per open; the dialog builder re-runs
   on notify so the chips are live). Kick gets the shared command set only
-  (`ban/timeout/unban/unpin/usercard` — no chat-mode/announce/pin-command APIs).
+  (`ban/timeout/unban/delete/unpin/usercard` — no chat-mode/announce/pin-command APIs; delete
+  rides the site API, see the Kick login note).
+- **Per-message mod buttons (left-side strip)**: small buttons before the platform icon on rows
+  whose platform the user can moderate (`ChannelModel::can_moderate`). The strip is a **uniform
+  gutter across the view** (`render::ModStrip`): one slot per button applicable to *any*
+  platform the view moderates (`ChannelModel::mod_platforms` — channel-present + moderated), and
+  a slot that doesn't apply to a given row (wrong platform, `{msg-id}` on a local echo, or the
+  row's platform unmoderated — in Always mode unmoderated rows still get the all-ghost gutter)
+  renders as the same button `.invisible()` — identical width, no listeners — so a merged
+  Twitch+Kick feed's messages all start at the same x. **One flat, fully
+  user-editable list** (`Settings.mod_buttons`, strip order = list order): the stock **delete**
+  (hidden on local-echo rows via `commands::needs_msg_id`) /
+  **ban** / **timeout 10m** are ordinary entries **seeded on first run**
+  (`settings::default_mod_buttons` + the one-time `mod_buttons_seeded` flag, so an intentionally
+  emptied list stays empty; fresh installs seed via `Default`) — reorder (▲/▼), edit (✎ loads
+  the row into the editor fields **non-destructively**: the row stays put, tinted, and Add
+  becomes Save which replaces it in its slot — Cancel or closing the window changes nothing;
+  `editing_mod_button`), or remove them like any custom one, with a **Reset to defaults**
+  button. Each button (Settings → Mod Buttons): name
+  (= tooltip), icon (a curated lucide name — `assets::MOD_ICONS`,
+  bundled ban/clock/trash-2/gavel/flag/shield/zap + a few kit-shipped — or free text/emoji), a
+  **command template** (any slash command, or plain text sent to chat — bot commands work), and a
+  platform scope (Twitch / Kick / Both). **Placeholders are optional for known commands**: a
+  template without one gets the row's target injected right after the command name, derived from
+  the registry's usage shape (`commands::implicit_target`, leading `<user>`/`<message-id>` in
+  the usage string) — "/timeout 600 spam" acts on the author, a bare "/delete" on the message
+  (`commands::needs_msg_id` also drives the echo-row ghosting). Explicit `{user}` (author login)
+  / `{msg-id}` remain for custom placement and plain text ("!so {user}").
+  Clicks dispatch **at the row's platform** regardless of the send-target toggle
+  (`Controller::handle_input_at` — `handle_command`/`moderate`/`twitch_cmd`/`send` all take an
+  explicit `SendTarget` now; `ChatView::run_mod_button` substitutes from the still-present row).
+  Visibility is a three-way setting (`Settings.mod_button_mode`, process-wide reads via
+  `settings::mod_button_mode()`/`mod_buttons()` like the pinned flags): **Always**
+  (default) / **On hover** (the strip takes no space at rest and pushes the message right while
+  the row is hovered — tracked view-side: the row wrapper's `on_hover` sets
+  `ChatView::hover_strip_row` + `refresh_log`, and the next render adds/removes the strip. ⚠️ Do
+  NOT do this with a `group_hover` `display` switch inside the row: hover can flip between
+  prepaint and paint and painting a subtree that skipped prepaint panics "must call prepaint
+  before paint") / **Off**. Mode/button-list edits
+  re-measure every log (the strip changes wrap widths — `BackseaterApp::remeasure_tabs`).
+  Rendered by `render::mod_button_strip`
+  (`RowHandlers::mod_click`, one shared per-row callback taking the clicked command template).
+  `/timeout` also gained an optional trailing **reason** (both platforms' ban APIs accept it).
 - **Twitch moderator feed** (EventSub, when logged in + mod/broadcaster of the channel): rich
   moderation notices with the acting moderator ("mod timed out user for 10m: reason" — also unbans,
   deletes, warns, chat-mode toggles, ...) replacing the generic "X was timed out / banned" line, and
@@ -347,7 +389,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
   back onto the next stable. CI runs in ~5 min warm (`rust-cache`, `shared-key: build`); a
   version bump rewrites Cargo.lock → cache re-key → that one run takes ~15 min (expected, once
   per release).
-- 240 passing unit tests (`cargo test`).
+- 246 passing unit tests (`cargo test`).
 
 **Not done yet (designed for, not built):**
 - TikTok connector.
@@ -356,7 +398,6 @@ platform = implement one trait + one message builder, with zero UI changes**.
   OAuth** (`youtube.force-ssl`). Google requires a client **secret**, which we won't ship in the binary —
   so, like Kick, it needs a **broker Worker** to hold the secret plus a Google Cloud OAuth app
   (we won't ship an obfuscated secret in the binary).
-- Kick **delete-message** (the public API has no endpoint) — `/delete` is Twitch-only.
 - BTTV / FFZ emotes on **Kick** (Kick gets 7TV + native only; the seam supports adding them).
 
 ## Architecture
@@ -727,7 +768,12 @@ The Kick app id/secret live ONLY as Worker secrets — see `worker/README.md`.
 Send = `POST /public/v1/chat`; ban/timeout = `POST /public/v1/moderation/bans` (duration in
 **minutes**; `/timeout` seconds are converted). Kick's API can't resolve a username → id, so
 `/ban`/`/timeout` only work on chatters we've **already seen** send a message (the controller
-remembers `login → id`). No delete endpoint.
+remembers `login → id`). Delete-message has **no public endpoint** — it goes through the **site
+API** like pins (`DELETE kick.com/api/v2/chatrooms/{chatroom_id}/messages/{message_id}`, wreq +
+bearer + `x-xsrf-token`, `KickActions::delete_message`; captured from the web client). ⚠️ The
+`chatroom_id` there is the **Pusher `chatroom.id`**, NOT the history endpoint's
+`chatroom.channel_id`; OAuth-token acceptance on that route is unverified live, same caveat as
+pins — a rejection surfaces as an error row.
 
 The broker (`worker/src/index.js`) is **OAuth-only**, intentionally minimal + locked down: POST-only
 token/refresh endpoints + a public `GET /kick/config` (client id), not a general proxy; `redirect_uri`

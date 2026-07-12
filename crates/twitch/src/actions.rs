@@ -113,8 +113,14 @@ impl TwitchActions {
         self.helix.ban(channel, user, None, reason).await
     }
 
-    pub async fn timeout(&self, channel: &str, user: &str, secs: u32) -> anyhow::Result<()> {
-        self.helix.ban(channel, user, Some(secs), None).await
+    pub async fn timeout(
+        &self,
+        channel: &str,
+        user: &str,
+        secs: u32,
+        reason: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.helix.ban(channel, user, Some(secs), reason).await
     }
 
     pub async fn unban(&self, channel: &str, user: &str) -> anyhow::Result<()> {

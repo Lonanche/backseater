@@ -27,7 +27,7 @@ use gpui::{
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{h_flex, v_flex, ActiveTheme};
 
-use super::{name_click_for, pin_click_for, reply_click_for, ChatView, EmotePopup, Row};
+use super::{mod_click_for, name_click_for, pin_click_for, reply_click_for, ChatView, EmotePopup, Row};
 use crate::channel_store::ChannelModel;
 use crate::{render, ORDINAL_STRIDE, SCROLLBAR_WIDTH};
 use bks_core::Message;
@@ -170,6 +170,10 @@ impl Render for LogView {
             // renders bare (see `RowFlags::external_highlight` / the renderers'
             // panel modes).
             let mut highlight: Option<(u32, u32)> = None;
+            // Set (to the message id) on rows that must track pointer hover for
+            // the "On hover" mod-button mode; the wrapper below then carries an
+            // `on_hover` listener that shows/hides the strip via the view.
+            let mut hover_track: Option<String> = None;
             let inner = match row {
                 Row::Message { msg } => {
                     // This view's own filters (shared buffer, per-view display):
@@ -191,9 +195,35 @@ impl Render for LogView {
                     let reply_click = reply_click_for(&render_entity, msg);
                     // The 📌 button only renders for rows the user can moderate and
                     // that carry a real platform message id (not a local echo).
-                    let can_pin = model.can_moderate(msg.platform);
-                    let pin_click = (can_pin && !msg.id.starts_with("echo-"))
+                    let can_moderate = model.can_moderate(msg.platform);
+                    let pin_click = (can_moderate && !msg.id.starts_with("echo-"))
                         .then(|| pin_click_for(&render_entity, msg));
+                    // The left-side mod-button strip. Always mode gives EVERY
+                    // message row the same-width gutter when this view
+                    // moderates anything (rows whose platform isn't moderated
+                    // get all-ghost slots), so a merged feed's messages stay
+                    // horizontally aligned; Hover renders it only on the
+                    // moderatable row under the pointer (tracked on the view
+                    // via the wrapper's `on_hover`, so every frame is laid out
+                    // consistently — a group-hover display switch panicked
+                    // when hover flipped between prepaint and paint).
+                    let mod_platforms = model.mod_platforms();
+                    let strip_shown = !mod_platforms.is_empty()
+                        && match crate::settings::mod_button_mode() {
+                            crate::settings::ModButtonMode::Off => false,
+                            crate::settings::ModButtonMode::Always => true,
+                            crate::settings::ModButtonMode::Hover => {
+                                can_moderate && {
+                                    hover_track = Some(msg.id.clone());
+                                    this.hover_strip_row.as_deref() == Some(msg.id.as_str())
+                                }
+                            }
+                        };
+                    let mod_strip = strip_shown.then(|| render::ModStrip {
+                        click: mod_click_for(&render_entity, msg),
+                        platforms: mod_platforms,
+                        row_moderated: can_moderate,
+                    });
                     // Struck (ban/delete) + cosmetics come from the shared model's
                     // side-tables, not baked onto the immutable message.
                     let struck = model.is_struck(msg);
@@ -215,6 +245,7 @@ impl Render for LogView {
                             seventv_link_click: Some(seventv_link_click.clone()),
                             reply_click: Some(reply_click),
                             pin_click,
+                            mod_strip,
                         },
                     )
                     .into_any_element()
@@ -286,7 +317,7 @@ impl Render for LogView {
             // full width, edge-to-edge under the thumb. `pr` is applied per row
             // (not on the list, where `Auto` sizing would clip rather than
             // reflow).
-            div()
+            let wrapper = div()
                 .w_full()
                 .min_w_0()
                 .pb_1()
@@ -309,8 +340,35 @@ impl Render for LogView {
                             None => row.hover(|s| s.bg(render::row_hover())),
                         })
                         .child(inner),
-                )
-                .into_any_element()
+                );
+            // "On hover" mod-button mode: this row shows/hides its strip by
+            // hover, tracked on the view (`hover_strip_row`) so the next log
+            // render adds/removes the strip — never a same-frame style switch.
+            // Leaving one row and entering another fires leave-then-enter in
+            // hitbox order; the guards keep the pair from clobbering each other.
+            match hover_track {
+                Some(msg_id) => {
+                    let entity = render_entity.clone();
+                    wrapper
+                        .id(("mod-hover", ix))
+                        .on_hover(move |hovered, _window, cx| {
+                            entity.update(cx, |this, cx| {
+                                if *hovered {
+                                    if this.hover_strip_row.as_deref() != Some(msg_id.as_str()) {
+                                        this.hover_strip_row = Some(msg_id.clone());
+                                        this.refresh_log(cx);
+                                    }
+                                } else if this.hover_strip_row.as_deref() == Some(msg_id.as_str())
+                                {
+                                    this.hover_strip_row = None;
+                                    this.refresh_log(cx);
+                                }
+                            });
+                        })
+                        .into_any_element()
+                }
+                None => wrapper.into_any_element(),
+            }
         })
         // `Auto` sizing lays the list out with a bare default style, so it must be
         // told to fill its parent or it collapses to zero height (no rows visible).

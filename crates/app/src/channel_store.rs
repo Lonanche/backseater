@@ -226,6 +226,25 @@ impl ChannelModel {
         }
     }
 
+    /// The platforms of this channel the logged-in user can moderate, in a
+    /// fixed order. The mod-button strip reserves one slot per button
+    /// applicable to *any* of them (ghost slots where a button doesn't apply
+    /// to a row's own platform), so rows of different platforms in a merged
+    /// feed keep their message text horizontally aligned — see
+    /// `render::ModStrip`. The Kick arm needs the channel-presence check:
+    /// `can_moderate(Kick)` is just "logged in", not tied to this tab.
+    pub fn mod_platforms(&self) -> Vec<Platform> {
+        [Platform::Twitch, Platform::Kick]
+            .into_iter()
+            .filter(|p| match p {
+                Platform::Twitch => self.controller.has_twitch(),
+                Platform::Kick => self.controller.has_kick(),
+                _ => false,
+            })
+            .filter(|p| self.can_moderate(*p))
+            .collect()
+    }
+
     /// Whether the logged-in user *owns* `platform`'s channel — a stricter tier
     /// than [`can_moderate`](Self::can_moderate), gating broadcaster-only
     /// actions (`/raid`, `/mod`, `/vip`). Twitch = the USERSTATE broadcaster
