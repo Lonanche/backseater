@@ -821,12 +821,19 @@ impl Controller {
             "followers" => match args.first() {
                 // No minimum follow age — any follower can chat.
                 None => self.twitch_cmd(&cmd, TwitchCmd::Followers(Some(0))),
-                Some(arg) => match bks_core::parse_duration(arg) {
-                    Some(secs) => {
-                        let minutes = u32::try_from(secs.div_ceil(60)).unwrap_or(u32::MAX);
-                        self.twitch_cmd(&cmd, TwitchCmd::Followers(Some(minutes)));
+                // A bare number is minutes (Helix's unit, like twitch.tv's
+                // command — and unlike /timeout's seconds); 0 = any follower.
+                Some(arg) => match arg
+                    .parse::<u32>()
+                    .ok()
+                    .or_else(|| {
+                        bks_core::parse_duration(arg)
+                            .map(|secs| u32::try_from(secs.div_ceil(60)).unwrap_or(u32::MAX))
+                    }) {
+                    Some(minutes) => self.twitch_cmd(&cmd, TwitchCmd::Followers(Some(minutes))),
+                    None => {
+                        self.notice("usage: /followers [duration — 10 = 10m, 1h, 30d; 0 = any follower]")
                     }
-                    None => self.notice("usage: /followers [duration — 10m, 1h, 30d]"),
                 },
             },
             "followersoff" => self.twitch_cmd(&cmd, TwitchCmd::Followers(None)),
