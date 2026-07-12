@@ -19,10 +19,11 @@ use gpui::{
     MouseButton, Pixels, Point, SharedString, Window,
 };
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{h_flex, v_flex, ActiveTheme, Sizable};
+use gpui_component::{h_flex, v_flex, ActiveTheme, Sizable, WindowExt};
 
 use crate::controller::Controller;
 use crate::image_cache::LruImageCache;
@@ -1168,6 +1169,71 @@ impl ChatView {
     /// Handles a row's 📌 button: pins that message on its platform. Twitch pins
     /// by message id (Helix); Kick's endpoint wants the original message object
     /// back, rebuilt from our copy of the row.
+    /// Opens the pin confirmation dialog for message `msg_id`: the message is
+    /// shown as it will appear pinned, and only Pin actually pins it.
+    fn confirm_pin(&self, msg_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(msg) = self.message_by_id(msg_id, cx) else {
+            return;
+        };
+        let entity = cx.entity();
+        let font_size = self.font_size;
+        let id = msg.id.clone();
+        let label = msg.platform.label();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let entity = entity.clone();
+            let id = id.clone();
+            alert
+                .title(format!("Pin to {label} chat?"))
+                .description(pin_dialog_preview(&msg, font_size))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Pin")
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.pin_message(&id, cx));
+                    true
+                })
+        });
+    }
+
+    /// Opens the unpin confirmation dialog for `platform`'s active pin: shows
+    /// the pinned message, and only Unpin actually removes it.
+    fn confirm_unpin(
+        &self,
+        platform: bks_core::Platform,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pin) = self.channel.read(cx).pins.get(&platform) else {
+            return;
+        };
+        let msg = pin.message.clone();
+        let entity = cx.entity();
+        let font_size = self.font_size;
+        let id = msg.id.clone();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let entity = entity.clone();
+            let id = id.clone();
+            alert
+                .title(format!("Unpin from {} chat?", platform.label()))
+                .description(pin_dialog_preview(&msg, font_size))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Unpin")
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    entity.update(cx, |this, _| match platform {
+                        bks_core::Platform::Twitch => this.controller.unpin_twitch(id.clone()),
+                        bks_core::Platform::Kick => this.controller.unpin_kick(),
+                        _ => {}
+                    });
+                    true
+                })
+        });
+    }
+
     fn pin_message(&self, msg_id: &str, cx: &App) {
         let Some(msg) = self.message_by_id(msg_id, cx) else {
             return;
@@ -1494,62 +1560,49 @@ impl ChatView {
 
         // A full-width banner flush to the chat's top edge, floating over the
         // log (the shadow separates it from the rows scrolling underneath).
+        // Two rows: a small "📌 Pinned by X" header with the Unpin/✕ controls
+        // on its right, then the message on its own full-width line — so when
+        // Twitch and Kick pins stack, the messages stay column-aligned no
+        // matter how long each pinner's name is.
         // `occlude` keeps clicks on it from also hitting the row below.
-        let mut banner = h_flex()
-            .occlude()
+        let mut header = h_flex()
             .w_full()
-            .items_start()
+            .items_center()
             .gap_2()
-            .px_2()
-            .py_1()
-            .bg(gpui::rgb(p.event_bg))
-            .border_l_2()
-            .border_color(gpui::rgb(p.event_text))
-            .shadow_md()
             .child(
-                div()
-                    .flex_none()
-                    .text_size(px(self.font_size * 0.75))
-                    .text_color(gpui::rgb(p.event_text))
-                    .child(SharedString::from(format!("📌 {header_label}"))),
-            )
-            .child(
-                // Cap the banner's height so a wall-of-text pin can't shove the
-                // log off screen; the content still wraps inside.
                 div()
                     .flex_1()
                     .min_w_0()
-                    .max_h(px(120.))
-                    .overflow_hidden()
-                    .child(message),
+                    .text_size(px(self.font_size * 0.75))
+                    .text_color(gpui::rgb(p.event_text))
+                    .child(SharedString::from(format!("📌 {header_label}"))),
             );
 
         if self.can_pin(platform, cx) {
-            let unpin_id = msg_id.clone();
-            banner = banner.child(
+            header = header.child(
                 Button::new(SharedString::from(format!("unpin-{platform:?}")))
                     .label("Unpin")
                     .outline()
                     .xsmall()
                     .compact()
-                    .on_click(cx.listener(move |this, _, _, _| match platform {
-                        bks_core::Platform::Twitch => {
-                            this.controller.unpin_twitch(unpin_id.clone())
-                        }
-                        bks_core::Platform::Kick => this.controller.unpin_kick(),
-                        _ => {}
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.confirm_unpin(platform, window, cx);
                     })),
             );
         }
 
-        banner = banner.child(
+        header = header.child(
             div()
                 .id(SharedString::from(format!("dismiss-pin-{platform:?}")))
                 .flex_none()
                 .px_1()
+                .rounded_sm()
                 .cursor_pointer()
                 .text_color(cx.theme().muted_foreground)
-                .hover(|s| s.text_color(cx.theme().foreground))
+                .hover(|s| {
+                    s.bg(render::chrome_hover())
+                        .text_color(cx.theme().foreground)
+                })
                 .child(SharedString::from("✕"))
                 .tooltip(|window, cx| {
                     Tooltip::new("Collapse — the 📌 chip brings it back").build(window, cx)
@@ -1563,7 +1616,28 @@ impl ChatView {
                 ),
         );
 
-        banner.into_any_element()
+        v_flex()
+            .occlude()
+            .w_full()
+            .gap_0p5()
+            .px_2()
+            .py_1()
+            .bg(gpui::rgb(p.event_bg))
+            .border_l_2()
+            .border_color(gpui::rgb(p.event_text))
+            .shadow_md()
+            .child(header)
+            .child(
+                // Cap the banner's height so a wall-of-text pin can't shove the
+                // log off screen; the content still wraps inside.
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .max_h(px(120.))
+                    .overflow_hidden()
+                    .child(message),
+            )
+            .into_any_element()
     }
 
     /// Forgets all resolved cosmetics on the shared channel (7TV-cosmetics toggle
@@ -2824,7 +2898,11 @@ impl ChatView {
                     .text_size(px(font_size))
                     .child(events_list),
             )
-            .vertical_scrollbar(&self.events_list_state)
+            // Mounted only while scrolled off the bottom, like the chat log's —
+            // tail-follow offset changes otherwise keep the bar visible.
+            .when(!self.events_list_state.is_following_tail(), |d| {
+                d.vertical_scrollbar(&self.events_list_state)
+            })
             .into_any_element();
         self.aux_panel("events-panel", "Events", tabs::PanelKind::Events, body, cx)
     }
@@ -3890,11 +3968,46 @@ fn reply_click_for(entity: &Entity<ChatView>, msg: &Message) -> render::ReplyCli
 fn pin_click_for(entity: &Entity<ChatView>, msg: &Message) -> render::PinClick {
     let entity = entity.clone();
     let msg_id = msg.id.clone();
-    std::rc::Rc::new(move |_window: &mut Window, cx: &mut App| {
+    std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
         entity.update(cx, |this, cx| {
-            this.pin_message(&msg_id, cx);
+            this.confirm_pin(&msg_id, window, cx);
         });
     })
+}
+
+/// The message preview inside the pin/unpin confirmation dialog: the message
+/// rendered like a chat line (badges, colored name, emotes inline) in the same
+/// tinted, accent-barred box it will occupy as a banner.
+fn pin_dialog_preview(msg: &Message, font_size: f32) -> gpui::AnyElement {
+    let selection = selectable::Selection::new();
+    selection.begin_frame();
+    let mut ordinal = 0usize;
+    let rendered = render::render_message(
+        msg,
+        render::RowFlags::default(),
+        font_size,
+        &selection,
+        &mut ordinal,
+        render::RowHandlers::default(),
+    );
+    let p = render::palette();
+    div()
+        .w_full()
+        .min_w_0()
+        // Breathing room under the dialog title — the kit packs the description
+        // right against it, while its footer gap is generous, which read as
+        // lopsided.
+        .mt_3()
+        .max_h(px(160.))
+        .overflow_hidden()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .bg(gpui::rgb(p.event_bg))
+        .border_l_2()
+        .border_color(gpui::rgb(p.event_text))
+        .child(rendered)
+        .into_any_element()
 }
 
 #[cfg(test)]

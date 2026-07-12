@@ -392,7 +392,15 @@ impl Render for LogView {
                     // Route the log's emote/badge images through the scoped cache so
                     // the eviction sweep can free off-screen emotes' decoded frames.
                     .child(image_cache(log_image_cache).size_full().child(chat_list))
-                    .vertical_scrollbar(&list_state),
+                    // The scrollbar mounts only while scrolled off the bottom:
+                    // tail-following, every appended message moves the offset,
+                    // which the kit's fade logic counts as scrolling — the bar
+                    // never rested while chat was active. Wheeling up disengages
+                    // tail-follow (a scroll re-render), so the bar appears
+                    // exactly when there's history to navigate.
+                    .when(!list_state.is_following_tail(), |d| {
+                        d.vertical_scrollbar(&list_state)
+                    }),
             )
             // When scrolled up off the bottom, show a "jump to latest" pill.
             .children(self.jump_to_latest(&list_state, cx))

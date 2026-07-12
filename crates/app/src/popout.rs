@@ -45,11 +45,15 @@ pub struct PopoutWindow {
 }
 
 impl Render for PopoutWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The view must render the dialog layer itself for `open_alert_dialog`
+        // (pin/unpin confirmations) to appear in this window.
+        let dialog_layer = Root::render_dialog_layer(window, cx);
         gpui::div()
             .size_full()
             .bg(cx.theme().background)
             .child(self.view.clone())
+            .children(dialog_layer)
     }
 }
 
