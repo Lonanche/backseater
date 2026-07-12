@@ -578,7 +578,17 @@ impl LogView {
                         .text_xs()
                         .font_weight(FontWeight::MEDIUM)
                         .shadow_lg()
-                        .child(SharedString::from("⏸ Chat paused")),
+                        .child(
+                            // The kit-shipped lucide pause icon. gpui's `svg()`
+                            // paints only with a text color set on the svg
+                            // element itself (nothing cascades from the pill).
+                            gpui::svg()
+                                .path("icons/pause.svg")
+                                .size(px(12.))
+                                .flex_none()
+                                .text_color(cx.theme().popover_foreground),
+                        )
+                        .child(SharedString::from("Chat paused")),
                 )
                 .into_any_element(),
         )
