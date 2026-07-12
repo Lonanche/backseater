@@ -771,15 +771,26 @@ fn gift_event_details(ev: &GiftedSubscriptionsEvent) -> EventDetails {
             .clone()
             .unwrap_or_else(|| "An anonymous user".to_string()),
     );
+    let mut compact = match ev.gifted_usernames.as_slice() {
+        [single] => format!("gifted a sub to {single}"),
+        many => format!("gifted {} subs", many.len()),
+    };
+    // The gifter's channel-lifetime gift count rides the same event.
+    if ev.gifter_total > 0 {
+        compact.push_str(&format!(
+            " · {} total",
+            bks_core::format_count(ev.gifter_total)
+        ));
+    }
     match ev.gifted_usernames.as_slice() {
-        [single] => EventDetails {
+        [_] => EventDetails {
             actor,
-            compact: Some(format!("gifted a sub to {single}")),
+            compact: Some(compact),
             ..Default::default()
         },
         many => EventDetails {
             actor,
-            compact: Some(format!("gifted {} subs", many.len())),
+            compact: Some(compact),
             gift_count: Some(many.len() as u32),
             recipients: many.to_vec(),
             ..Default::default()
@@ -1045,6 +1056,31 @@ mod tests {
             gift_event_text(&ev).unwrap(),
             "An anonymous user gifted 1 subscription to a."
         );
+    }
+
+    #[test]
+    fn gift_details_carry_batch_and_total() {
+        let ev = GiftedSubscriptionsEvent {
+            gifter_username: Some("gifter".into()),
+            gifted_usernames: vec!["a".into(), "b".into(), "c".into()],
+            gifter_total: 10,
+        };
+        let details = gift_event_details(&ev);
+        assert_eq!(details.actor.as_deref(), Some("gifter"));
+        assert_eq!(details.compact.as_deref(), Some("gifted 3 subs · 10 total"));
+        assert_eq!(details.gift_count, Some(3));
+        assert_eq!(details.recipients, vec!["a", "b", "c"]);
+
+        let single = GiftedSubscriptionsEvent {
+            gifter_username: None,
+            gifted_usernames: vec!["a".into()],
+            gifter_total: 0,
+        };
+        let details = gift_event_details(&single);
+        assert_eq!(details.actor.as_deref(), Some("An anonymous user"));
+        assert_eq!(details.compact.as_deref(), Some("gifted a sub to a"));
+        assert_eq!(details.gift_count, None);
+        assert!(details.recipients.is_empty());
     }
 
     #[test]

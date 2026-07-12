@@ -255,18 +255,28 @@ fn usernotice_details(un: &tmi::msg::UserNotice<'_>) -> EventDetails {
             recipient: Some(gift.recipient().name().to_string()),
             ..Default::default()
         },
-        Event::SubMysteryGift(gift) => EventDetails {
-            actor,
-            compact: Some(format!(
+        Event::SubMysteryGift(gift) => {
+            let mut compact = format!(
                 "gifted {} {}{}",
                 gift.count(),
                 if gift.count() == 1 { "sub" } else { "subs" },
                 tier_suffix(gift.sub_plan())
-            )),
-            gift_count: Some(gift.count() as u32),
-            gifter: gifter_key(),
-            ..Default::default()
-        },
+            );
+            // The gifter's channel-lifetime gift count rides the same notice.
+            if let Some(total) = gift.sender_total_gifts() {
+                compact.push_str(&format!(
+                    " · {} total",
+                    bks_core::format_count(u64::from(total))
+                ));
+            }
+            EventDetails {
+                actor,
+                compact: Some(compact),
+                gift_count: Some(gift.count() as u32),
+                gifter: gifter_key(),
+                ..Default::default()
+            }
+        }
         Event::AnonSubMysteryGift(gift) => EventDetails {
             actor: Some("An anonymous user".to_string()),
             compact: Some(format!(
@@ -677,7 +687,10 @@ mod tests {
                    :tmi.twitch.tv USERNOTICE #chan";
         let details = usernotice_details(&parse_usernotice(raw));
         assert_eq!(details.actor.as_deref(), Some("Rich"));
-        assert_eq!(details.compact.as_deref(), Some("gifted 50 subs · Tier 1"));
+        assert_eq!(
+            details.compact.as_deref(),
+            Some("gifted 50 subs · Tier 1 · 100 total")
+        );
         assert_eq!(details.gift_count, Some(50));
         assert_eq!(details.gifter.as_deref(), Some("rich"));
     }
