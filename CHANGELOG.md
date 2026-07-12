@@ -62,6 +62,9 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 - `/pin` can pin a message that starts with a number without reading it as a
   duration (start it with `--`).
 - Muted mention terms played the alert sound again after an app restart.
+- In the autocomplete popup, Tab now inserts the highlighted candidate and Up/Down
+  navigate the list; pressing Down with a typed draft (outside history browsing)
+  clears it.
 
 ## v0.2.2
 
