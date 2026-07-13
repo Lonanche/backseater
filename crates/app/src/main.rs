@@ -2436,6 +2436,21 @@ impl BackseaterApp {
                     ))
                     .child(card_divider())
                     .child(setting_row(
+                        "Chat modes at top",
+                        Some(
+                            "Show active restrictions (slow, followers-only, sub-only, \
+                             ...) at the top of the chat panel instead of above the input.",
+                        ),
+                        Switch::new("chat-modes-on-top")
+                            .small()
+                            .checked(self.settings.chat_modes_on_top)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.set_chat_modes_on_top(*checked, cx);
+                            }))
+                            .into_any_element(),
+                    ))
+                    .child(card_divider())
+                    .child(setting_row(
                         "Pause chat on hover",
                         Some(
                             "Hold the chat still while the pointer is over it; it \
@@ -3882,6 +3897,22 @@ impl BackseaterApp {
             return;
         }
         self.settings.show_status_bar = on;
+        self.settings.save();
+        self.settings.apply_visibility_flags();
+        for tab in &self.tabs {
+            tab.view.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
+    }
+
+    /// Toggles whether the chat-mode bar sits at the top of the chat panel or
+    /// above the input. Persists, flips the process-wide flag, and repaints every
+    /// tab (the bar lives outside the cached log, so a plain notify reaches it).
+    fn set_chat_modes_on_top(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.settings.chat_modes_on_top == on {
+            return;
+        }
+        self.settings.chat_modes_on_top = on;
         self.settings.save();
         self.settings.apply_visibility_flags();
         for tab in &self.tabs {

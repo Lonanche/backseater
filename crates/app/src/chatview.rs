@@ -1900,7 +1900,7 @@ impl ChatView {
     /// construction: it renders whatever `ChannelModel::chat_modes` holds, so a
     /// connector that starts emitting `ChatEvent::ChatModes` (Kick later) shows
     /// up here with zero UI changes.
-    fn render_mode_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    fn render_mode_bar(&self, on_top: bool, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let model = self.channel.read(cx);
         if model.chat_modes.is_empty() {
             return None;
@@ -1945,19 +1945,24 @@ impl ChatView {
             return None;
         }
         let chip_text = px(self.font_size * 0.85);
+        let mut bar = h_flex()
+            .w_full()
+            .px_2()
+            .py_1()
+            .gap_3()
+            .flex_wrap()
+            .items_center()
+            // Same chrome tone as the input bar; a hairline separates it from the
+            // log — below the bar when it sits on top, above it when at bottom.
+            .bg(gpui::rgb(render::tab_bar_bg()))
+            .border_color(cx.theme().border);
+        bar = if on_top {
+            bar.border_b_1()
+        } else {
+            bar.border_t_1()
+        };
         Some(
-            h_flex()
-                .w_full()
-                .px_2()
-                .py_1()
-                .gap_3()
-                .flex_wrap()
-                .items_center()
-                // Same chrome tone as the input bar below it; the hairline above
-                // separates it from the log.
-                .bg(gpui::rgb(render::tab_bar_bg()))
-                .border_t_1()
-                .border_color(cx.theme().border)
+            bar
                 .children(groups.into_iter().map(|(platform, chips)| {
                     h_flex()
                         .gap_1p5()
@@ -4094,6 +4099,13 @@ impl ChatView {
                                 .child(self.panel_header("Chat", tabs::PanelKind::Chat, cx))
                                 .child(div().h_1());
                         }
+                        // Chat restrictions at the top of the panel (below the
+                        // header, above the pinned banner that floats over the
+                        // log) when the user opted in; otherwise they sit above
+                        // the input, inside the composer.
+                        if crate::settings::chat_modes_on_top() {
+                            col = col.children(self.render_mode_bar(true, cx));
+                        }
                         col.child(log)
                             .child(self.render_composer(cx))
                             .into_any_element()
@@ -4794,8 +4806,11 @@ impl ChatView {
             .when(self.picker_open, |col| {
                 col.child(self.render_emote_picker(cx))
             })
-            // Active chat restrictions (follower-only, slow, ...), when any.
-            .children(self.render_mode_bar(cx))
+            // Active chat restrictions (follower-only, slow, ...), when any —
+            // unless the user moved them to the top of the chat panel.
+            .when(!crate::settings::chat_modes_on_top(), |col| {
+                col.children(self.render_mode_bar(false, cx))
+            })
             // The "replying to" bar, when a reply is pending, sits just above input.
             .children(self.render_reply_bar(cx))
             .child(

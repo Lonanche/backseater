@@ -201,6 +201,11 @@ pub struct Settings {
     /// chat log. On by default.
     #[serde(default = "default_true")]
     pub show_status_bar: bool,
+    /// Whether the chat-mode bar (slow / followers-only / sub-only / ...) sits at
+    /// the top of the chat panel (below the "Chat" header, above pinned messages)
+    /// instead of just above the input box. Off by default (bottom placement).
+    #[serde(default)]
+    pub chat_modes_on_top: bool,
     /// Whether message timestamps show in the chat log. On by default.
     #[serde(default = "default_true")]
     pub show_timestamps_chat: bool,
@@ -281,6 +286,7 @@ impl Default for Settings {
             show_pinned_twitch: true,
             show_pinned_kick: true,
             show_status_bar: true,
+            chat_modes_on_top: false,
             show_timestamps_chat: true,
             pause_chat_on_hover: false,
             show_timestamps_events: true,
@@ -345,6 +351,7 @@ impl Settings {
         SHOW_PINNED_TWITCH.store(self.show_pinned_twitch, Ordering::Relaxed);
         SHOW_PINNED_KICK.store(self.show_pinned_kick, Ordering::Relaxed);
         SHOW_STATUS_BAR.store(self.show_status_bar, Ordering::Relaxed);
+        CHAT_MODES_ON_TOP.store(self.chat_modes_on_top, Ordering::Relaxed);
         SHOW_TIMESTAMPS_CHAT.store(self.show_timestamps_chat, Ordering::Relaxed);
         SHOW_TIMESTAMPS_EVENTS.store(self.show_timestamps_events, Ordering::Relaxed);
         SHOW_TIMESTAMPS_MENTIONS.store(self.show_timestamps_mentions, Ordering::Relaxed);
@@ -416,6 +423,7 @@ pub fn suppressed_opacity() -> f32 {
 static SHOW_PINNED_TWITCH: AtomicBool = AtomicBool::new(true);
 static SHOW_PINNED_KICK: AtomicBool = AtomicBool::new(true);
 static SHOW_STATUS_BAR: AtomicBool = AtomicBool::new(true);
+static CHAT_MODES_ON_TOP: AtomicBool = AtomicBool::new(false);
 static SHOW_TIMESTAMPS_CHAT: AtomicBool = AtomicBool::new(true);
 static SHOW_TIMESTAMPS_EVENTS: AtomicBool = AtomicBool::new(true);
 static SHOW_TIMESTAMPS_MENTIONS: AtomicBool = AtomicBool::new(true);
@@ -430,6 +438,12 @@ pub fn pause_chat_on_hover() -> bool {
 /// process-wide preference — see [`Settings::apply_visibility_flags`]).
 pub fn show_status_bar() -> bool {
     SHOW_STATUS_BAR.load(Ordering::Relaxed)
+}
+
+/// Whether the chat-mode bar sits at the top of the chat panel instead of just
+/// above the input box (persisted, process-wide).
+pub fn chat_modes_on_top() -> bool {
+    CHAT_MODES_ON_TOP.load(Ordering::Relaxed)
 }
 
 /// Whether message timestamps show in the chat log (persisted, process-wide).
