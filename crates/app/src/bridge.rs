@@ -130,11 +130,18 @@ async fn poll_twitch_live(channel: String, tx: Sink) {
     // per live stretch from GQL so the bar doesn't sit at a bare "LIVE" until
     // the first push (which then takes over).
     let seeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Seeding waits for the poll *after* the one that first saw the channel
+    // live: `poll_live` emits `Live{live:true}` only after this closure returns,
+    // so seeding on the same iteration sends `Viewers` first and the store drops
+    // it as a count for a still-offline platform. Deferring one poll guarantees
+    // the live transition is recorded before the seed lands.
+    let live_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let seed_tx = tx.clone();
     poll_live(tx, bks_core::Platform::Twitch, move || {
         let channel = channel.clone();
         let last_cache = last_cache.clone();
         let seeded = seeded.clone();
+        let live_seen = live_seen.clone();
         let seed_tx = seed_tx.clone();
         async move {
             let s = bks_twitch::fetch_live_status(&channel).await?;
@@ -144,7 +151,7 @@ async fn poll_twitch_live(channel: String, tx: Sink) {
                 // GQL lags IVR at go-live (and a hidden count is None forever),
                 // and forwarding that None would delete a count Hermes already
                 // pushed. A miss just retries on the next poll.
-                if !seeded.load(Ordering::Relaxed) {
+                if live_seen.swap(true, Ordering::Relaxed) && !seeded.load(Ordering::Relaxed) {
                     match bks_twitch::fetch_viewer_count(&channel).await {
                         Ok(Some(count)) => {
                             seeded.store(true, Ordering::Relaxed);
@@ -164,6 +171,7 @@ async fn poll_twitch_live(channel: String, tx: Sink) {
             } else {
                 // Re-seed the next live stretch.
                 seeded.store(false, Ordering::Relaxed);
+                live_seen.store(false, Ordering::Relaxed);
             }
             let last_stream = if s.live {
                 *last_cache.lock().await = None;

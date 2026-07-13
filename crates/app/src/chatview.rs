@@ -1070,10 +1070,20 @@ impl ChatView {
         self.mentions = mentions;
     }
 
-    /// Updates the ignore list used to drop incoming messages. Affects new
-    /// messages only; already-shown rows are left as-is.
-    pub(crate) fn set_ignore(&mut self, ignore: bks_core::IgnoreList) {
+    /// Updates the ignore list. The log filters every row against this at render
+    /// (a match renders as a height-0 row), so a live change re-heights already-
+    /// buffered rows (full ↔ 0) — the virtualized list must re-measure, or gpui
+    /// reuses the stale cached heights and leaves phantom gaps where a row is now
+    /// hidden. The caller still repaints the log afterward.
+    pub(crate) fn set_ignore(&mut self, ignore: bks_core::IgnoreList, cx: &mut Context<Self>) {
         self.ignore = ignore;
+        // Reset unless paused: a paused view must not re-measure (that snaps the
+        // frozen view to the live bottom) — unpause_log resets when it resumes.
+        if self.log_paused {
+            self.paused_needs_reset = true;
+        } else {
+            self.list_state.reset(self.channel.read(cx).len());
+        }
     }
 
     /// Updates the suppress list — matching messages render dimmed instead of
@@ -3709,20 +3719,34 @@ impl ChatView {
                 // A mass-gift summary can reveal its recipients: the ones sent
                 // inline on the announcement (Kick) plus the collapsed
                 // per-recipient rows grouped under it (Twitch). Only collapse
-                // mode hides those rows, so only it lists them here.
+                // mode hides those rows, so only it lists them here. The full
+                // recipient list is only *materialized* when the row is actually
+                // expanded — the collapsed common case only needs to know whether
+                // any recipient exists (a cheap `any`), not clone them all, so a
+                // gift-heavy panel doesn't rescan the whole buffer every frame.
                 let is_summary = ev.details.gift_count.is_some();
-                let mut names = ev.details.recipients.clone();
-                if is_summary && collapse {
-                    names.extend(
-                        model
-                            .events
-                            .iter()
-                            .filter(|e| e.group == Some(seq))
-                            .filter_map(|e| e.details.recipient.clone()),
-                    );
-                }
-                let expandable = is_summary && !names.is_empty();
+                let has_grouped = |group: u64| {
+                    model
+                        .events
+                        .iter()
+                        .any(|e| e.group == Some(group) && e.details.recipient.is_some())
+                };
+                let expandable = is_summary
+                    && (!ev.details.recipients.is_empty() || (collapse && has_grouped(seq)));
                 let expanded = expandable && this.expanded_gifts.contains(&seq);
+                let names = expanded.then(|| {
+                    let mut names = ev.details.recipients.clone();
+                    if collapse {
+                        names.extend(
+                            model
+                                .events
+                                .iter()
+                                .filter(|e| e.group == Some(seq))
+                                .filter_map(|e| e.details.recipient.clone()),
+                        );
+                    }
+                    names
+                });
                 let row = render::render_event_compact(
                     render::PanelEvent {
                         platform: ev.platform,
@@ -3732,7 +3756,7 @@ impl ChatView {
                         details: &ev.details,
                         message: if hide_msgs { None } else { ev.message.as_deref() },
                         expandable,
-                        expanded_names: expanded.then_some(names),
+                        expanded_names: names,
                     },
                     font_size,
                 );

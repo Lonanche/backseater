@@ -1175,10 +1175,10 @@ impl BackseaterApp {
         for tab in &self.tabs {
             let ignore = self.tab_ignore(&tab.config);
             tab.view.update(cx, |view, cx| {
-                view.set_ignore(ignore);
-                // A global-ignore change also affects already-buffered rows'
-                // visibility indirectly (future messages), and per-tab changes
-                // affect rendering now — repaint the log.
+                // A per-tab change hides/reveals already-buffered rows now
+                // (set_ignore re-measures so hidden rows collapse cleanly); a
+                // global-ignore change affects future messages. Repaint either way.
+                view.set_ignore(ignore, cx);
                 view.refresh_log(cx);
             });
         }
@@ -1216,7 +1216,7 @@ impl BackseaterApp {
             let ignore = self.tab_ignore(&tab.config);
             let suppress = self.tab_suppress(&tab.config);
             view.update(cx, |view, cx| {
-                view.set_ignore(ignore);
+                view.set_ignore(ignore, cx);
                 view.set_suppress(suppress);
                 view.refresh_log(cx);
             });
