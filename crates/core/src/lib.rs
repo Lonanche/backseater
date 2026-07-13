@@ -10,6 +10,7 @@ mod mention;
 mod message;
 mod scale;
 mod suppress;
+mod term_rules;
 mod text;
 mod theme;
 mod time;
@@ -24,6 +25,7 @@ pub use message::{
 };
 pub use scale::{preferred_scale, set_preferred_scale};
 pub use suppress::SuppressList;
+pub use term_rules::{absorb_scoped_user_entries, parse_user_entry, user_entry};
 pub use text::{channel_login, encode_url_component, format_count, plural, strip_channel};
 pub use theme::{is_dark_theme, set_dark_theme};
 pub use time::{format_duration, parse_duration, parse_rfc3339, reconnect_delay};

@@ -40,7 +40,8 @@ use bks_platform::EventKind;
 use gpui::prelude::*;
 use gpui::{
     div, img, px, AnyWindowHandle, App, Context, Div, ElementId, Entity, FontWeight, MouseButton,
-    Pixels, Point, ScrollHandle, SharedString, Size, Stateful, Subscription, Task, Window,
+    Pixels, Point, ScrollHandle, SharedString, Size, Stateful, Subscription, Task, WeakEntity,
+    Window,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::combobox::{Combobox, ComboboxEvent, ComboboxState};
@@ -199,17 +200,28 @@ fn settings_input(which: SettingsInput, window: &mut Window, cx: &mut App) -> En
         SettingsInput::Kick => "Kick channel (optional)",
         SettingsInput::YouTube => "YouTube handle / URL (optional)",
         SettingsInput::Mention => "Add a term (e.g. mods)",
-        SettingsInput::Ignore => "Word, phrase, or re:<regex>",
-        SettingsInput::Suppress => "Word, phrase, or re:<regex>",
+        SettingsInput::Ignore | SettingsInput::Suppress => term_placeholder(TermEntryKind::Text),
         SettingsInput::TabMention => "Add a term for this tab",
-        SettingsInput::TabIgnore => "Word, phrase, or re:<regex>",
-        SettingsInput::TabSuppress => "Word, phrase, or re:<regex>",
+        SettingsInput::TabIgnore | SettingsInput::TabSuppress => {
+            term_placeholder(TermEntryKind::Text)
+        }
         SettingsInput::MentionsTabName => "Mentions",
         SettingsInput::ModName => "Button name (the tooltip)",
         SettingsInput::ModIcon => "Icon — pick below or type text/emoji",
         SettingsInput::ModCommand => "/timeout 1h reason",
     };
     cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
+}
+
+/// The ignore/suppress input placeholder for an add-entry mode. The static
+/// table above seeds the Text one on creation; mode-segment clicks and the
+/// settings-window rebind keep it pointed at the current mode.
+fn term_placeholder(kind: TermEntryKind) -> &'static str {
+    match kind {
+        TermEntryKind::Text => "Word or phrase (e.g. buy now)",
+        TermEntryKind::Regex => "Regular expression (e.g. (twitch\\.)?facepunch\\.com)",
+        TermEntryKind::User => "Username (e.g. StreamElements)",
+    }
 }
 
 /// The app-settings categories, shown as a sidebar of tabs in the settings panel.
@@ -393,6 +405,17 @@ enum TermScope {
     Tab(usize),
 }
 
+/// What an ignore/suppress editor's Add button composes from the input: the
+/// text verbatim, a `re:` regex, or a `user:` rule (with the platform picked in
+/// the selector). Mentions editors are always plain text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TermEntryKind {
+    #[default]
+    Text,
+    Regex,
+    User,
+}
+
 /// One editable term list: a kind (mentions/ignore) at a scope (global/per-tab).
 /// The per-tab lists are unioned with the global ones — see `tab_mentions` /
 /// `tab_ignore`.
@@ -441,34 +464,48 @@ impl TermList {
         }
     }
 
+    /// The add-mode slot this editor uses (see `BackseaterApp::term_add_modes`):
+    /// one per widget — the global and per-tab editors each share one input
+    /// entity, so their mode is shared the same way. Mentions editors have no
+    /// mode row and never read theirs.
+    fn mode_key(self) -> &'static str {
+        match (self.kind, self.scope) {
+            (TermKind::Ignore, TermScope::Global) => "ignore",
+            (TermKind::Suppress, TermScope::Global) => "suppress",
+            (TermKind::Ignore, TermScope::Tab(_)) => "ignore-tab",
+            (TermKind::Suppress, TermScope::Tab(_)) => "suppress-tab",
+            (TermKind::Mentions, _) => "mentions",
+        }
+    }
+
     fn description(self) -> &'static str {
         match (self.kind, self.scope) {
             (TermKind::Mentions, TermScope::Global) => {
                 "Highlight messages containing these words (your account names always count)."
             }
             (TermKind::Ignore, TermScope::Global) => {
-                "Hide messages containing these (case-insensitive). A plain \
-                 entry matches as a substring — e.g. twitch.facepunch.com \
-                 hides every message with that link. Prefix with re: for a \
-                 regex — e.g. re:(twitch\\.)?facepunch\\.com or re:drops?"
+                "Hide matching messages. Text matches as a case-insensitive \
+                 substring — e.g. twitch.facepunch.com hides every message with \
+                 that link; Regex takes a regular expression; User hides \
+                 everything a chatter sends (on any platforms you pick, or all \
+                 — you can also toggle this from their usercard)."
             }
             (TermKind::Suppress, TermScope::Global) => {
-                "Dim messages containing these instead of hiding them — the message \
-                 stays in chat at very low opacity so you can skip it but still read \
-                 it if you want. Same matching as ignore (substring, or re: for a \
-                 regex). If a term is in both lists, ignore wins."
+                "Dim matching messages instead of hiding them — the message \
+                 stays in chat at very low opacity so you can skip it but still \
+                 read it if you want. Same matching as ignore (Text, Regex, or \
+                 User entries). If a term is in both lists, ignore wins."
             }
             (TermKind::Mentions, TermScope::Tab(_)) => {
                 "Extra highlight terms for this tab only, added to your global mentions."
             }
             (TermKind::Ignore, TermScope::Tab(_)) => {
-                "Hide messages in this tab only (added to your global ignore). The \
-                 message still shows in other tabs on the same channel. re: prefix \
-                 for a regex."
+                "Hide messages in this tab only (added to your global ignore). \
+                 The message still shows in other tabs on the same channel."
             }
             (TermKind::Suppress, TermScope::Tab(_)) => {
-                "Dim (but keep visible) messages in this tab only, added to your \
-                 global suppress. re: prefix for a regex."
+                "Dim (but keep visible) messages in this tab only, added to \
+                 your global suppress."
             }
         }
     }
@@ -620,6 +657,10 @@ pub(crate) struct BackseaterApp {
     /// and never persisted (on restart every channel reopens in the main strip).
     /// Entries are removed when the user closes a window (observed release).
     popouts: Vec<AnyWindowHandle>,
+    /// The live popped-out chat views by tab id: popouts aren't in [`tabs`](
+    /// Self::tabs), so the filter refresh loops push to them separately (dead
+    /// weak handles are pruned on each refresh).
+    popout_views: Vec<(u64, WeakEntity<ChatView>)>,
     /// The popped-out global Mentions window, if open (only one at a time —
     /// re-triggering focuses it). Cleared when the user closes it.
     mentions_window: Option<AnyWindowHandle>,
@@ -628,6 +669,13 @@ pub(crate) struct BackseaterApp {
     /// The custom-mod-button editor's platform choice (`None` = both platforms),
     /// applied to the next added button.
     mod_button_platform: Option<bks_core::Platform>,
+    /// Each ignore/suppress editor's add-entry mode (Text/Regex/User + the
+    /// User platform multi-selection, empty = all platforms), keyed per editor
+    /// *widget* ([`TermList::mode_key`]) — the tab editors share one input
+    /// across tabs, so the mode follows the widget too and can never disagree
+    /// with its placeholder. Session-only; absent = plain Text.
+    term_add_modes:
+        std::collections::HashMap<&'static str, (TermEntryKind, Vec<bks_core::Platform>)>,
     /// The list index of the mod button loaded into the editor by its ✎ (the
     /// row stays in place — highlighted — until Save replaces it in its slot;
     /// Cancel or closing the settings window leaves it untouched).
@@ -883,9 +931,11 @@ impl BackseaterApp {
             settings_window: None,
             main_window: window.window_handle(),
             popouts: Vec::new(),
+            popout_views: Vec::new(),
             mentions_window: None,
             settings_category: SettingsCategory::Account,
             mod_button_platform: None,
+            term_add_modes: std::collections::HashMap::new(),
             editing_mod_button: None,
             tab_settings_category: TabSettingsCategory::Channels,
             _login_watch,
@@ -913,6 +963,16 @@ impl BackseaterApp {
         // The rebuilt inputs are empty, so a mod-button edit left open when the
         // window last closed is implicitly cancelled with them.
         self.editing_mod_button = None;
+        // The fresh ignore/suppress inputs carry the Text placeholder, but the
+        // editors' add modes persist for the session — re-point each one.
+        for list in [
+            TermList::global(TermKind::Ignore),
+            TermList::global(TermKind::Suppress),
+            TermList::tab(TermKind::Ignore, 0),
+            TermList::tab(TermKind::Suppress, 0),
+        ] {
+            self.sync_term_placeholder(list, window, cx);
+        }
         if let Some(name) = self.settings.mentions_tab_name.clone() {
             self.settings_inputs
                 .mentions_tab_name
@@ -1109,6 +1169,7 @@ impl BackseaterApp {
                 view.refresh_log(cx);
             });
         }
+        self.refresh_popout_filters(cx);
     }
 
     /// Pushes each tab its effective suppress list (global + that tab's own) and
@@ -1123,6 +1184,36 @@ impl BackseaterApp {
                 view.refresh_log(cx);
             });
         }
+        self.refresh_popout_filters(cx);
+    }
+
+    /// Re-pushes both filter lists to popped-out views, which aren't in
+    /// [`tabs`](Self::tabs) and would otherwise keep the lists they were opened
+    /// with (editing terms in settings never reached them). A popout whose tab
+    /// has since closed keeps its last lists.
+    fn refresh_popout_filters(&mut self, cx: &mut Context<Self>) {
+        self.popout_views.retain(|(_, weak)| weak.upgrade().is_some());
+        for (tab_id, weak) in &self.popout_views {
+            let (Some(view), Some(tab)) = (
+                weak.upgrade(),
+                self.tabs.iter().find(|t| t.id == *tab_id),
+            ) else {
+                continue;
+            };
+            let ignore = self.tab_ignore(&tab.config);
+            let suppress = self.tab_suppress(&tab.config);
+            view.update(cx, |view, cx| {
+                view.set_ignore(ignore);
+                view.set_suppress(suppress);
+                view.refresh_log(cx);
+            });
+        }
+    }
+
+    /// Tracks a popped-out view so [`refresh_popout_filters`](
+    /// Self::refresh_popout_filters) can reach it (popouts aren't in `tabs`).
+    fn track_popout_view(&mut self, tab_id: u64, view: &Entity<ChatView>) {
+        self.popout_views.push((tab_id, view.downgrade()));
     }
 
     fn persist(&self) {
@@ -1349,6 +1440,7 @@ impl BackseaterApp {
     /// The deferred half of [`pop_out_tab`], run from a plain `App` context (no
     /// entity lease, no window borrowed).
     fn open_popout(app: Entity<Self>, params: popout::PopoutParams, cx: &mut App) {
+        let tab_id = params.tab_id;
         // Center over the main window, on its display (the display id must travel
         // with the bounds — see `child_window::open`).
         let (parent, display) = child_window::parent_bounds(app.read(cx).main_window, cx);
@@ -1357,6 +1449,8 @@ impl BackseaterApp {
             return;
         };
         app.update(cx, |this, cx| {
+            let view = content.read(cx).view().clone();
+            this.track_popout_view(tab_id, &view);
             this.popouts.push(handle);
             // Drop the handle when the user closes the window (OS ✕) so the list
             // doesn't accumulate stale handles across a session.
@@ -3233,6 +3327,47 @@ impl BackseaterApp {
         }
         chips.extend(self.terms(list).clone().into_iter().map(|term| {
             let remove = term.clone();
+            // A `user:` entry renders as a labeled user chip — a mono user
+            // glyph, the name, and the scope as the platform's logo (mono
+            // globe = all platforms) — instead of the raw grammar string;
+            // anything else shows verbatim.
+            let body: gpui::AnyElement = match bks_core::parse_user_entry(&term) {
+                Some((platform, name)) => {
+                    let scope: gpui::AnyElement = match platform {
+                        Some(p) => match p.icon_url() {
+                            Some(url) => {
+                                let (w, h) = p.icon_size(12.0);
+                                img(url).w(px(w)).h(px(h)).flex_none().into_any_element()
+                            }
+                            None => div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(SharedString::from(p.label()))
+                                .into_any_element(),
+                        },
+                        None => gpui::svg()
+                            .path("icons/globe.svg")
+                            .size(px(12.))
+                            .flex_none()
+                            .text_color(cx.theme().muted_foreground)
+                            .into_any_element(),
+                    };
+                    h_flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            gpui::svg()
+                                .path("icons/user.svg")
+                                .size(px(12.))
+                                .flex_none()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .child(SharedString::from(name.to_string()))
+                        .child(scope)
+                        .into_any_element()
+                }
+                None => SharedString::from(term.clone()).into_any_element(),
+            };
             h_flex()
                 .items_center()
                 .gap_1()
@@ -3240,7 +3375,7 @@ impl BackseaterApp {
                 .py_1()
                 .rounded_md()
                 .bg(cx.theme().secondary)
-                .child(SharedString::from(term.clone()))
+                .child(body)
                 .when(is_mentions, |chip| {
                     chip.child(self.term_bell(&list.id_stem(), &term, cx))
                 })
@@ -3290,6 +3425,7 @@ impl BackseaterApp {
             .when(!chips.is_empty(), |s| {
                 s.child(h_flex().flex_wrap().gap_2().children(chips))
             })
+            .when(!is_mentions, |s| s.child(self.term_add_mode_row(list, cx)))
             .child(
                 // `flex_wrap` + a minimum input width: when the panel is narrow
                 // the Add button wraps below instead of squeezing the input away.
@@ -3314,6 +3450,138 @@ impl BackseaterApp {
                     ),
             )
             .into_any_element()
+    }
+
+    /// The add-entry mode selector shown above an ignore/suppress editor's
+    /// input: Text / Regex / User segments, plus a platform scope row while
+    /// User is picked. What's selected here decides how [`add_term`](
+    /// Self::add_term) composes the typed value into a list entry (typing the
+    /// raw `re:`/`user:` grammar in Text mode still works). The platform row is
+    /// **multi-select** — no platform picked means all platforms; picking two
+    /// (say Twitch + Kick) adds one `user:` entry per platform on Add.
+    fn term_add_mode_row(&self, list: TermList, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let key = list.mode_key();
+        let (add_kind, add_platforms) = self.term_add_mode(list);
+
+        // Segment styling shared by both rows (same look as the mod-button
+        // editor's segments, sized down to fit the term editors).
+        let seg_style = |seg: Stateful<Div>, selected: bool, cx: &mut Context<Self>| {
+            seg.px_2()
+                .py_0p5()
+                .rounded_md()
+                .cursor_pointer()
+                .text_xs()
+                .when(selected, |s| {
+                    s.bg(cx.theme().secondary).font_weight(FontWeight::MEDIUM)
+                })
+                .when(!selected, |s| s.text_color(cx.theme().muted_foreground))
+                .hover(|s| s.bg(cx.theme().secondary))
+        };
+        let kind_seg = |kind: TermEntryKind, label: &'static str, cx: &mut Context<Self>| {
+            seg_style(
+                div().id(SharedString::from(format!("term-kind-{key}-{label}"))),
+                add_kind == kind,
+                cx,
+            )
+            .child(SharedString::from(label))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.term_add_modes.entry(key).or_default().0 = kind;
+                    // The placeholder always narrates the picked mode.
+                    this.sync_term_placeholder(list, window, cx);
+                    cx.notify();
+                }),
+            )
+        };
+        // "All platforms": selected when nothing specific is picked; clicking it
+        // clears the selection.
+        let all_seg = {
+            seg_style(
+                div().id(SharedString::from(format!("term-plat-{key}-all"))),
+                add_platforms.is_empty(),
+                cx,
+            )
+            .child(SharedString::from("All platforms"))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.term_add_modes.entry(key).or_default().1.clear();
+                    cx.notify();
+                }),
+            )
+        };
+        let plat_seg = |platform: bks_core::Platform, label: &'static str, cx: &mut Context<Self>| {
+            seg_style(
+                div().id(SharedString::from(format!("term-plat-{key}-{label}"))),
+                add_platforms.contains(&platform),
+                cx,
+            )
+            .child(SharedString::from(label))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    let picked = &mut this.term_add_modes.entry(key).or_default().1;
+                    // Toggle this platform in/out; empty falls back to "all".
+                    if let Some(pos) = picked.iter().position(|p| *p == platform) {
+                        picked.remove(pos);
+                    } else {
+                        picked.push(platform);
+                    }
+                    cx.notify();
+                }),
+            )
+        };
+
+        h_flex()
+            .w_full()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(
+                h_flex()
+                    .gap_1()
+                    .p_0p5()
+                    .rounded_lg()
+                    .bg(cx.theme().muted)
+                    .child(kind_seg(TermEntryKind::Text, "Text", cx))
+                    .child(kind_seg(TermEntryKind::Regex, "Regex", cx))
+                    .child(kind_seg(TermEntryKind::User, "User", cx)),
+            )
+            .when(add_kind == TermEntryKind::User, |row| {
+                row.child(
+                    h_flex()
+                        .gap_1()
+                        .p_0p5()
+                        .rounded_lg()
+                        .bg(cx.theme().muted)
+                        .child(all_seg)
+                        .child(plat_seg(bks_core::Platform::Twitch, "Twitch", cx))
+                        .child(plat_seg(bks_core::Platform::Kick, "Kick", cx))
+                        .child(plat_seg(bks_core::Platform::YouTube, "YouTube", cx)),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The add-entry mode of one term editor (see [`term_add_mode_row`](
+    /// Self::term_add_mode_row)); plain Text + all platforms until changed.
+    fn term_add_mode(&self, list: TermList) -> (TermEntryKind, Vec<bks_core::Platform>) {
+        self.term_add_modes
+            .get(list.mode_key())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Points the editor's input placeholder at its current add mode — called
+    /// on every mode-segment click and when the settings inputs are rebuilt
+    /// (the fresh input starts with the Text placeholder, but the mode
+    /// persists for the session).
+    fn sync_term_placeholder(&self, list: TermList, window: &mut Window, cx: &mut Context<Self>) {
+        let (kind, _) = self.term_add_mode(list);
+        self.term_input(list)
+            .clone()
+            .update(cx, |s, cx| s.set_placeholder(term_placeholder(kind), window, cx));
     }
 
     fn terms(&self, list: TermList) -> &Vec<String> {
@@ -3367,23 +3635,62 @@ impl BackseaterApp {
 
     /// Adds the term currently in the list's input (if new), clears the input,
     /// persists, and refreshes matching. Mention terms drop a leading `@`;
-    /// ignore terms are stored verbatim (so a `re:` prefix is kept). Both
-    /// de-duplicate case-insensitively.
+    /// ignore/suppress terms are composed per the editor's add-entry mode
+    /// (Text = verbatim, so a typed `re:`/`user:` prefix is kept; Regex/User
+    /// wrap the value in the grammar). In User mode a multi-platform selection
+    /// adds one `user:` entry per picked platform. All de-duplicate
+    /// case-insensitively; the input is cleared only if something was added.
     fn add_term(&mut self, list: TermList, window: &mut Window, cx: &mut Context<Self>) {
         let input = self.term_input(list).clone();
         let mut term = input.read(cx).value().trim().to_string();
         if list.kind == TermKind::Mentions {
             term = term.trim_start_matches('@').to_string();
         }
-        if term.is_empty()
-            || self
-                .terms(list)
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case(&term))
-        {
+        if term.is_empty() {
             return;
         }
-        self.terms_mut(list).push(term);
+        // One or (User mode, multiple platforms picked) more entries to add.
+        let entries: Vec<String> = if list.kind == TermKind::Mentions {
+            vec![term]
+        } else {
+            let (kind, platforms) = self.term_add_mode(list);
+            match kind {
+                TermEntryKind::Text => vec![term],
+                TermEntryKind::Regex if term.starts_with("re:") => vec![term],
+                TermEntryKind::Regex => vec![format!("re:{term}")],
+                // Empty selection = all platforms (one unscoped entry).
+                TermEntryKind::User if platforms.is_empty() => {
+                    vec![bks_core::user_entry(None, &term)]
+                }
+                TermEntryKind::User => platforms
+                    .iter()
+                    .map(|p| bks_core::user_entry(Some(*p), &term))
+                    .collect(),
+            }
+        };
+        let mut added = false;
+        for entry in entries {
+            // An unscoped `user:name` makes any `user:<platform>/name` in the
+            // same list redundant — drop those so "ignore everywhere" collapses
+            // to one chip instead of piling up beside the specific ones.
+            if let Some((None, name)) = bks_core::parse_user_entry(&entry) {
+                let name = name.to_string();
+                if bks_core::absorb_scoped_user_entries(self.terms_mut(list), &name) {
+                    added = true;
+                }
+            }
+            if !self
+                .terms(list)
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(&entry))
+            {
+                self.terms_mut(list).push(entry);
+                added = true;
+            }
+        }
+        if !added {
+            return;
+        }
         input.update(cx, |s, cx| s.set_value("", window, cx));
         self.refresh_terms(list, cx);
         cx.notify();

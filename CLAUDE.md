@@ -305,7 +305,25 @@ platform = implement one trait + one message builder, with zero UI changes**.
   "Turn off" button (sets the setting to Off) and an ✕ that dismisses just the notice
   (`streamer_banner_dismissed`, session-only, reset on each activation).
 - **Highlights + ignores** (Highlights settings category): per-user/word highlight terms and
-  ignore terms (word, phrase, or `re:<regex>`), global and per-tab; a **mentions panel** shows
+  ignore/suppress terms (word, phrase, `re:<regex>`, or `user:[platform/]<name>` to match a whole
+  user — `user:StreamElements` on every platform, `user:kick/KickBot` on one; exact
+  case-insensitive login/display-name match, shared grammar in `core/src/term_rules.rs` behind
+  both `IgnoreList` and `SuppressList`), global and per-tab. Nobody has to type the grammar:
+  the ignore/suppress editors have a **Text / Regex / User add-mode selector** (User adds a
+  **multi-select** platform-scope row — pick any combination, empty = all; Add writes one
+  `user:` entry per picked platform; `main.rs::term_add_mode_row`, session-only per-widget
+  state `term_add_modes` keyed by `TermList::mode_key`), the input **placeholder follows the
+  mode** (`term_placeholder`, re-synced on settings rebind), and `user:` entries render as
+  **mono-glyph chips** (lucide `user.svg` + the platform's logo, or a mono `globe.svg` for
+  all-platforms). **Redundancy collapses**: adding an unscoped `user:name` **absorbs** the
+  now-redundant `user:<platform>/name` siblings from the same list in `add_term`
+  (`bks_core::absorb_scoped_user_entries`); picking every platform individually does NOT
+  auto-collapse (only an explicit all-platforms add does). Term edits re-push the compiled
+  lists to popped-out views too (`refresh_popout_filters` + `popout_views: Vec<(tab_id,
+  WeakEntity)>`, tracked via `track_popout_view`; popouts previously kept their creation-time
+  lists forever). (A usercard ignore/suppress chip panel was prototyped and removed — the
+  chips conflated "what's filtering this user" with "which scope am I editing"; manage users
+  from the Highlights editor.) A **mentions panel** shows
   messages that mention the user (per-tab or all-tabs feed with "#channel" tags, click → jump to
   the source tab).
 - **Pause chat on hover** (Appearance → Chat, `Settings.pause_chat_on_hover`, default off): while

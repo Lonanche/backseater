@@ -44,6 +44,14 @@ pub struct PopoutWindow {
     view: Entity<ChatView>,
 }
 
+impl PopoutWindow {
+    /// The popped-out view, so the app can track it for filter refreshes
+    /// (`refresh_popout_filters`).
+    pub fn view(&self) -> &Entity<ChatView> {
+        &self.view
+    }
+}
+
 impl Render for PopoutWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Un-stick hover state if the pointer left the window (see stale_hover.rs).

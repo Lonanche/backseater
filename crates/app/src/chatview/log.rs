@@ -184,7 +184,7 @@ impl Render for LogView {
                     // an ignored message renders as an empty (height-0) row so the
                     // list stays index-aligned with the shared model; mention tint
                     // is this view's terms.
-                    if this.ignore.matches(&msg.raw_text) {
+                    if this.ignore.matches_message(msg) {
                         return div().into_any_element();
                     }
                     let mentioned = this.mentions.matches(&msg.raw_text);
@@ -243,7 +243,7 @@ impl Render for LogView {
                             mentioned,
                             external_highlight: true,
                             hide_timestamp: !crate::settings::show_timestamps_chat(),
-                            suppressed: this.suppress.matches(&msg.raw_text),
+                            suppressed: this.suppress.matches_message(msg),
                         },
                         font_size,
                         &this.selection,

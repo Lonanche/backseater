@@ -532,7 +532,7 @@ impl ChannelModel {
                 // buffer (so it's gone from every view). Per-tab ignore is separate
                 // and hides at render (the message stays for other tabs). A message
                 // ignored globally can't be un-ignored per-tab, which is intended.
-                if crate::settings::global_ignored(&msg.raw_text) {
+                if crate::settings::global_ignored(&msg) {
                     return;
                 }
                 // A channel-point reward message (Twitch `custom-reward-id`) is

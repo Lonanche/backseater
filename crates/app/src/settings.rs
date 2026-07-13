@@ -459,13 +459,14 @@ pub fn set_global_ignore(ignore: bks_core::IgnoreList) {
     *GLOBAL_IGNORE.write().unwrap() = Some(ignore);
 }
 
-/// Whether `text` matches the global ignore list. Cheap when nothing is ignored.
-pub fn global_ignored(text: &str) -> bool {
+/// Whether the message matches the global ignore list (by text or author).
+/// Cheap when nothing is ignored.
+pub fn global_ignored(msg: &bks_core::Message) -> bool {
     GLOBAL_IGNORE
         .read()
         .unwrap()
         .as_ref()
-        .is_some_and(|i| i.matches(text))
+        .is_some_and(|i| i.matches_message(msg))
 }
 
 /// Whether the pinned-message banner is enabled for `platform` (a persisted,
