@@ -3,57 +3,7 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
-## v0.4.0-beta.3
-
-### Features
-
-- @mentions in chat are clickable: clicking `@name` in any message opens that
-  user's usercard on the message's platform, whether or not they've chatted —
-  someone we've seen gets a fully filled card right away, anyone else gets a
-  card whose account stats load in (or report that no such user exists).
-- Pause chat on hover (Settings → Appearance, off by default): the log holds
-  still while your pointer is over it — a "Chat paused" pill shows — and jumps
-  to the newest messages when you move away. A log you scrolled up yourself
-  never pauses or jumps.
-- A suppress tier next to ignore (Settings → Highlights): messages matching a
-  suppress term stay in chat but render at a configurable low opacity, so
-  they're easy to skip while still readable.
-- Channel-point redemptions that include a message now show that message under
-  the "X redeemed …" notification, with badges and emotes intact.
-- Custom mod buttons can be added to the usercard's moderation panel
-  (user-targeting commands only), scoped per platform.
-- Message timestamps can be hidden independently for the chat log, events
-  panel, and mentions panel (Settings → Appearance).
-- Tabs redesigned as compact chips: the active tab gets an accent tint and
-  underline, inactive ones a recessed fill, and closing a tab moved into its
-  right-click menu so it can't be hit by accident.
-- Command aliases (`/untimeout`, `/viewers`, `/user`, …) are listed as their
-  own rows in the `/` autocomplete popup so they're discoverable.
-
-### Fixes
-
-- Slash commands taking a user or channel accept a leading `@` (`/unban @name`,
-  `/ban`, `/timeout`, `/warn`, `/shoutout`, `/raid`, …) instead of failing to
-  find the account.
-- A Kick-only tab defaults its send target to Kick, and the send-target toggle
-  only appears when the tab has both a Twitch and a Kick channel.
-- Hover effects and tooltips no longer stick around when the mouse leaves the
-  window.
-- The tab tooltip's uptime/last-seen rolls into days at 24h, so 46h reads
-  "1d22h" instead.
-
-## v0.4.0-beta.2
-
-### Fixes
-
-- Kick mod actions (usercard ban/timeout panel, the mod-button strip, mod-only
-  command autocomplete) now show only when you actually moderate the Kick
-  channel, checked automatically at connect and login (the broadcaster always
-  counts) and refreshed from your own messages' badges — previously any Kick
-  login showed them everywhere. No mod on either platform = no button-strip
-  space reserved at all.
-
-## v0.4.0-beta.1
+## v0.4.0
 
 ### Features
 
@@ -69,15 +19,52 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
   delete, warn, pin, monitor, restrict, and four timeout styles plus three warn
   styles for telling multiple buttons of the same kind apart) — or type any
   text/emoji as the button face.
+- Custom mod buttons can also be added to the usercard's moderation panel
+  (user-targeting commands only), scoped per platform.
+- @mentions in chat are clickable: clicking `@name` in any message opens that
+  user's usercard on the message's platform, whether or not they've chatted —
+  someone we've seen gets a fully filled card right away, anyone else gets a
+  card whose account stats load in (or report that no such user exists).
+- Pause chat on hover (Settings → Appearance, off by default): the log holds
+  still while your pointer is over it — a "Chat paused" pill shows — and jumps
+  to the newest messages when you move away. A log you scrolled up yourself
+  never pauses or jumps.
+- A suppress tier next to ignore (Settings → Highlights): messages matching a
+  suppress term stay in chat but render at a configurable low opacity, so
+  they're easy to skip while still readable.
+- Per-user ignore and suppress: a `user:[platform/]name` term filters a whole
+  user (optionally on one platform), with a Text / Regex / User add-mode
+  selector in the editor so you don't have to type the syntax.
+- The mentions panel jumps to a clicked mention's message in the chat log and
+  briefly flashes it; if it has aged out of the buffer, a transient note says so.
+- Channel-point redemptions that include a message now show that message under
+  the "X redeemed …" notification, with badges and emotes intact.
 - Deleting single messages on Kick works again, now through Kick's new official
   API (`/delete` or a delete mod button). Log out and back in on Kick to grant
   the new permission it needs.
 - `/timeout` accepts an optional reason after the duration, on both platforms.
+- Command aliases (`/untimeout`, `/viewers`, `/user`, …) are listed as their
+  own rows in the `/` autocomplete popup so they're discoverable.
+- Message timestamps can be hidden independently for the chat log, events
+  panel, and mentions panel (Settings → Appearance).
+- The chat-mode bar can be moved to the top of the chat panel instead of above
+  the message box (Settings → Appearance).
+- Tabs redesigned as compact chips: the active tab gets an accent tint and
+  underline, inactive ones a recessed fill, and closing a tab moved into its
+  right-click menu so it can't be hit by accident.
+- The main window's and usercard window's position and size are remembered and
+  restored on the next open (when the same display is still connected).
 - The pin banner, collapsed-pin chip, and hover pin button use a proper pin
   icon instead of the 📌 emoji.
 
 ### Fixes
 
+- Kick mod actions (usercard ban/timeout panel, the mod-button strip, mod-only
+  command autocomplete) now show only when you actually moderate the Kick
+  channel, checked automatically at connect and login (the broadcaster always
+  counts) and refreshed from your own messages' badges — previously any Kick
+  login showed them everywhere. No mod on either platform = no button-strip
+  space reserved at all.
 - Kick pin/unpin is disabled with a clear notice instead of failing with an
   authentication error — Kick's API doesn't offer pinning to third-party apps
   yet (the delete fix above came from Kick adding exactly such an endpoint, so
@@ -86,6 +73,21 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
   `/warn` on a Kick message) now gray out instead of failing when clicked.
 - Text/emoji mod-button faces are no longer struck through on rows of banned
   users.
+- Slash commands taking a user or channel accept a leading `@` (`/unban @name`,
+  `/ban`, `/timeout`, `/warn`, `/shoutout`, `/raid`, …) instead of failing to
+  find the account.
+- A Kick-only tab defaults its send target to Kick, and the send-target toggle
+  only appears when the tab has both a Twitch and a Kick channel.
+- The live viewer count now appears as soon as a stream goes live, instead of
+  sometimes staying blank until the first periodic update.
+- Adding an ignore term now cleanly collapses the matching messages already on
+  screen, instead of leaving blank gaps where they were.
+- The selected theme in Settings → Themes is clearly distinguishable in dark
+  mode (accent tint, left accent bar, and a more visible swatch ring).
+- Hover effects and tooltips no longer stick around when the mouse leaves the
+  window.
+- The tab tooltip's uptime/last-seen rolls into days at 24h, so 46h reads
+  "1d22h" instead.
 
 ## v0.3.0
 
