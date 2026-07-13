@@ -55,6 +55,11 @@ const EMOTE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs
 const VIEWER_ANIM_DURATION: std::time::Duration = std::time::Duration::from_millis(900);
 const VIEWER_ANIM_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// Repaint cadence while a jumped-to row's flash fades (~30fps for a smooth
+/// fade), and how long the aged-out "no longer in history" note lingers.
+const FLASH_TICK: std::time::Duration = std::time::Duration::from_millis(33);
+const JUMP_NOTE_DURATION: std::time::Duration = std::time::Duration::from_millis(4000);
+
 /// One platform's in-flight viewer-count animation: the shown value eases from
 /// `from` toward `to` over [`VIEWER_ANIM_DURATION`]. Retargeting mid-flight
 /// restarts from the currently *shown* value, so a burst of updates stays smooth.
@@ -189,6 +194,34 @@ pub(crate) struct ActivePin {
 impl ActivePin {
     pub(crate) fn expired(&self) -> bool {
         self.ends_at.is_some_and(|t| t <= chrono::Utc::now())
+    }
+}
+
+/// A jumped-to message (from a clicked mention) briefly flashed so the eye can
+/// find it after the log scrolls to reveal it. Keyed by the message's identity
+/// (`platform` + `id`) so the log render can tint exactly that one row, with the
+/// tint easing to transparent over [`FLASH_DURATION`] from `started_at`.
+#[derive(Clone)]
+pub(crate) struct FlashTarget {
+    pub(crate) platform: bks_core::Platform,
+    pub(crate) msg_id: String,
+    pub(crate) started_at: std::time::Instant,
+}
+
+/// How long the jumped-to row's flash tint takes to fade out.
+pub(crate) const FLASH_DURATION: std::time::Duration = std::time::Duration::from_millis(2500);
+
+impl FlashTarget {
+    /// Remaining flash strength (1.0 at `started_at`, 0.0 once faded), used as the
+    /// tint's opacity. `None` once fully faded so the caller can drop the target.
+    pub(crate) fn strength(&self) -> Option<f32> {
+        let elapsed = self.started_at.elapsed();
+        if elapsed >= FLASH_DURATION {
+            return None;
+        }
+        let t = elapsed.as_secs_f32() / FLASH_DURATION.as_secs_f32();
+        // Hold near full briefly, then ease out — a smoothstep on the back half.
+        Some((1.0 - t) * (1.0 - t))
     }
 }
 
@@ -599,6 +632,16 @@ pub(crate) struct ChatView {
     /// Tracked view-side and applied on the next log render — a group-hover
     /// display switch inside the row panics when hover flips mid-frame.
     hover_strip_row: Option<String>,
+    /// A message the user jumped to (clicked in the mentions feed) that's briefly
+    /// flashed in the log to catch the eye; cleared once faded. A repaint tick is
+    /// re-armed while it's set (`flash_tick_pending`), like the viewer anim.
+    flash: Option<FlashTarget>,
+    /// A flash-fade repaint tick is already scheduled (one timer per view).
+    flash_tick_pending: bool,
+    /// A transient note shown over the log when a mention jump can't land (the
+    /// message aged out of the buffer), with the time it appeared so it fades on
+    /// the same tick as the row flash. View-local (not a shared model notice).
+    jump_note: Option<(SharedString, std::time::Instant)>,
     /// Whether the pointer is over this view's chat-log region (tracked by the
     /// log wrapper's `on_hover`; the composer/input bar is outside it).
     log_hovered: bool,
@@ -814,6 +857,9 @@ impl ChatView {
             popup: None,
             pin_duration_choice: Some(controller::Controller::PIN_DURATION_SECS),
             hover_strip_row: None,
+            flash: None,
+            flash_tick_pending: false,
+            jump_note: None,
             log_hovered: false,
             log_paused: false,
             paused_needs_reset: false,
@@ -1930,6 +1976,104 @@ impl ChatView {
                 }))
                 .into_any_element(),
         )
+    }
+
+    /// Jumps the log to a message by identity (a clicked mention row): scroll it
+    /// into view (centered), then flash it briefly so the eye can find it. When
+    /// the message has aged out of the ring buffer, shows a transient "no longer
+    /// in chat history" note instead and leaves the log where it is. The tab is
+    /// already active (the app selects it before calling this).
+    pub(crate) fn jump_to_message(
+        &mut self,
+        platform: bks_core::Platform,
+        msg_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let index = self.channel.read(cx).rows.iter().position(|row| {
+            matches!(row, Row::Message { msg } if msg.platform == platform && msg.id == msg_id)
+        });
+        match index {
+            Some(ix) => {
+                // The log lives in `FollowMode::Tail`: while it's actively
+                // following, every layout forces the scroll to the end, which
+                // would immediately undo the reveal below. A negative `scroll_by`
+                // disengages tail-follow (like a user wheel-up) *without* leaving
+                // Tail mode — so it still re-engages when scrolled back to the
+                // bottom and the "Jump to latest" pill appears. Then reveal the
+                // row centered so surrounding context is visible.
+                if self.list_state.is_following_tail() {
+                    self.list_state.scroll_by(px(-1.));
+                }
+                self.list_state.scroll_to_reveal_item(ix);
+                self.flash = Some(FlashTarget {
+                    platform,
+                    msg_id: msg_id.to_string(),
+                    started_at: std::time::Instant::now(),
+                });
+                self.jump_note = None;
+                self.schedule_flash_tick(cx);
+                self.refresh_log(cx);
+                cx.notify();
+            }
+            None => {
+                self.jump_note = Some((
+                    SharedString::from("That message is no longer in chat history"),
+                    std::time::Instant::now(),
+                ));
+                self.schedule_flash_tick(cx);
+                cx.notify();
+            }
+        }
+    }
+
+    /// The current flash strength for a message row, if it's the flashed target
+    /// and still fading; `None` otherwise. Read by the log render to tint the row.
+    pub(crate) fn flash_strength_for(&self, platform: bks_core::Platform, msg_id: &str) -> Option<f32> {
+        let flash = self.flash.as_ref()?;
+        if flash.platform != platform || flash.msg_id != msg_id {
+            return None;
+        }
+        flash.strength()
+    }
+
+    /// The transient jump note (aged-out message), while it's still showing.
+    pub(crate) fn jump_note(&self) -> Option<SharedString> {
+        let (text, at) = self.jump_note.as_ref()?;
+        (at.elapsed() < JUMP_NOTE_DURATION).then(|| text.clone())
+    }
+
+    /// Schedules a repaint tick while a flash fade or jump note is active —
+    /// coalesced to one pending timer per view (like the viewer anim), clearing
+    /// the target/note once it has fully faded.
+    fn schedule_flash_tick(&mut self, cx: &mut Context<Self>) {
+        if self.flash_tick_pending {
+            return;
+        }
+        self.flash_tick_pending = true;
+        cx.spawn(async move |view, cx| {
+            cx.background_executor().timer(FLASH_TICK).await;
+            let _ = view.update(cx, |view, cx| {
+                view.flash_tick_pending = false;
+                let flash_done = view.flash.as_ref().is_none_or(|f| f.strength().is_none());
+                if flash_done {
+                    view.flash = None;
+                }
+                let note_done = view
+                    .jump_note
+                    .as_ref()
+                    .is_none_or(|(_, at)| at.elapsed() >= JUMP_NOTE_DURATION);
+                if note_done {
+                    view.jump_note = None;
+                }
+                // Re-arm while anything is still animating; otherwise let it settle.
+                if !flash_done || !note_done {
+                    view.schedule_flash_tick(cx);
+                }
+                view.refresh_log(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Schedules one repaint tick for the viewer-count animation — coalesced: at
@@ -5092,6 +5236,26 @@ mod tests {
         insert(&mut rows, 30, true);
         // History sorts among itself and sits before the live message.
         assert_eq!(timestamps(&rows), vec![30, 50, 100]);
+    }
+
+    #[test]
+    fn flash_strength_starts_full_and_fades_to_none() {
+        // Fresh: near full strength.
+        let fresh = FlashTarget {
+            platform: Platform::Twitch,
+            msg_id: "m".into(),
+            started_at: std::time::Instant::now(),
+        };
+        let s = fresh.strength().expect("just started, still fading");
+        assert!(s > 0.9, "a fresh flash should be near full, got {s}");
+
+        // Past the fade window: gone (so the caller drops it).
+        let old = FlashTarget {
+            platform: Platform::Twitch,
+            msg_id: "m".into(),
+            started_at: std::time::Instant::now() - FLASH_DURATION - std::time::Duration::from_secs(1),
+        };
+        assert!(old.strength().is_none(), "a faded flash should report None");
     }
 
     #[test]

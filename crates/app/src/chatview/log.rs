@@ -174,6 +174,10 @@ impl Render for LogView {
             // renders bare (see `RowFlags::external_highlight` / the renderers'
             // panel modes).
             let mut highlight: Option<(u32, u32)> = None;
+            // A jumped-to (clicked-mention) message row flashes to catch the eye:
+            // a fading translucent overlay strength in [0,1], applied over the
+            // row's base tint in the wrapper below.
+            let mut flash: Option<f32> = None;
             // Set (to the message id) on rows that must track pointer hover for
             // the "On hover" mod-button mode; the wrapper below then carries an
             // `on_hover` listener that shows/hides the strip via the view.
@@ -188,6 +192,7 @@ impl Render for LogView {
                         return div().into_any_element();
                     }
                     let mentioned = this.mentions.matches(&msg.raw_text);
+                    flash = this.flash_strength_for(msg.platform, &msg.id);
                     highlight = if mentioned {
                         Some(render::highlight_mention())
                     } else if msg.first_message {
@@ -340,15 +345,29 @@ impl Render for LogView {
                         .pr(px(SCROLLBAR_WIDTH))
                         .border_l_2()
                         .border_color(gpui::transparent_black())
-                        .map(|row| match highlight {
-                            Some((bg, accent)) => row
+                        .map(|row| match (highlight, flash) {
+                            // Flashing (jumped-to) row: the flash tint is blended
+                            // over whatever base the row has (a highlight's tint
+                            // or the plain log bg), fading with `strength`. It
+                            // borrows the mention accent bar so it reads as
+                            // "here" while lit.
+                            (base, Some(strength)) => {
+                                let base_bg = base.map_or_else(render::chat_bg, |(bg, _)| bg);
+                                let accent = base
+                                    .map(|(_, a)| a)
+                                    .unwrap_or_else(|| render::highlight_mention().1);
+                                row.py_0p5()
+                                    .bg(gpui::rgb(render::flash_over(base_bg, strength)))
+                                    .border_color(gpui::rgb(accent))
+                            }
+                            (Some((bg, accent)), None) => row
                                 .py_0p5()
                                 .bg(gpui::rgb(bg))
                                 .border_color(gpui::rgb(accent)),
                             // A whisper of tint while the pointer is over the
                             // row, so the row under the cursor (and its hover
                             // actions) reads at a glance.
-                            None => row.hover(|s| s.bg(render::row_hover())),
+                            (None, None) => row.hover(|s| s.bg(render::row_hover())),
                         })
                         .child(inner),
                 );
@@ -477,6 +496,9 @@ impl Render for LogView {
             // while hover-paused at the bottom, a "paused" pill instead.
             .children(self.jump_to_latest(&list_state, cx))
             .children(self.paused_pill(paused, &list_state, cx))
+            // A transient note when a clicked mention can't be jumped to (aged
+            // out of the buffer).
+            .children(self.jump_note_pill(&host, cx))
             .into_any_element()
     }
 }
@@ -543,6 +565,43 @@ impl LogView {
                                 .bg(cx.theme().muted)
                                 .child(SharedString::from("↓")),
                         ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// A transient centered note shown when a clicked mention can't be jumped to
+    /// (its message has aged out of the buffer). Non-interactive; it fades on the
+    /// view's flash tick (`ChatView::jump_note` returns `None` once expired).
+    /// Sits above where the "jump to latest" pill would be so the two don't stack.
+    fn jump_note_pill(
+        &self,
+        host: &gpui::Entity<ChatView>,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let text = host.read(cx).jump_note()?;
+        Some(
+            div()
+                .absolute()
+                .bottom_12()
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .h_7()
+                        .px_3()
+                        .rounded_full()
+                        .bg(cx.theme().popover)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .text_color(cx.theme().muted_foreground)
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .shadow_lg()
+                        .child(text),
                 )
                 .into_any_element(),
         )

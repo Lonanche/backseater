@@ -389,6 +389,15 @@ pub(crate) fn highlight_mention() -> (u32, u32) {
     (p.mention_bg, p.mention_accent)
 }
 
+/// The background of a briefly-flashed (jumped-to) row: the flash tone blended
+/// over the row's `base` background at `strength` (1.0 = full flash, fading to
+/// the base as it eases to 0). The flash tone is the mention accent, so the
+/// jumped-to row lights up in the same family as a live mention.
+pub(crate) fn flash_over(base: u32, strength: f32) -> u32 {
+    let t = strength.clamp(0.0, 1.0) * 0.55;
+    blend(base, palette().mention_accent, t)
+}
+
 pub(crate) fn highlight_first_message() -> (u32, u32) {
     let p = palette();
     (p.first_message_bg, p.first_message_label)

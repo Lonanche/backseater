@@ -793,11 +793,24 @@ impl BackseaterApp {
         // push into (and observe) it from birth.
         let mention_store = cx.new(|_| MentionStore::default());
         let _mention_subs = vec![
-            // A clicked mention row: jump to its source tab (gone = no-op).
+            // A clicked mention row: select its source tab, then jump that view
+            // to the mentioned message (flash it, or note it's aged out). Gone
+            // tab = no-op. Done synchronously so the active tab's first render
+            // already has tail-follow disengaged + the reveal set — no bounce to
+            // the bottom before the jump lands. The list state is intact across
+            // the tab switch (background tabs stay connected; `select_tab` only
+            // flips the active index), so no fresh layout is needed first.
             cx.subscribe(&mention_store, |this, _, ev: &mentions::ActivateTab, cx| {
-                if let Some(ix) = this.tabs.iter().position(|t| t.id == ev.0) {
-                    this.select_tab(ix, cx);
-                }
+                let Some(ix) = this.tabs.iter().position(|t| t.id == ev.tab_id) else {
+                    return;
+                };
+                this.select_tab(ix, cx);
+                let view = this.tabs[ix].view.clone();
+                let platform = ev.platform;
+                let msg_id = ev.msg_id.clone();
+                view.update(cx, |view, cx| {
+                    view.jump_to_message(platform, &msg_id, cx);
+                });
             }),
             // Tail + repaint the global Mentions tab when a mention arrives.
             cx.observe(&mention_store, |this, _, cx| {

@@ -41,8 +41,14 @@ pub struct MentionStore {
 }
 
 /// Emitted when a mention row is clicked: the app should select the tab with
-/// this id (a no-op if it was closed since).
-pub struct ActivateTab(pub u64);
+/// `tab_id` (a no-op if it was closed since), then jump its view to the
+/// mentioned message (`platform` + `msg_id`), flashing it — or, if it has aged
+/// out of that tab's buffer, showing a transient "no longer in history" note.
+pub struct ActivateTab {
+    pub tab_id: u64,
+    pub platform: bks_core::Platform,
+    pub msg_id: String,
+}
 
 impl EventEmitter<ActivateTab> for MentionStore {}
 
@@ -143,6 +149,8 @@ pub fn feed_rows(store: &Entity<MentionStore>, font_size: f32, cx: &App) -> Vec<
                 },
             );
             let tab_id = entry.tab_id;
+            let platform = entry.msg.platform;
+            let msg_id = entry.msg.id.clone();
             let store = store.clone();
             v_flex()
                 .id(("mention-row", ix))
@@ -155,7 +163,14 @@ pub fn feed_rows(store: &Entity<MentionStore>, font_size: f32, cx: &App) -> Vec<
                 )
                 .child(row)
                 .on_click(move |_, _, cx| {
-                    store.update(cx, |_, cx| cx.emit(ActivateTab(tab_id)));
+                    let msg_id = msg_id.clone();
+                    store.update(cx, |_, cx| {
+                        cx.emit(ActivateTab {
+                            tab_id,
+                            platform,
+                            msg_id,
+                        })
+                    });
                 })
                 .into_any_element()
         })
