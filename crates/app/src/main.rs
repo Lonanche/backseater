@@ -2196,17 +2196,26 @@ impl BackseaterApp {
                     custom: Option<String>,
                     cx: &mut Context<Self>| {
             let id = SharedString::from(format!("theme-sel-{label}"));
+            // A selected row reads as selected in both light and dark: a filled
+            // accent tint plus a 2px accent bar on the left. Hover is a plainer
+            // `secondary` fill so it never looks like the selection. (Previously
+            // both used `secondary`, which in dark mode is nearly the card
+            // background — the selected theme was indistinguishable.)
+            let accent = cx.theme().primary;
             h_flex()
                 .id(id)
                 .w_full()
                 .items_center()
                 .justify_between()
-                .px_3()
+                .pr_3()
+                .pl(px(10.))
                 .py_2()
                 .rounded_md()
                 .cursor_pointer()
-                .when(selected, |s| s.bg(cx.theme().secondary))
-                .hover(|s| s.bg(cx.theme().secondary))
+                .border_l_2()
+                .border_color(if selected { accent } else { gpui::transparent_black() })
+                .when(selected, |s| s.bg(accent.opacity(0.16)))
+                .when(!selected, |s| s.hover(|s| s.bg(cx.theme().secondary)))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, window, cx| {
@@ -2218,14 +2227,22 @@ impl BackseaterApp {
                         .items_center()
                         .gap_2()
                         .child(
+                            // A ring around the swatch so a near-black Dark
+                            // swatch stays visible against a dark card.
                             div()
                                 .size(px(16.))
                                 .rounded_sm()
                                 .border_1()
-                                .border_color(cx.theme().border)
+                                .border_color(cx.theme().muted_foreground.opacity(0.6))
                                 .bg(gpui::rgb(swatch)),
                         )
-                        .child(div().when(selected, |s| s.font_weight(FontWeight::MEDIUM)).child(label)),
+                        .child(
+                            div()
+                                .when(selected, |s| {
+                                    s.font_weight(FontWeight::MEDIUM).text_color(accent)
+                                })
+                                .child(label),
+                        ),
                 )
                 .when_some(custom, |row, name| {
                     let edit_name = name.clone();
