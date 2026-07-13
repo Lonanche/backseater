@@ -115,8 +115,30 @@ pub fn open_centered_bare<H: Render>(
         host,
         body,
         true,
+        None,
         cx,
     )
+}
+
+/// [`open_centered_bare`] that also remembers the window's position/size under
+/// `key` (see [`crate::window_state`]): opens at the saved rect when one exists
+/// and is still on a connected display (else centered over `parent` at `size`),
+/// and records every later move/resize for the next open.
+#[allow(clippy::too_many_arguments)]
+pub fn open_persisted_bare<H: Render>(
+    key: &'static str,
+    title: &str,
+    size: Size<Pixels>,
+    min_size: Size<Pixels>,
+    parent: AnyWindowHandle,
+    host: Entity<H>,
+    body: impl Fn(&mut H, &mut gpui::Context<H>) -> AnyElement + 'static,
+    cx: &mut App,
+) -> anyhow::Result<(AnyWindowHandle, Entity<ChildWindow<H>>)> {
+    let (parent, display) = parent_bounds(parent, cx);
+    let bounds = crate::window_state::child_bounds(key, cx)
+        .unwrap_or_else(|| centered_on(parent, size));
+    open_impl(title, bounds, min_size, display, host, body, true, Some(key), cx)
 }
 
 /// The body builder a child window renders its content with, against the host.
@@ -185,7 +207,17 @@ pub fn open<H: Render>(
     body: impl Fn(&mut H, &mut gpui::Context<H>) -> AnyElement + 'static,
     cx: &mut App,
 ) -> anyhow::Result<(AnyWindowHandle, Entity<ChildWindow<H>>)> {
-    open_impl(title, bounds, min_size, parent_display, host, body, false, cx)
+    open_impl(
+        title,
+        bounds,
+        min_size,
+        parent_display,
+        host,
+        body,
+        false,
+        None,
+        cx,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -197,6 +229,7 @@ fn open_impl<H: Render>(
     host: Entity<H>,
     body: impl Fn(&mut H, &mut gpui::Context<H>) -> AnyElement + 'static,
     bare: bool,
+    persist: Option<&'static str>,
     cx: &mut App,
 ) -> anyhow::Result<(AnyWindowHandle, Entity<ChildWindow<H>>)> {
     let display_id = resolve_display(bounds, parent_display, cx);
@@ -214,11 +247,25 @@ fn open_impl<H: Render>(
             ..Default::default()
         },
         |window, cx| {
-            let view = cx.new(|cx| ChildWindow {
-                host: host.downgrade(),
-                body: Box::new(body),
-                bare,
-                _observe_host: cx.observe(&host, |_, _, cx| cx.notify()),
+            let view = cx.new(|cx| {
+                if let Some(key) = persist {
+                    // Restore bounds even if the user maximized before closing —
+                    // a maximized child reopens windowed at its last rect.
+                    cx.observe_window_bounds(window, move |_, window, cx| {
+                        crate::window_state::child_changed(
+                            key,
+                            window.window_bounds().get_bounds(),
+                            cx,
+                        );
+                    })
+                    .detach();
+                }
+                ChildWindow {
+                    host: host.downgrade(),
+                    body: Box::new(body),
+                    bare,
+                    _observe_host: cx.observe(&host, |_, _, cx| cx.notify()),
+                }
             });
             content = Some(view.clone());
             // The kit's Root supplies each window's tooltip/popover layers.

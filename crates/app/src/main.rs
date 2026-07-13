@@ -32,6 +32,7 @@ mod tabs;
 mod updater;
 mod usercard;
 mod viewerlist;
+mod window_state;
 
 use std::sync::Arc;
 
@@ -40,7 +41,6 @@ use gpui::prelude::*;
 use gpui::{
     div, img, px, AnyWindowHandle, App, Context, Div, ElementId, Entity, FontWeight, MouseButton,
     Pixels, Point, ScrollHandle, SharedString, Size, Stateful, Subscription, Task, Window,
-    WindowOptions,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::combobox::{Combobox, ComboboxEvent, ComboboxState};
@@ -702,6 +702,13 @@ impl BackseaterApp {
         apply_theme(&settings, window, cx);
         // And the persisted font family (the kit Root sets it window-wide).
         apply_font(settings.font_family.as_deref(), cx);
+
+        // Remember the window's position/size (and maximized state) so the next
+        // launch reopens it where the user left it.
+        cx.observe_window_bounds(window, |_, window, cx| {
+            window_state::main_changed(window.window_bounds(), cx);
+        })
+        .detach();
 
         // Seed streamer mode before any UI renders: one synchronous process scan
         // (a Toolhelp snapshot, cheap) so a launch while OBS is already open
@@ -4847,8 +4854,12 @@ fn main() {
         cx.activate(true);
 
         cx.spawn(async move |cx| {
+            // Reopen where the user left the window (position/size/maximized),
+            // falling back to defaults when nothing is saved or the saved
+            // display is gone.
+            let options = cx.update(window_state::main_window_options);
             let handle = cx
-                .open_window(WindowOptions::default(), |window, cx| {
+                .open_window(options, |window, cx| {
                     // Pick emote image sizes for this display's DPI:
                     // 1x at 100% scaling, 2x above. Fetching a bigger variant than the
                     // screen needs is wasted bytes + decode + heap RAM.
@@ -4864,6 +4875,9 @@ fn main() {
             let main_id = gpui::AnyWindowHandle::from(handle).window_id();
             cx.update(|cx| {
                 cx.on_window_closed(move |cx, id| {
+                    // A close can outrun the debounced bounds save; write the
+                    // final position now (also catches quit, right below).
+                    window_state::flush();
                     if id == main_id {
                         cx.quit();
                     }

@@ -2298,10 +2298,12 @@ impl ChatView {
             // The window closed under us — fall through and open a fresh one.
         }
 
-        // Always opens centered over the chat window; drag it away from there.
-        // Bare (no built-in scroll surface): the header + mod actions stay put
-        // and only the recent-messages section scrolls.
-        let opened = child_window::open_centered_bare(
+        // Opens at the last place the user left a usercard (persisted), else
+        // centered over the chat window. Bare (no built-in scroll surface): the
+        // header + mod actions stay put and only the recent-messages section
+        // scrolls.
+        let opened = child_window::open_persisted_bare(
+            "usercard",
             &title,
             USERCARD_WINDOW_SIZE,
             USERCARD_MIN_SIZE,
