@@ -525,14 +525,15 @@ const EMOTE_HEIGHT: f32 = 26.0;
 const PLATFORM_ICON_SIZE: f32 = 16.0;
 const BADGE_SIZE: f32 = 18.0;
 
-/// GPUI's default text line-height factor: `phi()`, the golden ratio (see
-/// `TextStyleRefinement::default` in gpui's `style.rs`). A text token's element
-/// height equals exactly one line box (`round(font_size × this)`; see gpui's
-/// `TextLayout::layout`). Every row item — text *and* the icon/time/badges — is
-/// placed in a box of this height so they share the same box top in the
-/// `items_start` row; images are then offset inside it to the text's *optical*
-/// center (see [`image_line_box`]).
-const LINE_HEIGHT: f32 = 1.618_034;
+/// Extra leading added to the line box on top of the font's ascent + descent, as
+/// a fraction of the font size. The row body applies the resulting line height to
+/// every text token via `.line_height()`, overriding gpui's 1.618 default so
+/// wrapped lines within a message sit tight (see `Scale::new`).
+const LINE_LEADING: f32 = 0.1;
+
+/// Fallback line-height factor used before the font's real metrics have been
+/// published (a touch above 1.0, close to a typical UI font's metrics height).
+const LINE_HEIGHT_FALLBACK: f32 = 1.35;
 
 /// Vertical metrics of the active UI font, as per-em ratios ×1000 (atomics so
 /// the render path reads them lock-free — same process-wide pattern as
@@ -585,11 +586,20 @@ struct Scale {
 impl Scale {
     fn new(font_size: f32) -> Self {
         let factor = font_size / BASELINE_FONT;
-        // gpui rounds the line box to whole pixels (`line_height_in_pixels`);
-        // match it so the prefix boxes are exactly one text line tall.
-        let line = (font_size * LINE_HEIGHT).round();
         let ascent = font_metric(&FONT_ASCENT) * font_size;
         let descent = font_metric(&FONT_DESCENT) * font_size;
+        // Line box sized to the font's real metrics height (ascent + descent)
+        // plus a little leading, rounded to whole pixels like gpui does. The body
+        // applies this via `.line_height()` so text tokens shape at it (not gpui's
+        // 1.618 default), and the prefix boxes (icon/time/badges) use the same
+        // value so they stay aligned with the body text. Falls back to a fixed
+        // factor before font metrics are published.
+        let metrics_line = ascent + descent + font_size * LINE_LEADING;
+        let line = if metrics_line > 0.0 {
+            metrics_line.round()
+        } else {
+            (font_size * LINE_HEIGHT_FALLBACK).round()
+        };
         Self {
             font: font_size,
             emote: EMOTE_HEIGHT * factor,
@@ -1619,6 +1629,10 @@ pub fn render_message(
         .w_full()
         .min_w_0()
         .flex_wrap()
+        // Tight line height cascades to every text token so gpui shapes them
+        // shorter than its 1.618 default (prefix boxes match via `scale.line`),
+        // tightening wrapped-line spacing within a message.
+        .line_height(px(scale.line))
         // Top-align: when the message wraps to several lines, centering would push
         // the first lines above the name/badges — start-align keeps the name on the
         // first line with text flowing down beneath it.
@@ -1746,6 +1760,11 @@ pub fn render_message(
         .group(group_id)
         .w_full()
         .min_w_0()
+        // A little vertical padding between messages: the line height is tight so
+        // wrapped lines within a message stay close, but adjacent messages need a
+        // small gap to read as separate. The highlighted-row pill below reuses
+        // this same padded box for its tint.
+        .py_0p5()
         // Backfilled history is dimmed to set it apart from live chat.
         .when(msg.historical, |row| row.opacity(HISTORY_OPACITY))
         // A suppressed (term-matched) row is faded so the eye skips it, while
@@ -1759,13 +1778,14 @@ pub fn render_message(
         // a pill that bleeds an equal amount past the text on each side, with the
         // accent bar riding its left edge (same box model as error/automod rows).
         .when_some(row_accent, |row, (bg, accent)| {
+            // The outer row already carries `py_0p5`; the pill only adds its
+            // horizontal inset/tint so highlighted rows stay the same height.
             row.bg(rgb(bg))
                 .rounded_md()
                 .border_l_2()
                 .border_color(rgb(accent))
                 .px(px(HIGHLIGHT_INSET))
                 .mx(px(-HIGHLIGHT_INSET))
-                .py_0p5()
         })
         .when_some(msg.reply.as_ref(), |col, reply| {
             col.child(reply_line(reply, scale))
