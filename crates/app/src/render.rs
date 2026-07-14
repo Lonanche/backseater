@@ -744,6 +744,15 @@ const LONG_WORD_CHARS: usize = 24;
 /// Opacity for backfilled chat-history rows, so they read as older than live chat.
 const HISTORY_OPACITY: f32 = 0.6;
 
+/// Negative right margin (px) applied to each word token that ends in whitespace,
+/// to tighten the visible inter-word gap. Words carry their own trailing space
+/// glyph (so copy stays exact), but a full space reads too wide in the flex-wrap
+/// row; this pulls the following token left to shave the gap without touching
+/// letters *within* a word or breaking selection. One value for every body
+/// surface — chat log, mentions panel, automod preview, event rows, and reply
+/// previews all key on this (via `text_token` and `inline_tokens`).
+const WORD_TIGHTEN: f32 = 1.0;
+
 
 /// Horizontal padding a highlighted row's tinted pill gets (`px_2`, 8px), so its
 /// content has breathing room inside the rounded box. An equal *negative* margin
@@ -846,6 +855,8 @@ fn text_token(
     bold: bool,
     starts_row: bool,
 ) -> gpui::AnyElement {
+    // Body words carry a trailing space glyph, which reads too wide; tighten it.
+    let tighten = text.ends_with(char::is_whitespace);
     let ord = *ordinal;
     *ordinal += 1;
     let token = SelectableText::new(
@@ -861,6 +872,9 @@ fn text_token(
     }
     if bold {
         wrap = wrap.font_weight(NAME_WEIGHT);
+    }
+    if tighten {
+        wrap = wrap.mr(px(-WORD_TIGHTEN));
     }
     wrap.child(token).into_any_element()
 }
@@ -2766,16 +2780,17 @@ fn inline_tokens(
         match element {
             MessageElement::Text { text, .. } => {
                 // Each word keeps its trailing whitespace as the inter-word gap,
-                // like chat body words — no extra margin.
+                // like chat body words; the same tighten pulls the following word
+                // left so the gap matches the main log (see `WORD_TIGHTEN`).
                 for word in split_words(text) {
                     if word.trim().is_empty() {
                         continue;
                     }
-                    tokens.push(
-                        div()
-                            .child(SharedString::from(word.to_string()))
-                            .into_any_element(),
-                    );
+                    let mut token = div().child(SharedString::from(word.to_string()));
+                    if word.ends_with(char::is_whitespace) {
+                        token = token.mr(px(-WORD_TIGHTEN));
+                    }
+                    tokens.push(token.into_any_element());
                 }
             }
             MessageElement::Emote(emote) => {
