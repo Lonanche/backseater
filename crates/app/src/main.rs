@@ -617,9 +617,6 @@ pub(crate) struct BackseaterApp {
     /// Bumped on explicit dismissal to invalidate in-flight show timers, so a
     /// tooltip can't pop up over a context menu the user just opened.
     chip_tip_gen: u64,
-    /// Tracks the tab strip's horizontal scroll so we can show edge fades + ‹ ›
-    /// scroll buttons when there are more tabs than fit, and scroll on click.
-    tab_scroll: ScrollHandle,
     /// App-wide UI preferences (chat font size).
     settings: Settings,
     /// Inputs backing the settings panels (tab fields + term-list adders). Kit
@@ -948,7 +945,6 @@ impl BackseaterApp {
             chip_hovered: None,
             chip_tip_hovered: false,
             chip_tip_gen: 0,
-            tab_scroll: ScrollHandle::new(),
             settings,
             settings_inputs,
             _settings_mentions_name_sub: settings_mentions_name_sub,
@@ -4446,7 +4442,7 @@ impl BackseaterApp {
             .id(id)
             .h_6()
             .px_2p5()
-            .my_1()
+            .my_0p5()
             .mr_0p5()
             .gap_1p5()
             .items_center()
@@ -4664,14 +4660,21 @@ impl BackseaterApp {
                             if from == ix {
                                 return;
                             }
+                            // Chips wrap onto multiple rows, so a swap is gated on the
+                            // pointer being within this chip's own row band (so chips
+                            // on other rows can't grab it), then past its horizontal
+                            // midpoint in the travel direction.
+                            let pos = ev.event.position;
+                            let top = ev.bounds.origin.y;
+                            let bottom = ev.bounds.bottom();
                             let mid = ev.bounds.origin.x + ev.bounds.size.width / 2.0;
-                            // Only swap once the cursor passes the midpoint in the
-                            // direction of travel, so a tab settles cleanly.
-                            let past = if from < ix {
-                                ev.event.position.x >= mid
-                            } else {
-                                ev.event.position.x <= mid
-                            };
+                            let in_row = pos.y >= top && pos.y <= bottom;
+                            let past = in_row
+                                && if from < ix {
+                                    pos.x >= mid
+                                } else {
+                                    pos.x <= mid
+                                };
                             if past {
                                 this.move_tab(from, ix, cx);
                                 this.dragging = Some(ix);
@@ -4738,100 +4741,46 @@ impl BackseaterApp {
             })
             .collect();
 
-        // Read the strip's scroll position to drive the overflow affordances.
-        // `offset().x` is 0 at the start and goes negative as you scroll right;
-        // `max_offset().x` is how far it *can* scroll (0 when everything fits).
-        // So there's hidden content to the left when scrolled past the start, and
-        // to the right when not yet at the end. A 1px slack absorbs rounding so
-        // the › button vanishes cleanly once fully scrolled.
-        let offset_x = self.tab_scroll.offset().x;
-        let max_x = self.tab_scroll.max_offset().x;
-        // The strip only needs to scroll when the chips can't all fit. When they
-        // fit (`max_x <= 0`) a stale negative offset left over from a wider state
-        // (tabs closed / window widened) would keep the chips shifted left with no
-        // arrow to bring them back, so reset it so the row sits flush at the start.
-        let overflows = max_x > px(0.);
-        if !overflows && offset_x < px(0.) {
-            self.tab_scroll.set_offset(Point::new(px(0.), px(0.)));
-        }
-        let can_left = offset_x < px(-1.);
-        let can_right = offset_x > -max_x + px(1.);
         let bg = gpui::rgb(render::tab_bar_bg());
-
-        // One "page" worth of horizontal scroll per arrow click: most of the
-        // visible width, leaving a sliver of overlap for orientation.
-        let page = (self.tab_scroll.bounds().size.width - px(48.)).max(px(80.));
-
-        let arrow = |dir_left: bool, cx: &mut Context<Self>| {
-            div()
-                .id(if dir_left { "tab-left" } else { "tab-right" })
-                .flex_none()
-                .px_2()
-                .py_1()
-                .my_1()
-                .rounded_md()
-                .cursor_pointer()
-                .font_weight(FontWeight::BOLD)
-                .text_color(cx.theme().muted_foreground)
-                .hover(|s| {
-                    s.bg(render::chrome_hover())
-                        .text_color(cx.theme().foreground)
-                })
-                .child(SharedString::from(if dir_left { "‹" } else { "›" }))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        let cur = this.tab_scroll.offset();
-                        let max = this.tab_scroll.max_offset().x;
-                        let dx = if dir_left { page } else { -page };
-                        let new_x = (cur.x + dx).clamp(-max, px(0.));
-                        this.tab_scroll.set_offset(Point::new(new_x, cur.y));
-                        cx.notify();
-                    }),
-                )
-        };
 
         // No hard border under the strip: the bar sits one elevation step above
         // the chat surface, and that contrast is the separation. Compact pill chips
-        // are vertically centered on the bar.
+        // are vertically centered on the bar. Only the gear is pinned outside the
+        // wrapping strip; when there are more tabs than fit one line they wrap onto
+        // additional rows (Chatterino-style) rather than scrolling horizontally, and
+        // each wrapped row starts at the strip's true left edge.
         h_flex()
             .w_full()
             .px_1()
             .bg(bg)
-            .items_center()
-            // The global Mentions pseudo-tab, pinned ahead of the scrolling
-            // strip so it's always reachable. Enabled in Highlights settings.
-            .when(self.settings.mentions_tab, |this| {
-                this.child(self.mentions_tab_chip(mentions_selected, cx))
-            })
-            // ‹ scroll button — only present when tabs are hidden to the left.
-            .when(can_left, |this| this.child(arrow(true, cx)))
-            // The tabs + `add` button live in a horizontally scrollable strip that
-            // takes the remaining width, so when there are more tabs than fit they
-            // can be scrolled through instead of overflowing under the gear (or
-            // pushing it off-window). `min_w_0` lets the strip shrink below its
-            // content width so the overflow actually scrolls; `flex_none` chips
-            // keep their size. The arrows + gear stay pinned outside it.
+            .items_start()
+            // The Mentions pseudo-tab + tabs + `add` button all live in the wrapping
+            // strip so every wrapped row (including the first) aligns to the same
+            // left edge. `min_w_0` lets the strip take the remaining width (so
+            // wrapping is measured against it, not the chips' natural width);
+            // `flex_none` chips keep their size.
             .child(
                 h_flex()
-                    .id("tab-strip-scroll")
                     .flex_1()
                     .min_w_0()
-                    .items_center()
-                    // `track_scroll` stays on so the strip is always measured (it
-                    // fills `max_offset` regardless of overflow style); scrolling is
-                    // only engaged when the chips actually overflow, so a fitting
-                    // strip just sits left-aligned and never scrolls.
-                    .when(overflows, |this| this.overflow_x_scroll())
-                    .track_scroll(&self.tab_scroll)
+                    .flex_wrap()
+                    .items_start()
+                    // The global Mentions pseudo-tab, first so it's always reachable.
+                    // Enabled in Highlights settings.
+                    .when(self.settings.mentions_tab, |this| {
+                        this.child(self.mentions_tab_chip(mentions_selected, cx))
+                    })
                     .children(tabs.into_iter().map(|t| t.flex_none()))
+                    // The `+` matches a tab chip's box (h_6 + my_0p5) so it sits on
+                    // the same baseline as the tabs it follows.
                     .child(
-                        div()
+                        h_flex()
                             .id("add-tab")
                             .flex_none()
+                            .h_6()
+                            .my_0p5()
                             .px_2p5()
-                            .py_1()
-                            .my_1()
+                            .items_center()
                             .rounded_md()
                             .cursor_pointer()
                             .text_color(cx.theme().muted_foreground)
@@ -4846,15 +4795,15 @@ impl BackseaterApp {
                             ),
                     ),
             )
-            // › scroll button — only present when tabs are hidden to the right.
-            .when(can_right, |this| this.child(arrow(false, cx)))
+            // The gear matches a tab chip's box too, pinned to the far right.
             .child(
-                div()
+                h_flex()
                     .id("app-settings")
+                    .flex_none()
+                    .h_6()
+                    .my_0p5()
                     .px_2p5()
-                    .py_1()
-                    .my_1()
-                    .mr_1()
+                    .items_center()
                     .rounded_md()
                     .cursor_pointer()
                     .text_color(cx.theme().muted_foreground)
