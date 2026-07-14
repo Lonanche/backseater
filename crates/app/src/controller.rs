@@ -1250,6 +1250,12 @@ impl Controller {
             return;
         }
         let ch = &self.twitch_channel;
+        let target_user = match &action {
+            ModAction::Ban { user, .. }
+            | ModAction::Timeout { user, .. }
+            | ModAction::Unban { user } => user.clone(),
+            ModAction::Delete { .. } => String::new(),
+        };
         let result = match action {
             ModAction::Ban { user, reason } => actions.ban(ch, &user, reason.as_deref()).await,
             ModAction::Timeout { user, secs, reason } => {
@@ -1259,8 +1265,30 @@ impl Controller {
             ModAction::Delete { message_id } => actions.delete_message(ch, &message_id).await,
         };
         if let Err(err) = result {
-            self.notice(format!("{err:#}"));
+            self.report_twitch_mod_error(&target_user, &err);
         }
+    }
+
+    /// Reports a failed Twitch moderation action. Some Helix "errors" are really
+    /// just information the user should see (e.g. unbanning someone who isn't
+    /// banned) — those render as a muted [`confirm`](Self::confirm) notice rather
+    /// than a red error row. Add a `(needle, friendly)` entry here to reclassify
+    /// another response; `{user}` in the friendly text is replaced with the
+    /// target. Everything else falls through to the copyable error row.
+    fn report_twitch_mod_error(&self, user: &str, err: &anyhow::Error) {
+        // Matched against the Helix `message` field carried in the error string.
+        const INFO: &[(&str, &str)] = &[(
+            "user in the user_id query parameter is not banned",
+            "{user} is not banned",
+        )];
+        let text = format!("{err:#}");
+        for (needle, friendly) in INFO {
+            if text.contains(needle) {
+                self.confirm(friendly.replace("{user}", user));
+                return;
+            }
+        }
+        self.notice(text);
     }
 
     async fn moderate_kick(&self, actions: &KickActions, action: ModAction) {
