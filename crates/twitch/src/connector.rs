@@ -147,7 +147,14 @@ pub(crate) fn clearchat_event(cc: &tmi::msg::ClearChat<'_>, historical: bool) ->
 /// as a PRIVMSG, so its native emotes render inline) shown under the system text
 /// like a normal chat line. `None` when there's no system-msg (nothing to show).
 /// Shared by the live loop and history backfill.
-pub(crate) fn usernotice_event(un: &tmi::msg::UserNotice<'_>) -> Option<ChatEvent> {
+/// `milestone_value` is the raw `msg-param-value` tag (the authoritative
+/// watch-streak length) — it can't be recovered from the parsed `UserNotice`
+/// because tmi drops it (`viewermilestone` parses as `Event::Unknown`), so the
+/// caller reads it off the raw IRC message and hands it in.
+pub(crate) fn usernotice_event(
+    un: &tmi::msg::UserNotice<'_>,
+    milestone_value: Option<u64>,
+) -> Option<ChatEvent> {
     // An announcement (`/announce`) ships NO system-msg — the announcement IS
     // the chatter's message, decorated with `msg-param-color` — so it must be
     // handled before the system-msg bail below (which silently dropped them).
@@ -175,7 +182,7 @@ pub(crate) fn usernotice_event(un: &tmi::msg::UserNotice<'_>) -> Option<ChatEven
         text,
         timestamp: un.timestamp(),
         message: usernotice_message(un),
-        details: usernotice_details(un),
+        details: usernotice_details(un, milestone_value),
     })
 }
 
@@ -233,19 +240,23 @@ const ANON_GIFTER: &str = "ananonymousgifter";
 /// mass gift's individual events to their announcement. Events without
 /// structured data (announcements, rituals, …) get only the actor — the panel
 /// falls back to the full `system-msg` text.
-fn usernotice_details(un: &tmi::msg::UserNotice<'_>) -> EventDetails {
+fn usernotice_details(
+    un: &tmi::msg::UserNotice<'_>,
+    milestone_value: Option<u64>,
+) -> EventDetails {
     use tmi::msg::user_notice::Event;
     let actor = un.sender().map(|s| s.name().to_string());
     if un.event_id() == "viewermilestone" {
         // tmi has no structured watch-streak variant (it parses as
         // `Event::Unknown`, which tmi treats as anonymous — `sender()` is
-        // None), so both the chatter and the streak length come out of the
-        // system text ("viewer watched 7 consecutive streams this month and
-        // sparked a watch streak!"): the leading token is the name, the first
-        // number the length. No number → the panel falls back to that full
-        // text.
+        // None), so the streak length comes from the raw `msg-param-value` tag
+        // (the caller reads it off the raw message). Parsing "the first number"
+        // out of the system text was wrong — for a chatter like `user67` it
+        // grabbed the digits in the name, not the streak (80 → 67). The chatter
+        // name is the leading token of the system text. No value → the panel
+        // falls back to the full text.
         let sys = un.system_message().unwrap_or_default();
-        let compact = first_number(&sys)
+        let compact = milestone_value
             .map(|n| format!("watch streak · {n} {}", plural(n, "stream", "streams")));
         let actor = compact
             .is_some()
@@ -352,14 +363,6 @@ fn usernotice_details(un: &tmi::msg::UserNotice<'_>) -> EventDetails {
             ..Default::default()
         },
     }
-}
-
-/// The first run of ASCII digits in `text`, as a number.
-fn first_number(text: &str) -> Option<u64> {
-    text.split(|c: char| !c.is_ascii_digit())
-        .find(|s| !s.is_empty())?
-        .parse()
-        .ok()
 }
 
 /// " · Tier N" / " · Prime" for a `msg-param-sub-plan` value, empty when
@@ -659,6 +662,25 @@ mod tests {
         tmi::msg::UserNotice::from_irc(irc).unwrap()
     }
 
+    /// The `msg-param-value` tag off a raw USERNOTICE (mirrors what the live
+    /// loop reads and hands to `usernotice_event`/`usernotice_details`).
+    fn milestone_value(raw: &str) -> Option<u64> {
+        IrcMessageRef::parse(raw)
+            .unwrap()
+            .tag(tmi::Tag::from("msg-param-value"))
+            .and_then(|v| v.parse().ok())
+    }
+
+    /// `usernotice_event` driven from a raw line the way the live loop does.
+    fn usernotice_event_raw(raw: &str) -> Option<ChatEvent> {
+        usernotice_event(&parse_usernotice(raw), milestone_value(raw))
+    }
+
+    /// `usernotice_details` driven from a raw line the way the live loop does.
+    fn usernotice_details_raw(raw: &str) -> EventDetails {
+        usernotice_details(&parse_usernotice(raw), milestone_value(raw))
+    }
+
     #[test]
     fn watch_streak_milestone_classifies_as_watch_streak() {
         // A `viewermilestone` USERNOTICE has no dedicated tmi event (it parses as
@@ -698,8 +720,7 @@ mod tests {
                    room-id=71092938;subscriber=1;system-msg=resub;\
                    tmi-sent-ts=1581713640019;user-id=21156217;user-type= \
                    :tmi.twitch.tv USERNOTICE #qaixx :peepoEvil";
-        let un = parse_usernotice(raw);
-        match usernotice_event(&un) {
+        match usernotice_event_raw(raw) {
             Some(ChatEvent::Event {
                 timestamp,
                 message: Some(msg),
@@ -725,8 +746,7 @@ mod tests {
                    msg-param-color=BLUE;room-id=404660262;subscriber=0;system-msg=;\
                    tmi-sent-ts=1738762344755;user-id=955666532;user-type=mod;vip=0 \
                    :tmi.twitch.tv USERNOTICE #trausi :big news everyone";
-        let un = parse_usernotice(raw);
-        match usernotice_event(&un) {
+        match usernotice_event_raw(raw) {
             Some(ChatEvent::Event {
                 kind,
                 message: Some(msg),
@@ -751,8 +771,7 @@ mod tests {
                    msg-id=announcement;msg-param-color=PRIMARY;room-id=11148817;subscriber=1;\
                    system-msg=;tmi-sent-ts=1695554663565;user-id=82008718;user-type=mod \
                    :tmi.twitch.tv USERNOTICE #lonanche :$ping xd";
-        let un = parse_usernotice(raw);
-        match usernotice_event(&un) {
+        match usernotice_event_raw(raw) {
             Some(ChatEvent::Event { kind, details, .. }) => {
                 assert_eq!(kind, EventKind::Announcement);
                 assert_eq!(details.accent, None);
@@ -772,8 +791,7 @@ mod tests {
                    system-msg=posty\\ssubscribed\\swith\\sTwitch\\sPrime.;\
                    tmi-sent-ts=1582685713242;user-id=224005980;user-type= \
                    :tmi.twitch.tv USERNOTICE #oilrats";
-        let un = parse_usernotice(raw);
-        match usernotice_event(&un) {
+        match usernotice_event_raw(raw) {
             Some(ChatEvent::Event {
                 text,
                 message: None,
@@ -794,9 +812,27 @@ mod tests {
                    system-msg=viewer\\swatched\\s7\\sconsecutive\\sstreams\\sthis\\smonth\\sand\\ssparked\\sa\\swatch\\sstreak!;\
                    tmi-sent-ts=1594555275886;user-id=40286300;user-type= \
                    :tmi.twitch.tv USERNOTICE #posty :hi";
-        let details = usernotice_details(&parse_usernotice(raw));
+        let details = usernotice_details_raw(raw);
         assert_eq!(details.actor.as_deref(), Some("viewer"));
         assert_eq!(details.compact.as_deref(), Some("watch streak · 7 streams"));
+    }
+
+    #[test]
+    fn watch_streak_uses_msg_param_value_not_username_digits() {
+        // Regression: a chatter whose name contains digits (`viewer67`) with an
+        // 80-stream streak. Parsing the first number out of the system text
+        // grabbed the `67` from the name; the count must come from
+        // `msg-param-value=80`.
+        let raw = "@badge-info=subscriber/3;badges=subscriber/3;color=;\
+                   display-name=viewer67;emotes=;flags=;id=abc;login=viewer67;mod=0;\
+                   msg-id=viewermilestone;msg-param-category=watch-streak;\
+                   msg-param-value=80;msg-param-id=xyz;room-id=11148817;subscriber=1;\
+                   system-msg=viewer67\\swatched\\s80\\sconsecutive\\sstreams\\sthis\\smonth\\sand\\ssparked\\sa\\swatch\\sstreak!;\
+                   tmi-sent-ts=1594555275886;user-id=40286300;user-type= \
+                   :tmi.twitch.tv USERNOTICE #posty :hi";
+        let details = usernotice_details_raw(raw);
+        assert_eq!(details.actor.as_deref(), Some("viewer67"));
+        assert_eq!(details.compact.as_deref(), Some("watch streak · 80 streams"));
     }
 
     #[test]
@@ -809,7 +845,7 @@ mod tests {
                    room-id=71092938;subscriber=1;system-msg=resub;\
                    tmi-sent-ts=1581713640019;user-id=21156217;user-type= \
                    :tmi.twitch.tv USERNOTICE #qaixx :peepoEvil";
-        let details = usernotice_details(&parse_usernotice(raw));
+        let details = usernotice_details_raw(raw);
         assert_eq!(details.actor.as_deref(), Some("Oilrats"));
         assert_eq!(details.compact.as_deref(), Some("resubbed · 12 mo · Tier 1"));
         assert_eq!(details.gift_count, None);
@@ -825,7 +861,7 @@ mod tests {
                    room-id=1;subscriber=0;system-msg=gift;\
                    tmi-sent-ts=1581713640019;user-id=2;user-type= \
                    :tmi.twitch.tv USERNOTICE #chan";
-        let details = usernotice_details(&parse_usernotice(raw));
+        let details = usernotice_details_raw(raw);
         assert_eq!(details.actor.as_deref(), Some("Rich"));
         assert_eq!(
             details.compact.as_deref(),
@@ -845,7 +881,7 @@ mod tests {
                    msg-param-gift-months=1;room-id=1;subscriber=0;\
                    system-msg=gift;tmi-sent-ts=1581713640019;user-id=2;user-type= \
                    :tmi.twitch.tv USERNOTICE #chan";
-        let details = usernotice_details(&parse_usernotice(raw));
+        let details = usernotice_details_raw(raw);
         assert_eq!(details.actor.as_deref(), Some("Rich"));
         assert_eq!(
             details.compact.as_deref(),

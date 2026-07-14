@@ -476,7 +476,12 @@ async fn handle_read(
         }
         tmi::Message::UserNotice(un) => {
             if let Some(ch) = channels.get(&channel_key(un.channel())) {
-                if let Some(event) = usernotice_event(&un) {
+                // `msg-param-value` (the authoritative watch-streak length) is
+                // dropped by tmi's parse, so read it off the raw message here.
+                let milestone_value = msg
+                    .tag(tmi::Tag::from("msg-param-value"))
+                    .and_then(|v| v.parse().ok());
+                if let Some(event) = usernotice_event(&un, milestone_value) {
                     let _ = ch.sink.send(event);
                 }
             }
