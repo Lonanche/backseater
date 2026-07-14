@@ -60,6 +60,15 @@ impl TwitchActions {
     /// (sub/follower/bits, including emotes the user can't use — shown locked
     /// in the picker like web). A failed resolve just omits the
     /// channel-dependent parts (the personal listing still runs).
+    ///
+    /// A **no-channel** tab's usable set comes from the app-wide shared listing
+    /// ([`Helix::personal_user_emotes`], fetched once and coalesced across the
+    /// launch burst): it's identical for every tab and paginates over many
+    /// pages, so N tabs each re-fetching it at launch bursts Helix into a 429.
+    /// A tab **with** a channel still fetches the `broadcaster_id`-scoped usable
+    /// listing (Twitch only includes the channel's follower emotes with the
+    /// param), but falls back to the shared set if that fetch is rate-limited so
+    /// the picker/autocomplete never ends up empty.
     pub async fn native_emotes(
         &self,
         channel: Option<&str>,
@@ -71,15 +80,43 @@ impl TwitchActions {
             Some(c) => self.helix.user_id(c).await.ok(),
             None => None,
         };
-        tokio::join!(
-            self.helix.user_emotes(broadcaster_id.as_deref()),
+        // The usable set + the channel's own set, concurrently.
+        //
+        // For the usable set: a **no-channel** tab (`broadcaster_id == None`)
+        // returns the app-wide shared listing ([`Helix::personal_user_emotes`],
+        // fetched once and coalesced across the launch burst) — this is the case
+        // that flooded Helix into a 429 (every tab re-paginating the identical
+        // account-wide set). A tab **with** a Twitch channel still fetches the
+        // `broadcaster_id`-scoped usable listing so its follower emotes complete,
+        // but falls back to the shared base (below) so a rate-limited/failed
+        // channel fetch still yields the globals instead of an empty picker.
+        let (usable, channel_emotes) = tokio::join!(
+            async {
+                match &broadcaster_id {
+                    Some(id) => self.helix.user_emotes(Some(id)).await,
+                    None => self.helix.personal_user_emotes().await.map(|s| (*s).clone()),
+                }
+            },
             async {
                 match &broadcaster_id {
                     Some(id) => self.helix.channel_emotes(id).await,
                     None => Ok(Vec::new()),
                 }
             }
-        )
+        );
+        let personal = match usable {
+            Ok(u) => Ok(u),
+            // Channel-scoped fetch failed (e.g. 429): fall back to the shared
+            // account-wide set so the picker/autocomplete still has the globals.
+            Err(e) if broadcaster_id.is_some() => {
+                match self.helix.personal_user_emotes().await {
+                    Ok(shared) => Ok((*shared).clone()),
+                    Err(_) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        };
+        (personal, channel_emotes)
     }
 
     /// The users currently in `channel`'s chat (broadcaster/moderator only —

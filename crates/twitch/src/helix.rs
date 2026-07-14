@@ -187,6 +187,42 @@ impl Helix {
         self.emote_pages(url, "listing user emotes").await
     }
 
+    /// The logged-in user's *global* personal emote set (`user_emotes(None)` —
+    /// no `broadcaster_id`), fetched **once per app** and shared across every
+    /// tab. This listing is identical for every tab (it's the account's own
+    /// usable emotes, independent of the viewed channel) and paginates over many
+    /// pages for an emote-rich account — one fetch per tab at launch bursts
+    /// hundreds of Helix calls → 429. The cache is keyed by the logged-in
+    /// `user_id`; a per-key `tokio::Mutex` coalesces the launch burst onto a
+    /// single fetch (later tabs await the same result rather than racing their
+    /// own). A failed fetch is not cached, so it retries on the next open.
+    pub async fn personal_user_emotes(&self) -> anyhow::Result<std::sync::Arc<Vec<Emote>>> {
+        use std::collections::HashMap;
+        use std::sync::{Arc, OnceLock};
+        use tokio::sync::Mutex;
+
+        // Per-user entry: the shared fetch lock guards both the in-flight fetch
+        // and the cached result, so concurrent callers coalesce onto one request.
+        type Cache = Mutex<HashMap<String, Arc<Mutex<Option<Arc<Vec<Emote>>>>>>>;
+        static CACHE: OnceLock<Cache> = OnceLock::new();
+
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let entry = {
+            let mut map = cache.lock().await;
+            map.entry(self.moderator_id.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(None)))
+                .clone()
+        };
+
+        let mut guard = entry.lock().await;
+        if let Some(cached) = guard.as_ref() {
+            return Ok(cached.clone());
+        }
+        let emotes = Arc::new(self.user_emotes(None).await?);
+        *guard = Some(emotes.clone());
+        Ok(emotes)
+    }
+
     /// Fetches a channel's own emote set (sub tiers, follower, bits) by numeric
     /// `broadcaster_id`, following pagination. Unlike [`user_emotes`](Self::user_emotes)
     /// this is not scoped to what the caller can *use* — it lists the channel's

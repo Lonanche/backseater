@@ -647,14 +647,28 @@ impl Controller {
             let personal = match personal {
                 Ok(p) => p,
                 Err(e) => {
-                    // Most likely an old token without `user:read:emotes` —
-                    // cross-channel sub emotes stay out of the picker +
-                    // autocomplete until the next /login.
-                    tracing::warn!(
-                        "fetching personal Twitch emotes failed ({e:#}); \
-                         log out and back in if your token predates the \
-                         user:read:emotes scope"
-                    );
+                    // A 429 is transient rate-limiting (many tabs fetching at
+                    // once), not a scope problem — say so rather than sending the
+                    // user to re-login for nothing. Anything else is most likely
+                    // an old token without `user:read:emotes`, so cross-channel
+                    // sub emotes stay out of the picker + autocomplete until the
+                    // next /login.
+                    let rate_limited = e
+                        .downcast_ref::<reqwest::Error>()
+                        .and_then(|re| re.status())
+                        == Some(reqwest::StatusCode::TOO_MANY_REQUESTS);
+                    if rate_limited {
+                        tracing::warn!(
+                            "fetching personal Twitch emotes was rate-limited by \
+                             Twitch (429); reopen the picker to retry"
+                        );
+                    } else {
+                        tracing::warn!(
+                            "fetching personal Twitch emotes failed ({e:#}); \
+                             log out and back in if your token predates the \
+                             user:read:emotes scope"
+                        );
+                    }
                     if had_cache {
                         // Keep showing the cached sets rather than clobbering
                         // them with an empty fetch.
