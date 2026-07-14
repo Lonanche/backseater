@@ -729,6 +729,10 @@ pub(crate) struct BackseaterApp {
     mentions_tab_selected: bool,
     /// Scroll position of the global Mentions tab's feed (tailed like the panels).
     mentions_scroll: ScrollHandle,
+    /// Scroll positions of the settings content panes, so their scrollbars can be
+    /// driven persistently (always visible when the content overflows).
+    settings_scroll: ScrollHandle,
+    tab_settings_scroll: ScrollHandle,
     /// Set when a mention arrived; the global Mentions tab tails on next render.
     mentions_new: bool,
     /// Mention-store subscriptions: row clicks → select the source tab, and
@@ -980,6 +984,8 @@ impl BackseaterApp {
             mention_store,
             mentions_tab_selected: false,
             mentions_scroll: ScrollHandle::new(),
+            settings_scroll: ScrollHandle::new(),
+            tab_settings_scroll: ScrollHandle::new(),
             mentions_new: false,
             _mention_subs,
         }
@@ -2023,6 +2029,7 @@ impl BackseaterApp {
             selected.label(),
             body.into_any_element(),
             "settings-scroll",
+            &self.settings_scroll,
             cx,
         )
     }
@@ -2066,6 +2073,7 @@ impl BackseaterApp {
             selected.label(),
             body.into_any_element(),
             "tab-settings-scroll",
+            &self.tab_settings_scroll,
             cx,
         )
     }
@@ -5093,8 +5101,10 @@ fn settings_shell(
     title: &'static str,
     body: gpui::AnyElement,
     scroll_id: &'static str,
+    scroll: &ScrollHandle,
     cx: &App,
 ) -> gpui::AnyElement {
+    use gpui_component::scroll::{Scrollbar, ScrollbarAxis, ScrollbarShow};
     h_flex()
         .size_full()
         .items_stretch()
@@ -5110,27 +5120,48 @@ fn settings_shell(
                 .border_color(cx.theme().sidebar_border)
                 .children(rail),
         )
+        // The content pane holds the scrolling body plus an always-visible
+        // scrollbar overlay (`ScrollbarShow::Always` overrides the theme's
+        // fade-when-idle default) so people can see there's more settings below
+        // the fold. The Scrollbar only paints a thumb when the body overflows.
         .child(
             div()
-                .id(scroll_id)
+                .relative()
                 .flex_1()
                 .min_w_0()
                 .h_full()
-                .overflow_y_scroll()
-                .px_5()
-                .py_4()
                 .child(
-                    v_flex()
-                        .w_full()
-                        .max_w(px(520.))
-                        .gap_4()
+                    div()
+                        .id(scroll_id)
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(scroll)
+                        .px_5()
+                        .py_4()
                         .child(
-                            div()
-                                .text_size(px(17.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(SharedString::from(title)),
-                        )
-                        .child(body),
+                            v_flex()
+                                .w_full()
+                                .max_w(px(520.))
+                                .gap_4()
+                                .child(
+                                    div()
+                                        .text_size(px(17.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(SharedString::from(title)),
+                                )
+                                .child(body),
+                        ),
+                )
+                .child(
+                    // Match gpui-component's own `ScrollbarLayer`: the Scrollbar
+                    // must sit in an absolutely-positioned full-size overlay to
+                    // get the bounds it paints the thumb into.
+                    div().absolute().top_0().left_0().right_0().bottom_0().child(
+                        Scrollbar::new(scroll)
+                            .id(SharedString::from(scroll_id))
+                            .axis(ScrollbarAxis::Vertical)
+                            .scrollbar_show(ScrollbarShow::Always),
+                    ),
                 ),
         )
         .into_any_element()
