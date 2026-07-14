@@ -3,6 +3,38 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.4.5-beta.1
+
+### Features
+
+- Right-click a chatter's name in chat to reply to them: their `@name` is added
+  to the message box (with sensible spacing) and the send target switches to
+  their platform.
+- Usernames in event rows are clickable — the actor, any @mentions, and the
+  author and mentions of a sub/resub's attached message all open that user's
+  usercard.
+- The usercard header has an Open-profile link that opens the chatter's profile
+  page on Twitch, Kick, or YouTube.
+- The chat-mode bar's placement is now Off / Top / Bottom (defaults to Top)
+  instead of a plain on/off toggle.
+
+### Fixes
+
+- Tabs wrap onto multiple rows instead of scrolling horizontally, so every tab
+  stays visible at once (Chatterino-style); the scroll strip and arrows are gone.
+- The account-wide Twitch emote set is fetched once for the whole app instead of
+  once per tab, fixing a flood of rate-limit errors when many empty tabs were
+  open. A rate-limit is now told apart from a missing-permission error in the log.
+- Chat line height follows the font's real metrics instead of a fixed multiple,
+  tightening line spacing with a little breathing room between messages.
+- Accounts whose name starts with `@` (like some bots on Kick and YouTube) now
+  match ignore / suppress / highlight / mention rules and Kick moderation lookups.
+- The settings content area shows a persistent scrollbar when a category runs
+  past the bottom of the window, so it's clear there's more below.
+- Settings pickers were redesigned: Off/Top/Bottom, streamer mode, and mod-button
+  mode are now dropdowns, and the mod-button platform scope and the Text/Regex/User
+  add-mode selector are segmented pill controls.
+
 ## v0.4.0
 
 ### Features
