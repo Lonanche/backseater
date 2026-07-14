@@ -82,6 +82,26 @@ impl UserCard {
         }
     }
 
+    /// The account's profile/channel URL on its platform, for the header's "open
+    /// profile" link. Twitch and Kick key on the `login` (their URL slug);
+    /// YouTube has no public login slug in chat, so it uses the `UC…` channel id
+    /// carried in `user_id`. `None` when the needed identifier is empty or the
+    /// platform has no web profile.
+    pub fn profile_url(&self) -> Option<String> {
+        match self.platform {
+            Platform::Twitch if !self.login.is_empty() => {
+                Some(format!("https://twitch.tv/{}", self.login))
+            }
+            Platform::Kick if !self.login.is_empty() => {
+                Some(format!("https://kick.com/{}", self.login))
+            }
+            Platform::YouTube if !self.user_id.is_empty() => {
+                Some(format!("https://www.youtube.com/channel/{}", self.user_id))
+            }
+            _ => None,
+        }
+    }
+
     /// Records the target's channel role from the badges on the message that
     /// opened the card. Twitch badge ids are `set-id/version` (e.g. `moderator/1`);
     /// Kick uses the bare type (`moderator`) — matching the set-id prefix covers
@@ -108,20 +128,32 @@ impl UserCard {
         let name_color = self.color.unwrap_or(0x9147ff);
 
         let mut lines = v_flex().gap_1();
-        // Name row: the colored display name with the platform's logo after it.
-        lines = lines.child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(
-                    div()
-                        .font_weight(FontWeight::BOLD)
-                        .text_size(px(18.))
-                        .text_color(rgb(name_color))
-                        .child(SharedString::from(self.display_name.clone())),
-                )
-                .child(crate::platform_icon(self.platform, 14.)),
-        );
+        // Name row: the colored display name, the platform's logo, and — when the
+        // platform has a web profile — a link that opens it in the browser.
+        let mut name_row = h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                div()
+                    .font_weight(FontWeight::BOLD)
+                    .text_size(px(18.))
+                    .text_color(rgb(name_color))
+                    .child(SharedString::from(self.display_name.clone())),
+            )
+            .child(crate::platform_icon(self.platform, 14.));
+        if let Some(url) = self.profile_url() {
+            name_row = name_row.child(
+                Button::new("usercard-open-profile")
+                    .label("Open profile ↗")
+                    .ghost()
+                    .xsmall()
+                    .compact()
+                    .on_click(move |_, _, cx| {
+                        cx.open_url(&url);
+                    }),
+            );
+        }
+        lines = lines.child(name_row);
         // Identity line: the login when it differs from the display name
         // (localized Twitch names), and the numeric id with a copy button.
         {
@@ -404,6 +436,26 @@ mod tests {
         assert_eq!(sub_line(&hidden), "Subscription status hidden");
 
         assert_eq!(sub_line(&SubAge::default()), "Not subscribed");
+    }
+
+    #[test]
+    fn profile_url_per_platform() {
+        let twitch = UserCard::new("oilrats".into(), "OilRats".into(), "1".into(), Platform::Twitch, None);
+        assert_eq!(twitch.profile_url().as_deref(), Some("https://twitch.tv/oilrats"));
+
+        let kick = UserCard::new("qaixx".into(), "Qaixx".into(), "2".into(), Platform::Kick, None);
+        assert_eq!(kick.profile_url().as_deref(), Some("https://kick.com/qaixx"));
+
+        // YouTube uses the UC… channel id (no login slug in chat).
+        let yt = UserCard::new(String::new(), "Creator".into(), "UC123".into(), Platform::YouTube, None);
+        assert_eq!(
+            yt.profile_url().as_deref(),
+            Some("https://www.youtube.com/channel/UC123")
+        );
+
+        // Missing identifier → no link.
+        let bare = UserCard::new(String::new(), "Anon".into(), String::new(), Platform::Twitch, None);
+        assert_eq!(bare.profile_url(), None);
     }
 
     #[test]
