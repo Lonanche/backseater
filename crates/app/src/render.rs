@@ -2173,6 +2173,7 @@ pub fn render_automod(
     selection: &Selection,
     ordinal: &mut usize,
     on_action: AutoModClick,
+    name_click: Option<&MentionClick>,
 ) -> impl IntoElement {
     let scale = Scale::new(font_size);
     let p = palette();
@@ -2184,6 +2185,8 @@ pub fn render_automod(
 
     // Header + held text as selectable per-word tokens (they wrap and copy like
     // chat bodies); the header starts a row so a multi-row copy stays separated.
+    // The held-message author's name is a clickable token (opens their usercard)
+    // split out of the header text, with the plain wording on either side.
     let mut header: Vec<gpui::AnyElement> = Vec::new();
     header.push(text_token(
         &ctx,
@@ -2197,7 +2200,21 @@ pub fn render_automod(
         &mut header,
         &ctx,
         ordinal,
-        &format!("AutoMod held a message from {user} ({reason}):"),
+        "AutoMod held a message from ",
+        Some(p.automod_text),
+    );
+    header.push(automod_name_token(
+        &ctx,
+        ordinal,
+        user,
+        p.automod_text,
+        name_click,
+    ));
+    push_text_words(
+        &mut header,
+        &ctx,
+        ordinal,
+        &format!(" ({reason}):"),
         Some(p.automod_text),
     );
     let mut body: Vec<gpui::AnyElement> = Vec::new();
@@ -2277,6 +2294,42 @@ pub fn render_automod(
                 .child(h_flex().min_w_0().flex_wrap().items_start().children(body))
                 .child(actions),
         )
+}
+
+/// The AutoMod header's chatter name as one selectable token that, when a
+/// [`MentionClick`] is supplied, is also clickable (opens the chatter's usercard)
+/// and underlines on hover — a drag-select ending on it copies instead of firing.
+/// Without a handler it's a plain selectable token like the rest of the header.
+fn automod_name_token(
+    ctx: &RenderCtx,
+    ordinal: &mut usize,
+    user: &str,
+    color: u32,
+    name_click: Option<&MentionClick>,
+) -> gpui::AnyElement {
+    let click_ord = *ordinal;
+    let inner = text_token(ctx, ordinal, user.to_string(), Some(color), false, false);
+    match name_click {
+        Some(cb) => {
+            let cb = cb.clone();
+            let login = user.to_string();
+            let sel = ctx.selection.clone();
+            div()
+                .id(ctx.ids.token(click_ord))
+                .cursor_pointer()
+                .border_b_1()
+                .border_color(gpui::transparent_black())
+                .hover(move |s| s.border_color(rgb(color)))
+                .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                    if !sel.has_selection() {
+                        cb(&login, window, cx);
+                    }
+                })
+                .child(inner)
+                .into_any_element()
+        }
+        None => inner,
+    }
 }
 
 /// Extracts the clickable name from an event word, or `None` if the word isn't

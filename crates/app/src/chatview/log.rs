@@ -319,6 +319,12 @@ impl Render for LogView {
                     resolved,
                 } => {
                     highlight = Some(render::highlight_automod());
+                    // AutoMod rows are Twitch-only (the EventSub feed they arrive
+                    // on is Twitch's), so the chatter name opens a Twitch usercard.
+                    let name_click = mention_click_for_platform(
+                        &render_entity,
+                        bks_core::Platform::Twitch,
+                    );
                     render::render_automod(
                         message_id,
                         user,
@@ -329,6 +335,7 @@ impl Render for LogView {
                         &this.selection,
                         &mut ordinal,
                         automod_click.clone(),
+                        Some(&name_click),
                     )
                     .into_any_element()
                 }

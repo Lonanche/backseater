@@ -2256,24 +2256,40 @@ impl ChatView {
         let p = render::palette();
         // The banner's message renders with the shared message renderer (badges,
         // colored name, emotes) against a throwaway selection — banner text isn't
-        // part of the log's drag-select.
+        // part of the log's drag-select. The author name (and `@mentions` in the
+        // body) open the chatter's usercard on the pin's platform, like they do in
+        // the log; the click resolves the identity by name (the pinned message may
+        // no longer be in the log buffer, so we can't key on its id).
         let selection = selectable::Selection::new();
         selection.begin_frame();
         let mut ordinal = 0usize;
+        let author_login = pin.message.author.login.clone();
+        let name_click: render::NameClick = {
+            let entity = cx.entity();
+            let login = author_login.clone();
+            Box::new(move |_window: &mut Window, cx: &mut App| {
+                entity.update(cx, |this, cx| {
+                    this.open_usercard_named(&login, platform, cx);
+                    cx.notify();
+                });
+            })
+        };
+        let mention_click = mention_click_for_platform(&cx.entity(), platform);
+        let handlers = render::RowHandlers {
+            name_click: Some(name_click),
+            mention_click: Some(mention_click),
+            ..Default::default()
+        };
         let message = render::render_message(
             &pin.message,
             render::RowFlags::default(),
             self.font_size,
             &selection,
             &mut ordinal,
-            render::RowHandlers::default(),
+            handlers,
         );
 
-        let header_label = if pin.pinned_by.is_empty() {
-            "Pinned".to_string()
-        } else {
-            format!("Pinned by {}", pin.pinned_by)
-        };
+        let pinned_by = pin.pinned_by.clone();
         let msg_id = pin.message.id.clone();
 
         // A full-width banner flush to the chat's top edge, floating over the
@@ -2303,7 +2319,32 @@ impl ChatView {
                             .flex_none()
                             .text_color(gpui::rgb(p.event_text)),
                     )
-                    .child(SharedString::from(header_label)),
+                    .map(|row| {
+                        if pinned_by.is_empty() {
+                            row.child(SharedString::from("Pinned"))
+                        } else {
+                            // The pinning moderator's name is clickable (opens their
+                            // usercard on the pin's platform), the rest is label text.
+                            let entity = cx.entity();
+                            let name = pinned_by.clone();
+                            row.child(SharedString::from("Pinned by")).child(
+                                div()
+                                    .id(SharedString::from(format!("pin-by-{platform:?}")))
+                                    .cursor_pointer()
+                                    .hover(|s| s.underline())
+                                    .child(SharedString::from(pinned_by.clone()))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        move |_, _window, cx| {
+                                            entity.update(cx, |this, cx| {
+                                                this.open_usercard_named(&name, platform, cx);
+                                                cx.notify();
+                                            });
+                                        },
+                                    ),
+                            )
+                        }
+                    }),
             );
 
         if self.can_pin(platform, cx) {
