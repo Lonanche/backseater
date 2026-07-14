@@ -72,6 +72,13 @@ pub enum StreamerModeChoice {
     Auto,
 }
 
+impl StreamerModeChoice {
+    /// The choices in display order (aligned with [`Self::LABELS`]).
+    pub const ALL: [Self; 3] = [Self::Off, Self::On, Self::Auto];
+    /// The labels shown in the settings picker (aligned with [`Self::ALL`]).
+    pub const LABELS: &'static [&'static str] = &["Off", "On", "Auto"];
+}
+
 /// Where the chat-mode bar (slow / followers-only / sub-only / ...) sits:
 /// hidden entirely, at the top of the chat panel (below the "Chat" header,
 /// above pinned messages), or just above the input box. `Top` by default.
@@ -84,6 +91,13 @@ pub enum ChatModesPlacement {
     Bottom,
 }
 
+impl ChatModesPlacement {
+    /// The choices in display order (aligned with [`Self::LABELS`]).
+    pub const ALL: [Self; 3] = [Self::Off, Self::Top, Self::Bottom];
+    /// The labels shown in the settings picker (aligned with [`Self::ALL`]).
+    pub const LABELS: &'static [&'static str] = &["Off", "Top", "Bottom"];
+}
+
 /// How the per-message moderation buttons show: on every row the user can
 /// moderate, only while the row is hovered, or not at all. `Hover` still
 /// reserves the strip's width so message text doesn't shift as the pointer moves.
@@ -94,6 +108,13 @@ pub enum ModButtonMode {
     #[default]
     Always,
     Hover,
+}
+
+impl ModButtonMode {
+    /// The choices in display order (aligned with [`Self::LABELS`]).
+    pub const ALL: [Self; 3] = [Self::Off, Self::Always, Self::Hover];
+    /// The labels shown in the settings picker (aligned with [`Self::ALL`]).
+    pub const LABELS: &'static [&'static str] = &["Off", "Always", "On hover"];
 }
 
 /// One moderation button in the chat rows' left-side strip. Clicking it runs

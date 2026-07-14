@@ -142,6 +142,10 @@ enum SettingsInput {
 /// The font-family dropdown's state type: a searchable list of font names.
 type FontCombobox = ComboboxState<SearchableVec<SharedString>>;
 
+/// The state type for a small settings enum-picker dropdown (chat-modes /
+/// streamer / mod-button mode), backed by a plain string list.
+type SettingSelect = gpui_component::select::SelectState<SearchableVec<SharedString>>;
+
 /// The first entry in the font dropdown; selecting it restores the system font
 /// (persisted as `font_family: None`).
 const DEFAULT_FONT_LABEL: &str = "Default (system)";
@@ -632,6 +636,13 @@ pub(crate) struct BackseaterApp {
     /// is replaced with it.
     settings_font: Entity<FontCombobox>,
     _settings_font_sub: Subscription,
+    /// The Appearance/Streamer/Mod-button enum pickers, as kit Select dropdowns.
+    /// Window-bound (their popovers), so recreated on each settings-window open;
+    /// each subscription maps the picked index back to its setting.
+    settings_chat_modes: Entity<SettingSelect>,
+    settings_streamer: Entity<SettingSelect>,
+    settings_mod_mode: Entity<SettingSelect>,
+    _settings_select_subs: Vec<Subscription>,
     /// Input for the name of a new/edited theme profile (Themes category).
     /// Window-bound like the other kit inputs.
     settings_theme_name: Entity<InputState>,
@@ -867,6 +878,8 @@ impl BackseaterApp {
             Self::subscribe_mentions_name(&settings_inputs.mentions_tab_name, cx);
         let (settings_font, settings_font_sub) =
             Self::font_combobox(settings.font_family.as_deref(), window, cx);
+        let (settings_chat_modes, settings_streamer, settings_mod_mode, settings_select_subs) =
+            Self::build_setting_selects(&settings, window, cx);
         // Open the theme editor on the active custom theme (if any) so its colors
         // are editable straight away; otherwise no draft (a built-in is selected).
         let theme_draft = settings.active_custom_theme().cloned();
@@ -941,6 +954,10 @@ impl BackseaterApp {
             theme_draft,
             settings_font,
             _settings_font_sub: settings_font_sub,
+            settings_chat_modes,
+            settings_streamer,
+            settings_mod_mode,
+            _settings_select_subs: settings_select_subs,
             settings_window: None,
             main_window: window.window_handle(),
             popouts: Vec::new(),
@@ -997,6 +1014,12 @@ impl BackseaterApp {
             Self::font_combobox(self.settings.font_family.as_deref(), window, cx);
         self.settings_font = font;
         self._settings_font_sub = font_sub;
+        let (chat_modes, streamer, mod_mode, select_subs) =
+            Self::build_setting_selects(&self.settings, window, cx);
+        self.settings_chat_modes = chat_modes;
+        self.settings_streamer = streamer;
+        self.settings_mod_mode = mod_mode;
+        self._settings_select_subs = select_subs;
         // Rebind the theme editor's inputs (name + color pickers) to this window.
         let (theme_name, theme_pickers, theme_subs) =
             Self::theme_inputs(self.theme_draft.as_ref(), window, cx);
@@ -1041,6 +1064,133 @@ impl BackseaterApp {
             }
         });
         (state, sub)
+    }
+
+    /// Builds one small enum-picker dropdown ([`SettingSelect`]) bound to
+    /// `window`: a non-searchable list of `labels` with `selected` pre-picked.
+    /// On confirm, the picked label's index is mapped back through `on_pick`.
+    fn setting_select(
+        labels: &[&'static str],
+        selected: usize,
+        on_pick: impl Fn(&mut Self, usize, &mut Context<Self>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Entity<SettingSelect>, Subscription) {
+        let items: Vec<SharedString> = labels.iter().map(|s| SharedString::from(*s)).collect();
+        let list = SearchableVec::new(items.clone());
+        let state = cx.new(|cx| {
+            SettingSelect::new(list, Some(IndexPath::default().row(selected)), window, cx)
+                .searchable(false)
+        });
+        use gpui_component::select::SelectEvent;
+        let sub = cx.subscribe(&state, move |this, _, event: &SelectEvent<_>, cx| {
+            let SelectEvent::Confirm(value) = event;
+            if let Some(value) = value {
+                if let Some(ix) = items.iter().position(|v| v == value) {
+                    on_pick(this, ix, cx);
+                }
+            }
+        });
+        (state, sub)
+    }
+
+    /// Builds the three Appearance/Streamer/Mod-button enum-picker dropdowns and
+    /// their subscriptions from the current settings. Used by the constructor and
+    /// [`rebind_settings_inputs`](Self::rebind_settings_inputs) (kit Select state
+    /// is window-bound, so they're recreated on each settings-window open).
+    fn build_setting_selects(
+        settings: &Settings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (
+        Entity<SettingSelect>,
+        Entity<SettingSelect>,
+        Entity<SettingSelect>,
+        Vec<Subscription>,
+    ) {
+        let cm = settings::ChatModesPlacement::ALL
+            .iter()
+            .position(|c| *c == settings.chat_modes_placement)
+            .unwrap_or(0);
+        let (chat_modes, s1) = Self::setting_select(
+            settings::ChatModesPlacement::LABELS,
+            cm,
+            |this, ix, cx| this.set_chat_modes_placement(settings::ChatModesPlacement::ALL[ix], cx),
+            window,
+            cx,
+        );
+
+        let sm = settings::StreamerModeChoice::ALL
+            .iter()
+            .position(|c| *c == settings.streamer_mode)
+            .unwrap_or(0);
+        let (streamer, s2) = Self::setting_select(
+            settings::StreamerModeChoice::LABELS,
+            sm,
+            |this, ix, cx| this.set_streamer_mode(settings::StreamerModeChoice::ALL[ix], cx),
+            window,
+            cx,
+        );
+
+        let mm = settings::ModButtonMode::ALL
+            .iter()
+            .position(|c| *c == settings.mod_button_mode)
+            .unwrap_or(0);
+        let (mod_mode, s3) = Self::setting_select(
+            settings::ModButtonMode::LABELS,
+            mm,
+            |this, ix, cx| this.set_mod_button_mode(settings::ModButtonMode::ALL[ix], cx),
+            window,
+            cx,
+        );
+
+        (chat_modes, streamer, mod_mode, vec![s1, s2, s3])
+    }
+
+    /// Reseeds the three enum-picker dropdowns from the current settings when the
+    /// settings window is open, so a change made through another path (e.g. the
+    /// streamer banner's "Turn off" flipping `streamer_mode` while settings is
+    /// open) is reflected — the kit Select holds its selection internally, unlike
+    /// the old stateless segmented controls. A no-op when the value already
+    /// matches (so a change *from* the dropdown doesn't loop). Needs the settings
+    /// window for the window-bound `set_selected_index`; skipped when it's closed.
+    fn resync_setting_selects(&self, cx: &mut Context<Self>) {
+        let Some((handle, _)) = self.settings_window else {
+            return;
+        };
+        let targets = [
+            (
+                self.settings_chat_modes.clone(),
+                settings::ChatModesPlacement::ALL
+                    .iter()
+                    .position(|c| *c == self.settings.chat_modes_placement)
+                    .unwrap_or(0),
+            ),
+            (
+                self.settings_streamer.clone(),
+                settings::StreamerModeChoice::ALL
+                    .iter()
+                    .position(|c| *c == self.settings.streamer_mode)
+                    .unwrap_or(0),
+            ),
+            (
+                self.settings_mod_mode.clone(),
+                settings::ModButtonMode::ALL
+                    .iter()
+                    .position(|c| *c == self.settings.mod_button_mode)
+                    .unwrap_or(0),
+            ),
+        ];
+        let _ = handle.update(cx, |_, window, cx| {
+            for (state, want) in targets {
+                let current = state.read(cx).selected_index(cx).map(|ix| ix.row);
+                if current != Some(want) {
+                    state.update(cx, |s, cx| {
+                        s.set_selected_index(Some(IndexPath::default().row(want)), window, cx);
+                    });
+                }
+            }
+        });
     }
 
     /// Builds the Themes category's window-bound inputs: the profile-name field
@@ -2458,7 +2608,7 @@ impl BackseaterApp {
                             "Where active restrictions (slow, followers-only, sub-only, \
                              ...) show: off, at the top of the chat panel, or above the input.",
                         ),
-                        self.chat_modes_placement_seg(cx),
+                        self.chat_modes_placement_seg(),
                     ))
                     .child(card_divider())
                     .child(setting_row(
@@ -2594,27 +2744,7 @@ impl BackseaterApp {
     /// The Mod Buttons settings category: the strip's visibility mode and the
     /// custom-button editor (name / icon / command template / platform).
     fn mod_buttons_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use settings::ModButtonMode;
-        let current = self.settings.mod_button_mode;
-        let mode_seg = |choice: ModButtonMode, label: &'static str, cx: &mut Context<Self>| {
-            let selected = current == choice;
-            div()
-                .id(SharedString::from(format!("mod-mode-{label}")))
-                .px_3()
-                .py_1()
-                .rounded_md()
-                .cursor_pointer()
-                .when(selected, |s| {
-                    s.bg(cx.theme().secondary).font_weight(FontWeight::MEDIUM)
-                })
-                .when(!selected, |s| s.text_color(cx.theme().muted_foreground))
-                .hover(|s| s.bg(cx.theme().secondary))
-                .child(SharedString::from(label))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| this.set_mod_button_mode(choice, cx)),
-                )
-        };
+        let mode_seg = setting_dropdown(&self.settings_mod_mode, settings::ModButtonMode::LABELS);
 
         // A small glyph action on a button row (▲ ▼ ✎ ✕); disabled ones render
         // muted and inert (the first row's ▲, the last row's ▼).
@@ -2755,29 +2885,26 @@ impl BackseaterApp {
             })
             .collect();
 
-        let platform_seg =
-            |choice: Option<bks_core::Platform>, label: &'static str, cx: &mut Context<Self>| {
-                let selected = self.mod_button_platform == choice;
-                div()
-                    .id(SharedString::from(format!("mod-platform-{label}")))
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .when(selected, |s| {
-                        s.bg(cx.theme().secondary).font_weight(FontWeight::MEDIUM)
-                    })
-                    .when(!selected, |s| s.text_color(cx.theme().muted_foreground))
-                    .hover(|s| s.bg(cx.theme().secondary))
-                    .child(SharedString::from(label))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            this.mod_button_platform = choice;
-                            cx.notify();
-                        }),
-                    )
-            };
+        // The button's platform scope (Both / Twitch / Kick) — a single choice,
+        // so the pill segmented control.
+        const PLATFORM_CHOICES: [Option<bks_core::Platform>; 3] = [
+            None,
+            Some(bks_core::Platform::Twitch),
+            Some(bks_core::Platform::Kick),
+        ];
+        let platform_seg = segmented(
+            "mod-platform-seg",
+            ["Both", "Twitch", "Kick"],
+            PLATFORM_CHOICES
+                .iter()
+                .position(|c| *c == self.mod_button_platform)
+                .unwrap_or(0),
+            cx.listener(move |this, ix: &usize, _, cx| {
+                this.mod_button_platform = PLATFORM_CHOICES[*ix];
+                cx.notify();
+            }),
+            cx,
+        );
 
         v_flex()
             .gap_2()
@@ -2790,15 +2917,7 @@ impl BackseaterApp {
                          you moderate. \"On hover\" shows them only while the mouse \
                          is over a message.",
                     ),
-                    h_flex()
-                        .gap_1()
-                        .p_0p5()
-                        .rounded_lg()
-                        .bg(cx.theme().muted)
-                        .child(mode_seg(ModButtonMode::Off, "Off", cx))
-                        .child(mode_seg(ModButtonMode::Always, "Always", cx))
-                        .child(mode_seg(ModButtonMode::Hover, "On hover", cx))
-                        .into_any_element(),
+                    mode_seg,
                 )),
             )
             .child(div().h_1())
@@ -2837,16 +2956,7 @@ impl BackseaterApp {
                     .flex_wrap()
                     .gap_2()
                     .items_center()
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .p_0p5()
-                            .rounded_lg()
-                            .bg(cx.theme().muted)
-                            .child(platform_seg(None, "Both", cx))
-                            .child(platform_seg(Some(bks_core::Platform::Twitch), "Twitch", cx))
-                            .child(platform_seg(Some(bks_core::Platform::Kick), "Kick", cx)),
-                    )
+                    .child(platform_seg)
                     .child(div().flex_1())
                     .child(
                         Button::new("reset-mod-buttons")
@@ -2889,6 +2999,7 @@ impl BackseaterApp {
         }
         self.settings.mod_button_mode = mode;
         self.save_mod_buttons(cx);
+        self.resync_setting_selects(cx);
     }
 
     /// Adds a custom mod button from the editor fields. Only the command is
@@ -3023,25 +3134,8 @@ impl BackseaterApp {
     fn streamer_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         use settings::StreamerModeChoice;
         let current = self.settings.streamer_mode;
-        let seg = |choice: StreamerModeChoice, label: &'static str, cx: &mut Context<Self>| {
-            let selected = current == choice;
-            div()
-                .id(SharedString::from(format!("streamer-{label}")))
-                .px_3()
-                .py_1()
-                .rounded_md()
-                .cursor_pointer()
-                .when(selected, |s| {
-                    s.bg(cx.theme().secondary).font_weight(FontWeight::MEDIUM)
-                })
-                .when(!selected, |s| s.text_color(cx.theme().muted_foreground))
-                .hover(|s| s.bg(cx.theme().secondary))
-                .child(SharedString::from(label))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| this.set_streamer_mode(choice, cx)),
-                )
-        };
+        let streamer_seg =
+            setting_dropdown(&self.settings_streamer, settings::StreamerModeChoice::LABELS);
 
         let is_active = streamer_mode::is_active();
         let active = match (is_active, current) {
@@ -3070,15 +3164,7 @@ impl BackseaterApp {
                              are blanked until clicked. Auto follows streaming software \
                              (OBS, Streamlabs, XSplit, Twitch Studio, vMix, PRISM).",
                         ),
-                        h_flex()
-                            .gap_1()
-                            .p_0p5()
-                            .rounded_lg()
-                            .bg(cx.theme().muted)
-                            .child(seg(StreamerModeChoice::Off, "Off", cx))
-                            .child(seg(StreamerModeChoice::On, "On", cx))
-                            .child(seg(StreamerModeChoice::Auto, "Auto", cx))
-                            .into_any_element(),
+                        streamer_seg,
                     ))
                     .child(card_divider())
                     .child(setting_row(
@@ -3280,8 +3366,8 @@ impl BackseaterApp {
                 "Tab name",
                 Some("What the Mentions tab is called; leave empty for the default."),
                 div()
-                    .w(px(160.))
-                    .child(Input::new(&self.settings_inputs.mentions_tab_name).small())
+                    .w(px(180.))
+                    .child(Input::new(&self.settings_inputs.mentions_tab_name))
                     .into_any_element(),
             ))
             .into_any_element()
@@ -3345,13 +3431,7 @@ impl BackseaterApp {
                 }
                 seen.push(norm);
                 chips.push(
-                    h_flex()
-                        .items_center()
-                        .gap_1()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .bg(cx.theme().muted)
+                    term_chip(cx)
                         .child(SharedString::from(name.clone()))
                         .child(
                             div()
@@ -3407,31 +3487,16 @@ impl BackseaterApp {
                 }
                 None => SharedString::from(term.clone()).into_any_element(),
             };
-            h_flex()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .bg(cx.theme().secondary)
+            term_chip(cx)
                 .child(body)
                 .when(is_mentions, |chip| {
                     chip.child(self.term_bell(&list.id_stem(), &term, cx))
                 })
-                .child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "rm-{}-{remove}",
-                            list.id_stem()
-                        )))
-                        .px_1()
-                        .cursor_pointer()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(SharedString::from("✕"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.remove_term(list, &remove, cx);
-                        })),
-                )
+                .child(chip_remove(
+                    SharedString::from(format!("rm-{}-{remove}", list.id_stem())),
+                    cx.listener(move |this, _, _, cx| this.remove_term(list, &remove, cx)),
+                    cx,
+                ))
                 .into_any_element()
         }));
 
@@ -3502,74 +3567,71 @@ impl BackseaterApp {
         let key = list.mode_key();
         let (add_kind, add_platforms) = self.term_add_mode(list);
 
-        // Segment styling shared by both rows (same look as the mod-button
-        // editor's segments, sized down to fit the term editors).
-        let seg_style = |seg: Stateful<Div>, selected: bool, cx: &mut Context<Self>| {
-            seg.px_2()
+        // Kind is a single choice → the kit segmented control.
+        const KINDS: [TermEntryKind; 3] =
+            [TermEntryKind::Text, TermEntryKind::Regex, TermEntryKind::User];
+        let kind_seg = segmented(
+            SharedString::from(format!("term-kind-{key}")),
+            ["Text", "Regex", "User"],
+            KINDS.iter().position(|k| *k == add_kind).unwrap_or(0),
+            cx.listener(move |this, ix: &usize, window, cx| {
+                this.term_add_modes.entry(key).or_default().0 = KINDS[*ix];
+                this.sync_term_placeholder(list, window, cx);
+                cx.notify();
+            }),
+            cx,
+        );
+
+        // Platforms are multi-select (empty = all), so they stay individual
+        // toggle chips — a segmented control would imply a single choice.
+        let plat_chip = |selected: bool, id: String, label: &'static str, cx: &mut Context<Self>| {
+            let base = div()
+                .id(SharedString::from(id))
+                .flex_none()
+                .px_2p5()
                 .py_0p5()
-                .rounded_md()
+                .rounded_full()
+                .border_1()
                 .cursor_pointer()
                 .text_xs()
-                .when(selected, |s| {
-                    s.bg(cx.theme().secondary).font_weight(FontWeight::MEDIUM)
-                })
-                .when(!selected, |s| s.text_color(cx.theme().muted_foreground))
-                .hover(|s| s.bg(cx.theme().secondary))
+                .child(SharedString::from(label));
+            if selected {
+                base.bg(cx.theme().primary)
+                    .border_color(cx.theme().primary)
+                    .text_color(cx.theme().primary_foreground)
+                    .font_weight(FontWeight::MEDIUM)
+            } else {
+                base.border_color(cx.theme().border)
+                    .text_color(cx.theme().muted_foreground)
+                    .hover(|s| s.bg(cx.theme().secondary_hover).text_color(cx.theme().foreground))
+            }
         };
-        let kind_seg = |kind: TermEntryKind, label: &'static str, cx: &mut Context<Self>| {
-            seg_style(
-                div().id(SharedString::from(format!("term-kind-{key}-{label}"))),
-                add_kind == kind,
-                cx,
-            )
-            .child(SharedString::from(label))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    this.term_add_modes.entry(key).or_default().0 = kind;
-                    // The placeholder always narrates the picked mode.
-                    this.sync_term_placeholder(list, window, cx);
-                    cx.notify();
-                }),
-            )
-        };
-        // "All platforms": selected when nothing specific is picked; clicking it
-        // clears the selection.
-        let all_seg = {
-            seg_style(
-                div().id(SharedString::from(format!("term-plat-{key}-all"))),
-                add_platforms.is_empty(),
-                cx,
-            )
-            .child(SharedString::from("All platforms"))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    this.term_add_modes.entry(key).or_default().1.clear();
-                    cx.notify();
-                }),
-            )
-        };
-        let plat_seg = |platform: bks_core::Platform, label: &'static str, cx: &mut Context<Self>| {
-            seg_style(
-                div().id(SharedString::from(format!("term-plat-{key}-{label}"))),
+        let all_chip = plat_chip(
+            add_platforms.is_empty(),
+            format!("term-plat-{key}-all"),
+            "All platforms",
+            cx,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.term_add_modes.entry(key).or_default().1.clear();
+            cx.notify();
+        }));
+        let one_chip = |platform: bks_core::Platform, label: &'static str, cx: &mut Context<Self>| {
+            plat_chip(
                 add_platforms.contains(&platform),
+                format!("term-plat-{key}-{label}"),
+                label,
                 cx,
             )
-            .child(SharedString::from(label))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    let picked = &mut this.term_add_modes.entry(key).or_default().1;
-                    // Toggle this platform in/out; empty falls back to "all".
-                    if let Some(pos) = picked.iter().position(|p| *p == platform) {
-                        picked.remove(pos);
-                    } else {
-                        picked.push(platform);
-                    }
-                    cx.notify();
-                }),
-            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let picked = &mut this.term_add_modes.entry(key).or_default().1;
+                if let Some(pos) = picked.iter().position(|p| *p == platform) {
+                    picked.remove(pos);
+                } else {
+                    picked.push(platform);
+                }
+                cx.notify();
+            }))
         };
 
         h_flex()
@@ -3577,27 +3639,17 @@ impl BackseaterApp {
             .flex_wrap()
             .items_center()
             .gap_2()
-            .child(
-                h_flex()
-                    .gap_1()
-                    .p_0p5()
-                    .rounded_lg()
-                    .bg(cx.theme().muted)
-                    .child(kind_seg(TermEntryKind::Text, "Text", cx))
-                    .child(kind_seg(TermEntryKind::Regex, "Regex", cx))
-                    .child(kind_seg(TermEntryKind::User, "User", cx)),
-            )
+            .child(kind_seg)
             .when(add_kind == TermEntryKind::User, |row| {
                 row.child(
                     h_flex()
+                        .flex_wrap()
+                        .items_center()
                         .gap_1()
-                        .p_0p5()
-                        .rounded_lg()
-                        .bg(cx.theme().muted)
-                        .child(all_seg)
-                        .child(plat_seg(bks_core::Platform::Twitch, "Twitch", cx))
-                        .child(plat_seg(bks_core::Platform::Kick, "Kick", cx))
-                        .child(plat_seg(bks_core::Platform::YouTube, "YouTube", cx)),
+                        .child(all_chip)
+                        .child(one_chip(bks_core::Platform::Twitch, "Twitch", cx))
+                        .child(one_chip(bks_core::Platform::Kick, "Kick", cx))
+                        .child(one_chip(bks_core::Platform::YouTube, "YouTube", cx)),
                 )
             })
             .into_any_element()
@@ -3919,36 +3971,9 @@ impl BackseaterApp {
     /// Toggles whether the chat-mode bar sits at the top of the chat panel or
     /// above the input. Persists, flips the process-wide flag, and repaints every
     /// tab (the bar lives outside the cached log, so a plain notify reaches it).
-    /// A small three-segment control (Off / Top / Bottom) picking where the
-    /// chat-mode bar sits, matching the mod-button-mode selector's style.
-    fn chat_modes_placement_seg(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use settings::ChatModesPlacement;
-        let current = self.settings.chat_modes_placement;
-        let seg = |choice: ChatModesPlacement, label: &'static str, cx: &mut Context<Self>| {
-            let selected = current == choice;
-            div()
-                .id(SharedString::from(format!("chat-modes-{label}")))
-                .px_3()
-                .py_1()
-                .rounded_md()
-                .cursor_pointer()
-                .when(selected, |s| {
-                    s.bg(cx.theme().secondary).font_weight(FontWeight::MEDIUM)
-                })
-                .when(!selected, |s| s.text_color(cx.theme().muted_foreground))
-                .hover(|s| s.bg(cx.theme().secondary))
-                .child(SharedString::from(label))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| this.set_chat_modes_placement(choice, cx)),
-                )
-        };
-        h_flex()
-            .gap_1()
-            .child(seg(ChatModesPlacement::Off, "Off", cx))
-            .child(seg(ChatModesPlacement::Top, "Top", cx))
-            .child(seg(ChatModesPlacement::Bottom, "Bottom", cx))
-            .into_any_element()
+    /// The Off / Top / Bottom dropdown picking where the chat-mode bar sits.
+    fn chat_modes_placement_seg(&self) -> gpui::AnyElement {
+        setting_dropdown(&self.settings_chat_modes, settings::ChatModesPlacement::LABELS)
     }
 
     fn set_chat_modes_placement(
@@ -3965,6 +3990,7 @@ impl BackseaterApp {
         for tab in &self.tabs {
             tab.view.update(cx, |_, cx| cx.notify());
         }
+        self.resync_setting_selects(cx);
         cx.notify();
     }
 
@@ -4178,6 +4204,7 @@ impl BackseaterApp {
         self.settings.streamer_mode = choice;
         self.settings.save();
         self.apply_streamer_mode(cx);
+        self.resync_setting_selects(cx);
     }
 
     /// Recomputes whether streamer mode is active from the setting + OBS state,
@@ -5111,6 +5138,118 @@ fn settings_shell(
 
 /// One settings row: label (+ optional muted description under it) on the left,
 /// the control pinned right.
+/// A term/user chip shell (used for ignore / suppress / highlight / mention
+/// entries): a rounded-full pill with a hairline border and a soft fill, so the
+/// chips read as discrete tokens instead of flat blocks. The caller fills the
+/// body (and optional bell / remove controls).
+fn term_chip(cx: &App) -> gpui::Div {
+    h_flex()
+        .items_center()
+        .gap_1p5()
+        .pl_2p5()
+        .pr_1p5()
+        .py_0p5()
+        .rounded_full()
+        .bg(cx.theme().secondary)
+        .border_1()
+        .border_color(cx.theme().border)
+        .text_sm()
+}
+
+/// The ✕ that removes a [`term_chip`]. Muted at rest, tinting red on hover so
+/// its destructive action is legible without shouting on every chip.
+fn chip_remove(
+    id: SharedString,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(16.))
+        .rounded_full()
+        .cursor_pointer()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .hover(|s| {
+            s.bg(gpui::rgb(render::highlight_error().1))
+                .text_color(gpui::white())
+        })
+        .child(SharedString::from("✕"))
+        .on_click(on_click)
+}
+
+/// Renders a small settings enum-picker dropdown from its window-bound
+/// [`SettingSelect`] state (chat-modes / streamer / mod-button mode). The state
+/// owns the choices + selection + change subscription (see
+/// [`BackseaterApp::setting_select`]); this only draws the compact trigger.
+///
+/// The trigger hugs its selected label (short for "Off", wider for "Bottom"),
+/// but lives in a fixed-width, right-aligned slot so its changing size never
+/// reflows the row's left-hand label/description column. The opened menu is
+/// given the same width so every option fits however short the current one is.
+/// The width is derived from `labels` (the longest one + chrome), so it can't
+/// drift out of sync with the choices the way a hand-tuned literal could.
+fn setting_dropdown(state: &Entity<SettingSelect>, labels: &[&str]) -> gpui::AnyElement {
+    use gpui_component::select::Select;
+    let width = dropdown_width(labels);
+    h_flex()
+        .flex_none()
+        .w(px(width))
+        .justify_end()
+        .child(
+            div()
+                .flex_none()
+                .w_auto()
+                .child(Select::new(state).small().menu_width(px(width))),
+        )
+        .into_any_element()
+}
+
+/// A slot width for a [`setting_dropdown`] wide enough for its longest label
+/// plus the trigger's own chrome (padding + chevron + the menu row's check).
+/// An approximation from character count — the settings labels are short ASCII,
+/// so ~7px/char is comfortable without a text-system measurement.
+fn dropdown_width(labels: &[&str]) -> f32 {
+    let longest = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    (longest as f32 * 7.0 + 48.0).max(90.0)
+}
+
+/// A pill segmented control (the term editor's inline "Text / Regex / User"
+/// picker) built on the kit's [`TabBar`] Pill variant, wrapped in a bordered,
+/// filled track so it reads as one control. `labels[selected]` is lit;
+/// `on_click` receives the clicked index. (The fixed enum settings use
+/// [`setting_dropdown`] instead; this stays for the dynamic per-list picker.)
+fn segmented(
+    id: impl Into<ElementId>,
+    labels: impl IntoIterator<Item = &'static str>,
+    selected: usize,
+    on_click: impl Fn(&usize, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> gpui::AnyElement {
+    use gpui_component::tab::TabBar;
+    // The track hugs the pills tightly (no inner padding), so the border/fill is
+    // barely visible outside the selected pill instead of a chunky frame.
+    h_flex()
+        .flex_none()
+        .rounded_full()
+        .bg(cx.theme().muted)
+        .border_1()
+        .border_color(cx.theme().border)
+        .child(
+            TabBar::new(id)
+                .pill()
+                .small()
+                .selected_index(selected)
+                .children(labels.into_iter().map(SharedString::from))
+                .on_click(on_click),
+        )
+        .into_any_element()
+}
+
 fn setting_row(
     label: &str,
     desc: Option<&str>,
