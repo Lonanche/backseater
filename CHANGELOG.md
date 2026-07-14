@@ -3,6 +3,19 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.4.5-beta.2
+
+### Features
+
+- Messages sent by redeeming Twitch's built-in "Highlight My Message" channel-point
+  reward now show as a highlighted row with a HIGHLIGHTED tag, in their own color
+  you can set under Settings → Themes on a custom theme.
+
+### Fixes
+
+- Raised the username contrast floor so dim blue/red/purple names that sat just
+  below readable on the darkened chat log are nudged legible while keeping their hue.
+
 ## v0.4.5-beta.1
 
 ### Features
