@@ -330,6 +330,7 @@ pub fn build_message(
         elements,
         reply,
         first_message: false,
+        highlighted: false,
         historical: false,
         reward_id: None,
     }

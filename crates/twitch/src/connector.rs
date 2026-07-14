@@ -204,6 +204,7 @@ fn usernotice_message(un: &tmi::msg::UserNotice<'_>) -> Option<Box<Message>> {
         raw_text: user_msg.to_string(),
         reply: None,
         first_message: false,
+        highlighted: false,
         historical: false,
         reward_id: None,
     }))
@@ -443,6 +444,10 @@ pub(crate) fn privmsg_to_message(
         raw_text: pm.text().to_string(),
         reply,
         first_message,
+        // Twitch's built-in "Highlight My Message" reward marks the PRIVMSG with
+        // `msg-id=highlighted-message` (unlike text-input custom rewards, which
+        // instead carry a `custom-reward-id`); the UI highlights the row for it.
+        highlighted: pm.msg_id() == Some("highlighted-message"),
         historical: false,
         // A non-empty `custom-reward-id` marks a message sent by redeeming a
         // text-requiring channel-point reward; the UI pairs it with the pubsub
@@ -548,6 +553,27 @@ mod tests {
             msg.reward_id.as_deref(),
             Some("be22f712-8fd9-426a-90df-c13eae6cc6dc")
         );
+    }
+
+    #[test]
+    fn highlighted_message_reward_is_flagged() {
+        let raw = "@badge-info=;badges=;color=#8A2BE2;display-name=vesdeg;emotes=;\
+                   first-msg=0;flags=;id=abc;mod=0;msg-id=highlighted-message;\
+                   room-id=164774298;subscriber=0;tmi-sent-ts=1709298826724;\
+                   turbo=0;user-id=164774298;user-type= \
+                   :vesdeg!vesdeg@vesdeg.tmi.twitch.tv PRIVMSG #vesdeg :look at me";
+        let msg = privmsg_to_message("#vesdeg", &parse_privmsg(raw), false);
+        assert!(msg.highlighted);
+        assert!(msg.reward_id.is_none());
+    }
+
+    #[test]
+    fn normal_message_is_not_highlighted() {
+        let raw = "@badge-info=;badges=;color=;display-name=qaixx;emotes=;id=abc;\
+                   mod=0;room-id=11148817;subscriber=0;tmi-sent-ts=1594555275886;\
+                   turbo=0;user-id=40286300;user-type= \
+                   :qaixx!qaixx@qaixx.tmi.twitch.tv PRIVMSG #lonanche :hi";
+        assert!(!privmsg_to_message("#lonanche", &parse_privmsg(raw), false).highlighted);
     }
 
     #[test]

@@ -322,6 +322,7 @@ enum ThemeColorField {
     ChatBg,
     DefaultName,
     FirstMessage,
+    Highlighted,
     Event,
     Streak,
     Live,
@@ -333,10 +334,11 @@ enum ThemeColorField {
 
 impl ThemeColorField {
     /// The fields in editor order.
-    const ALL: [ThemeColorField; 10] = [
+    const ALL: [ThemeColorField; 11] = [
         ThemeColorField::ChatBg,
         ThemeColorField::DefaultName,
         ThemeColorField::FirstMessage,
+        ThemeColorField::Highlighted,
         ThemeColorField::Event,
         ThemeColorField::Streak,
         ThemeColorField::Live,
@@ -351,6 +353,7 @@ impl ThemeColorField {
             ThemeColorField::ChatBg => "Background",
             ThemeColorField::DefaultName => "Default name",
             ThemeColorField::FirstMessage => "First message",
+            ThemeColorField::Highlighted => "Highlighted message",
             ThemeColorField::Event => "Sub / event",
             ThemeColorField::Streak => "Watch streak",
             ThemeColorField::Live => "Went live",
@@ -367,6 +370,10 @@ impl ThemeColorField {
             ThemeColorField::ChatBg => t.chat_bg,
             ThemeColorField::DefaultName => t.default_name,
             ThemeColorField::FirstMessage => t.first_message,
+            // Unset (a theme predating this color) shows the base default swatch.
+            ThemeColorField::Highlighted => t
+                .highlighted
+                .unwrap_or_else(|| render::CustomColors::from_base(t.base_dark).highlighted),
             ThemeColorField::Event => t.event,
             ThemeColorField::Streak => t.streak,
             ThemeColorField::Live => t.live,
@@ -383,6 +390,7 @@ impl ThemeColorField {
             ThemeColorField::ChatBg => t.chat_bg = color,
             ThemeColorField::DefaultName => t.default_name = color,
             ThemeColorField::FirstMessage => t.first_message = color,
+            ThemeColorField::Highlighted => t.highlighted = Some(color),
             ThemeColorField::Event => t.event = color,
             ThemeColorField::Streak => t.streak = color,
             ThemeColorField::Live => t.live = color,
@@ -4861,6 +4869,7 @@ fn default_custom_theme(dark: bool, name: String) -> settings::CustomTheme {
         chat_bg: c.chat_bg,
         default_name: c.default_name,
         first_message: c.first_message,
+        highlighted: Some(c.highlighted),
         event: c.event,
         streak: c.streak,
         live: c.live,
@@ -4879,6 +4888,12 @@ fn custom_colors(t: &settings::CustomTheme) -> render::CustomColors {
         chat_bg: t.chat_bg,
         default_name: t.default_name,
         first_message: t.first_message,
+        // A theme saved before the highlighted-row color existed deserializes to
+        // None; seed it from the base default (a real pick of pure black is
+        // Some(0), so it's preserved rather than treated as unset).
+        highlighted: t
+            .highlighted
+            .unwrap_or_else(|| render::CustomColors::from_base(t.base_dark).highlighted),
         event: t.event,
         streak: t.streak,
         live: t.live,

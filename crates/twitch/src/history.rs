@@ -63,6 +63,10 @@ fn parse_history_line(channel: &str, line: &str) -> Option<ChatEvent> {
     match tmi::Message::from_irc(irc).ok()? {
         tmi::Message::Privmsg(pm) => {
             // Historical messages don't carry the live "first message" highlight.
+            // The "Highlight My Message" tint (set from the msg-id tag inside
+            // privmsg_to_message) is kept, though: unlike an ephemeral event row,
+            // a highlighted message is a real chat line that stays highlighted in
+            // scrollback (Twitch web keeps it too).
             let mut msg = privmsg_to_message(channel, &pm, false);
             msg.historical = true;
             Some(ChatEvent::Message(Box::new(msg)))

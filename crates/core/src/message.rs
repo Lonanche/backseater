@@ -283,6 +283,12 @@ pub struct Message {
     /// chatting" highlight. Only Twitch sets this; false everywhere else.
     #[serde(default)]
     pub first_message: bool,
+    /// Sent by redeeming Twitch's built-in "Highlight My Message" channel-point
+    /// reward (IRC `msg-id=highlighted-message`). The UI tints its background +
+    /// tags it like a first message, in a separate theme-configurable color.
+    /// Only Twitch sets this; false everywhere else.
+    #[serde(default)]
+    pub highlighted: bool,
     /// A backfilled message from chat history (loaded on channel join), not a
     /// live one. The UI renders these faded to set them apart.
     #[serde(default)]

@@ -107,6 +107,7 @@ fn build_text_message(channel: &str, r: &Value) -> ParsedItem {
         raw_text,
         reply: None,
         first_message: false,
+        highlighted: false,
         historical: false,
         reward_id: None,
     }))

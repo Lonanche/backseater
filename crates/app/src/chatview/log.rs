@@ -198,6 +198,8 @@ impl Render for LogView {
                         Some(render::highlight_mention())
                     } else if msg.first_message {
                         Some(render::highlight_first_message())
+                    } else if msg.highlighted {
+                        Some(render::highlight_highlighted())
                     } else {
                         None
                     };

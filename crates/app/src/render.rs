@@ -40,6 +40,10 @@ pub(crate) struct Palette {
     /// Background tint + label color for a chatter's first message.
     first_message_bg: u32,
     first_message_label: u32,
+    /// Background tint + label/accent color for a "Highlight My Message"
+    /// channel-point redemption (Twitch's built-in highlight reward).
+    highlighted_bg: u32,
+    highlighted_label: u32,
     /// Public-event (sub/gift/raid) row tint + text (the pinned banner reuses
     /// them, hence crate-visible).
     pub(crate) event_bg: u32,
@@ -87,6 +91,8 @@ const DARK: Palette = Palette {
     mention_accent: 0xf2b84a,
     first_message_bg: 0x122824,
     first_message_label: 0x3ecfb2,
+    highlighted_bg: 0x241d33,
+    highlighted_label: 0xb39bff,
     event_bg: 0x221e30,
     event_text: 0xc4b5fd,
     streak_bg: 0x2b2413,
@@ -119,6 +125,8 @@ const LIGHT: Palette = Palette {
     mention_accent: 0xc77d0a,
     first_message_bg: 0xe0f5f0,
     first_message_label: 0x0f8570,
+    highlighted_bg: 0xece4fb,
+    highlighted_label: 0x6d3fd1,
     event_bg: 0xf1ecfe,
     event_text: 0x6d4fc4,
     streak_bg: 0xfcf0cf,
@@ -174,6 +182,7 @@ pub struct CustomColors {
     pub chat_bg: u32,
     pub default_name: u32,
     pub first_message: u32,
+    pub highlighted: u32,
     pub event: u32,
     pub streak: u32,
     pub live: u32,
@@ -193,6 +202,7 @@ impl CustomColors {
             chat_bg: p.chat_bg,
             default_name: p.default_name,
             first_message: p.first_message_bg,
+            highlighted: p.highlighted_bg,
             event: p.event_bg,
             streak: p.streak_bg,
             live: p.live_bg,
@@ -235,6 +245,8 @@ impl Palette {
             mention_accent: fg(c.mention, c.mention),
             first_message_bg: c.first_message,
             first_message_label: fg(c.first_message, c.first_message),
+            highlighted_bg: c.highlighted,
+            highlighted_label: fg(c.highlighted, c.highlighted),
             event_bg: c.event,
             event_text: fg(c.event, c.event),
             streak_bg: c.streak,
@@ -401,6 +413,13 @@ pub(crate) fn flash_over(base: u32, strength: f32) -> u32 {
 pub(crate) fn highlight_first_message() -> (u32, u32) {
     let p = palette();
     (p.first_message_bg, p.first_message_label)
+}
+
+/// The `(background tint, accent bar/label)` for a "Highlight My Message"
+/// channel-point redemption.
+pub(crate) fn highlight_highlighted() -> (u32, u32) {
+    let p = palette();
+    (p.highlighted_bg, p.highlighted_label)
 }
 
 /// `accent` (a platform-assigned row color — Twitch announcement colors)
@@ -1681,10 +1700,18 @@ pub fn render_message(
         .children(author_badges)
         .children(tokens);
 
-    // A first-time chatter's row gets a "FIRST MESSAGE" label pinned to the
-    // top-right corner (Twitch-style). Wrap the body so the label sits
-    // beside it without being caught in the body's flex-wrap.
-    let body = if msg.first_message {
+    // A first-time chatter's / highlighted-redemption row gets a label pinned to
+    // the top-right corner (Twitch-style). Wrap the body so the label sits beside
+    // it without being caught in the body's flex-wrap. First-message wins if a row
+    // is somehow both.
+    let corner_label = if msg.first_message {
+        Some(("FIRST MESSAGE", palette().first_message_label))
+    } else if msg.highlighted {
+        Some(("HIGHLIGHTED", palette().highlighted_label))
+    } else {
+        None
+    };
+    let body = if let Some((text, color)) = corner_label {
         h_flex()
             .w_full()
             .min_w_0()
@@ -1698,11 +1725,11 @@ pub fn render_message(
                     .px_1p5()
                     .rounded_full()
                     .border_1()
-                    .border_color(rgb(palette().first_message_label))
+                    .border_color(rgb(color))
                     .text_size(px(scale.small * 0.9))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(palette().first_message_label))
-                    .child("FIRST MESSAGE"),
+                    .text_color(rgb(color))
+                    .child(text),
             )
             .into_any_element()
     } else {
@@ -1778,6 +1805,8 @@ pub fn render_message(
         Some(highlight_mention())
     } else if msg.first_message {
         Some(highlight_first_message())
+    } else if msg.highlighted {
+        Some(highlight_highlighted())
     } else {
         None
     };

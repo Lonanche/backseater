@@ -5296,6 +5296,7 @@ mod tests {
                 raw_text: String::new(),
                 reply: None,
                 first_message: false,
+                highlighted: false,
                 historical,
                 reward_id: None,
             }),

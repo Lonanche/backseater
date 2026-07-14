@@ -362,6 +362,7 @@ fn pin_event(data: PinData) -> Option<ChatEvent> {
         elements,
         reply: None,
         first_message: false,
+        highlighted: false,
         historical: false,
         reward_id: None,
     };

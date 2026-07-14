@@ -57,6 +57,7 @@ mod tests {
             raw_text: text.into(),
             reply: None,
             first_message: false,
+            highlighted: false,
             historical: false,
             reward_id: None,
         }

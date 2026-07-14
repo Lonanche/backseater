@@ -858,6 +858,7 @@ impl PinnedChat {
             elements: bks_core::mentionize(bks_core::linkify(elements)),
             reply: None,
             first_message: false,
+            highlighted: false,
             historical: false,
             reward_id: None,
         }

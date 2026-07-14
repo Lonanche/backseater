@@ -51,6 +51,12 @@ pub struct CustomTheme {
     pub chat_bg: u32,
     pub default_name: u32,
     pub first_message: u32,
+    /// Highlighted (channel-point "Highlight My Message") row background. Added
+    /// after the other theme colors, so a theme saved before it exists deserializes
+    /// to `None`; `main.rs::custom_colors` then seeds it from the base default.
+    /// `Some(0x000000)` is a real user pick (pure black), kept distinct from unset.
+    #[serde(default)]
+    pub highlighted: Option<u32>,
     pub event: u32,
     pub streak: u32,
     pub live: u32,
