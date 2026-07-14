@@ -1570,6 +1570,43 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Right-click-to-tag: appends `@name ` to the composer and switches the send
+    /// target to the chatter's platform so the tag lands in the right chat. The
+    /// name is inserted with one leading space when the box already has content
+    /// (so "hi" + tag = "hi @name ") and always a trailing space so the next word
+    /// is separate. Tagging a second person on the same platform leaves the target
+    /// unchanged (the switch is a no-op).
+    ///
+    /// UX note on cross-platform tagging: in a merged Twitch+Kick feed, tagging a
+    /// Twitch user then a Kick user switches the target to Kick (the last-tagged
+    /// platform wins). That's intentional — a tag is only meaningful on the
+    /// platform the message goes to, so the target follows the most recent tag;
+    /// the send-target toggle stays visible if the user wants to correct it.
+    fn tag_user(
+        &mut self,
+        display_name: &str,
+        platform: bks_core::Platform,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Switch the composer to the tagged chatter's platform (a no-op notice-
+        // wise when already there or the platform isn't sendable here).
+        self.controller.set_send_target(platform);
+        let current = self.input.read(cx).value().to_string();
+        let sep = if current.is_empty() || current.ends_with(' ') {
+            ""
+        } else {
+            " "
+        };
+        let next = format!("{current}{sep}@{display_name} ");
+        self.input.update(cx, |state, cx| {
+            state.set_value(&next, window, cx);
+            state.focus(window, cx);
+        });
+        // Repaint so the send-target toggle reflects a possibly-switched platform.
+        cx.notify();
+    }
+
     /// Runs a moderation button's command against message `msg_id`: substitutes
     /// `{user}` (the author's login) and `{msg-id}` in the template and
     /// dispatches the line at the *row's* platform — a button on a Kick message
@@ -5048,6 +5085,21 @@ fn name_click_for(entity: &Entity<ChatView>, msg: &Message) -> render::NameClick
         entity.update(cx, |this, cx| {
             this.open_usercard(&msg_id, cx);
             cx.notify();
+        });
+    })
+}
+
+/// Builds the right-click-to-tag callback for one message: inserts `@name ` into
+/// the composer and switches the send target to the chatter's platform. Captures
+/// the author's display name + the row's platform (not the send target — tagging
+/// a Kick chatter always targets Kick).
+fn name_right_click_for(entity: &Entity<ChatView>, msg: &Message) -> render::NameRightClick {
+    let entity = entity.clone();
+    let display_name = msg.author.display_name.clone();
+    let platform = msg.platform;
+    Box::new(move |window: &mut Window, cx: &mut App| {
+        entity.update(cx, |this, cx| {
+            this.tag_user(&display_name, platform, window, cx);
         });
     })
 }

@@ -45,6 +45,17 @@ pub enum SendTarget {
     Both,
 }
 
+impl SendTarget {
+    /// The human label used in the "send target: X" status line.
+    fn label(self) -> &'static str {
+        match self {
+            SendTarget::Twitch => "Twitch",
+            SendTarget::Kick => "Kick",
+            SendTarget::Both => "Twitch + Kick",
+        }
+    }
+}
+
 /// A moderation request parsed from a `/command`.
 enum ModAction {
     Ban {
@@ -398,12 +409,27 @@ impl Controller {
             SendTarget::Kick => SendTarget::Both,
             SendTarget::Both => SendTarget::Twitch,
         };
-        let label = match *target {
-            SendTarget::Twitch => "Twitch",
-            SendTarget::Kick => "Kick",
-            SendTarget::Both => "Twitch + Kick",
+        tracing::info!("send target: {}", target.label());
+    }
+
+    /// Switches the send target to a specific platform (used by right-click-to-tag:
+    /// right-clicking a chatter targets their platform so the tag lands in the right
+    /// chat). A no-op when the tab lacks that platform, or when it's Kick and the
+    /// user isn't logged into Kick (there's nothing to send to). Logs the
+    /// "send target: X" line only on a real change; returns whether it changed.
+    pub fn set_send_target(&self, platform: bks_core::Platform) -> bool {
+        let want = match platform {
+            bks_core::Platform::Twitch if self.has_twitch() => SendTarget::Twitch,
+            bks_core::Platform::Kick if self.has_kick() && self.kick_logged_in() => SendTarget::Kick,
+            _ => return false,
         };
-        tracing::info!("send target: {label}");
+        let mut target = self.target.lock().unwrap();
+        if *target == want {
+            return false;
+        }
+        *target = want;
+        tracing::info!("send target: {}", want.label());
+        true
     }
 
     /// Reports a user-facing error in this tab's feed (a copyable error row).

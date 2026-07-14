@@ -28,8 +28,8 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::{h_flex, v_flex, ActiveTheme};
 
 use super::{
-    mention_click_for, mention_click_for_platform, mod_click_for, name_click_for, pin_click_for,
-    reply_click_for, ChatView,
+    mention_click_for, mention_click_for_platform, mod_click_for, name_click_for,
+    name_right_click_for, pin_click_for, reply_click_for, ChatView,
     EmotePopup, Row,
 };
 use crate::channel_store::ChannelModel;
@@ -202,6 +202,7 @@ impl Render for LogView {
                         None
                     };
                     let name_click = name_click_for(&render_entity, msg);
+                    let name_right_click = name_right_click_for(&render_entity, msg);
                     let reply_click = reply_click_for(&render_entity, msg);
                     // The 📌 button only renders for Twitch rows the user can
                     // moderate that carry a real platform message id (not a
@@ -256,6 +257,7 @@ impl Render for LogView {
                         &mut ordinal,
                         render::RowHandlers {
                             name_click: Some(name_click),
+                            name_right_click: Some(name_right_click),
                             mention_click: Some(mention_click_for(&render_entity, msg)),
                             link_hover: Some(link_hover.clone()),
                             emote_click: Some(emote_click.clone()),

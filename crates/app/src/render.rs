@@ -1042,6 +1042,12 @@ fn split_words(text: &str) -> Vec<&str> {
 /// only move it into the click handler and invoke it.
 pub type NameClick = Box<dyn Fn(&mut Window, &mut App)>;
 
+/// A callback run when a row's author name is *right*-clicked: inserts `@name ` into
+/// the composer (tagging that chatter) and switches the send target to their
+/// platform. Built per-row by the view, capturing the name + platform; `None`
+/// outside the live log.
+pub type NameRightClick = Box<dyn Fn(&mut Window, &mut App)>;
+
 /// The author-name token. Like [`text_token`] (selectable, bold, colored) but,
 /// when `click` is set, also a hover-highlighted click target that fires `click`
 /// on a plain click — guarded by `selection.has_selection()` so the click that
@@ -1058,6 +1064,7 @@ fn name_token(
     color: u32,
     paint: Option<&NamePaint>,
     click: Option<NameClick>,
+    right_click: Option<NameRightClick>,
 ) -> gpui::AnyElement {
     // Trailing margin gives the gap to the first body word (the row has no gap).
     let base = div().mr_1().font_weight(NAME_WEIGHT);
@@ -1103,29 +1110,40 @@ fn name_token(
         Some(_) => base,
     };
 
-    match click {
-        None => base.child(inner).into_any_element(),
-        Some(click) => {
-            let sel = ctx.selection.clone();
-            // Underline via a bottom border, not text-decoration: a gradient name is
-            // a row of per-character boxes, and an inherited `underline()` draws under
-            // each box separately, leaving gaps between letters. A border on this
-            // wrapper spans the whole name as one unbroken line. Colored to match the
-            // name (the base color for a gradient), transparent until hovered.
-            base.id(ctx.ids.token(click_ord))
-                .cursor_pointer()
-                .border_b_1()
-                .border_color(gpui::transparent_black())
-                .hover(move |s| s.border_color(rgb(color)))
-                .on_mouse_up(MouseButton::Left, move |_, window, cx| {
-                    if !sel.has_selection() {
-                        click(window, cx);
-                    }
-                })
-                .child(inner)
-                .into_any_element()
-        }
+    // No interaction at all (usercard list): the plain, uncoloured wrapper.
+    if click.is_none() && right_click.is_none() {
+        return base.child(inner).into_any_element();
     }
+    let sel = ctx.selection.clone();
+    // Underline via a bottom border, not text-decoration: a gradient name is
+    // a row of per-character boxes, and an inherited `underline()` draws under
+    // each box separately, leaving gaps between letters. A border on this
+    // wrapper spans the whole name as one unbroken line. Colored to match the
+    // name (the base color for a gradient), transparent until hovered.
+    let mut wrapper = base
+        .id(ctx.ids.token(click_ord))
+        .cursor_pointer()
+        .border_b_1()
+        .border_color(gpui::transparent_black())
+        .hover(move |s| s.border_color(rgb(color)));
+    if let Some(click) = click {
+        let sel = sel.clone();
+        wrapper = wrapper.on_mouse_up(MouseButton::Left, move |_, window, cx| {
+            if !sel.has_selection() {
+                click(window, cx);
+            }
+        });
+    }
+    if let Some(right_click) = right_click {
+        // Right-click tags the chatter; a drag-select that ends on the name must
+        // not fire it (same guard as the left click).
+        wrapper = wrapper.on_mouse_up(MouseButton::Right, move |_, window, cx| {
+            if !sel.has_selection() {
+                right_click(window, cx);
+            }
+        });
+    }
+    wrapper.child(inner).into_any_element()
 }
 
 /// Builds the name as a single selectable token in flat color `c` (the solid-paint
@@ -1336,6 +1354,9 @@ pub struct ModStrip {
 #[derive(Default)]
 pub struct RowHandlers {
     pub name_click: Option<NameClick>,
+    /// Set in the live log: right-clicking the author name tags them (inserts
+    /// `@name ` and switches the send target to their platform).
+    pub name_right_click: Option<NameRightClick>,
     pub mention_click: Option<MentionClick>,
     pub link_hover: Option<LinkHover>,
     pub emote_click: Option<EmoteClick>,
@@ -1391,6 +1412,7 @@ pub fn render_message(
 ) -> impl IntoElement {
     let RowHandlers {
         name_click,
+        name_right_click,
         mention_click,
         link_hover,
         emote_click,
@@ -1436,6 +1458,7 @@ pub fn render_message(
         name_color,
         msg.author.paint.as_ref(),
         name_click,
+        name_right_click,
     ));
 
     // Twitch prepends `@ParentName ` to a reply's body (Kick doesn't). With the
