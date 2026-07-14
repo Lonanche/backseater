@@ -220,6 +220,16 @@ pub struct Author {
     pub user_id: String,
 }
 
+/// Normalizes a raw platform username into a bare identity name: strips a
+/// leading `@` sigil (Kick and YouTube deliver some accounts as `@name`; the
+/// `@` is a mention/handle marker, never part of the identity) and surrounding
+/// whitespace. Connectors should run their username through this before putting
+/// it in an [`Author`] so the `@` never leaks into name-based matching
+/// (mentions, highlights, ignore/suppress rules) or usercard lookups.
+pub fn normalize_username(raw: &str) -> &str {
+    raw.trim().trim_start_matches('@').trim()
+}
+
 /// One renderable token of a message. The UI maps each variant to an element;
 /// this is the seam between connectors and rendering. Adding inline content
 /// later (cheers, replies, ...) means adding a variant here.

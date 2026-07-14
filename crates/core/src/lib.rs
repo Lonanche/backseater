@@ -20,8 +20,8 @@ pub use ignore::IgnoreList;
 pub use links::{linkify, mentionize};
 pub use mention::{normalize_term, MentionMatcher};
 pub use message::{
-    Author, Badge, ChannelId, Color, Message, MessageElement, NamePaint, PaintKind, PaintStop,
-    Platform, ReplyParent,
+    normalize_username, Author, Badge, ChannelId, Color, Message, MessageElement, NamePaint,
+    PaintKind, PaintStop, Platform, ReplyParent,
 };
 pub use scale::{preferred_scale, set_preferred_scale};
 pub use suppress::SuppressList;

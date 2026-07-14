@@ -62,7 +62,9 @@ pub fn build_item(channel: &str, item: &Value) -> ParsedItem {
 /// Builds a chat [`Message`] from a `liveChatTextMessageRenderer`.
 fn build_text_message(channel: &str, r: &Value) -> ParsedItem {
     let id = str_field(r, "id");
-    let author_name = parse_runs_text(&r["authorName"]);
+    // Normalize away a leading `@` handle sigil so it can't leak into name-based
+    // matching (mentions/highlights/ignore/suppress) or usercard lookups.
+    let author_name = bks_core::normalize_username(&parse_runs_text(&r["authorName"])).to_string();
     if id.is_empty() || author_name.is_empty() {
         return ParsedItem::Ignored;
     }
@@ -113,7 +115,8 @@ fn build_text_message(channel: &str, r: &Value) -> ParsedItem {
 /// A Super Chat / Super Sticker → a Bits-kind event. `with_body` includes the
 /// attached message (Super Chats have one, Super Stickers don't).
 fn paid_event(r: &Value, kind: EventKind, with_body: bool) -> ParsedItem {
-    let author = parse_runs_text(&r["authorName"]);
+    let raw_author = parse_runs_text(&r["authorName"]);
+    let author = bks_core::normalize_username(&raw_author);
     let amount = parse_runs_text(&r["purchaseAmountText"]);
     if author.is_empty() || amount.is_empty() {
         return ParsedItem::Ignored;
@@ -138,7 +141,8 @@ fn paid_event(r: &Value, kind: EventKind, with_body: bool) -> ParsedItem {
 
 /// A new member / member milestone → a Sub-kind event.
 fn membership_event(r: &Value) -> ParsedItem {
-    let author = parse_runs_text(&r["authorName"]);
+    let raw_author = parse_runs_text(&r["authorName"]);
+    let author = bks_core::normalize_username(&raw_author);
     // `headerSubtext` is "Welcome!" / "Member for N months"; `headerPrimaryText`
     // exists on milestones. Prefer whichever is present.
     let header = {
@@ -168,7 +172,8 @@ fn membership_event(r: &Value) -> ParsedItem {
 /// A gifted-membership announcement → a Gift-kind event.
 fn gift_event(r: &Value) -> ParsedItem {
     let header = &r["header"]["liveChatSponsorshipsHeaderRenderer"];
-    let author = parse_runs_text(&header["authorName"]);
+    let raw_author = parse_runs_text(&header["authorName"]);
+    let author = bks_core::normalize_username(&raw_author);
     let primary = parse_runs_text(&header["primaryText"]);
     if author.is_empty() && primary.is_empty() {
         return ParsedItem::Ignored;
@@ -464,6 +469,25 @@ mod tests {
                 assert_eq!(msg.author.user_id, "UC123");
                 assert_eq!(kinds(&msg.elements), vec!["T:hello world"]);
                 assert_eq!(msg.platform, Platform::YouTube);
+            }
+            _ => panic!("expected message"),
+        }
+    }
+
+    #[test]
+    fn author_handle_at_sign_is_stripped() {
+        let item = serde_json::json!({
+            "liveChatTextMessageRenderer": {
+                "id": "abc",
+                "timestampUsec": "1700000000000000",
+                "authorName": { "simpleText": "@StreamElements" },
+                "message": { "runs": [{ "text": "hi" }] }
+            }
+        });
+        match build_item("chan", &item) {
+            ParsedItem::Message(msg) => {
+                assert_eq!(msg.author.display_name, "StreamElements");
+                assert_eq!(msg.author.login, "streamelements");
             }
             _ => panic!("expected message"),
         }

@@ -297,9 +297,12 @@ pub fn build_message(
 
     let badges = build_badges(&msg.sender.identity, sub_badges);
 
+    // Some Kick accounts (e.g. bots) carry a leading `@` in their username;
+    // normalize it away so it doesn't leak into name-based matching or lookups.
+    let username = bks_core::normalize_username(&msg.sender.username).to_string();
     let author = Author {
-        login: msg.sender.username.to_lowercase(),
-        display_name: msg.sender.username,
+        login: username.to_lowercase(),
+        display_name: username,
         color,
         badges,
         user_id: msg.sender.id.to_string(),
@@ -312,7 +315,7 @@ pub fn build_message(
     // as a `ReplyParent` for the "replying to" line. Unlike Twitch, the body
     // carries no mention prefix, so `content` is already what the user typed.
     let reply = msg.metadata.and_then(|m| {
-        let author = m.original_sender?.username;
+        let author = bks_core::normalize_username(&m.original_sender?.username).to_string();
         let text = m.original_message.map(|o| o.content).unwrap_or_default();
         Some(ReplyParent { author, text })
     });
@@ -455,6 +458,16 @@ mod tests {
         let data = r#"{"id":"m1","content":"hi","sender":{"id":5,"username":"Bob"}}"#;
         let chat: KickChatMessage = serde_json::from_str(data).unwrap();
         assert!(build_message("chan", &[], chat).reply.is_none());
+    }
+
+    #[test]
+    fn author_handle_at_sign_is_stripped() {
+        let data =
+            r#"{"id":"m1","content":"hi","sender":{"id":5,"username":"@StreamElements"}}"#;
+        let chat: KickChatMessage = serde_json::from_str(data).unwrap();
+        let msg = build_message("chan", &[], chat);
+        assert_eq!(msg.author.display_name, "StreamElements");
+        assert_eq!(msg.author.login, "streamelements");
     }
 
     #[test]

@@ -94,8 +94,10 @@ impl TermRules {
         if self.users.is_empty() {
             return false;
         }
-        let login = author.login.to_lowercase();
-        let display = author.display_name.to_lowercase();
+        // Some platforms (Kick) carry the name with a leading `@`; strip it so it
+        // matches a rule name stored without one (rule names already drop `@`).
+        let login = author.login.trim_start_matches('@').to_lowercase();
+        let display = author.display_name.trim_start_matches('@').to_lowercase();
         self.users.iter().any(|rule| {
             rule.platform.is_none_or(|p| p == platform)
                 && (rule.name == login || rule.name == display)
@@ -261,6 +263,15 @@ mod tests {
         let a = author("kickbot", "KickBot");
         assert!(r.matches_author(Platform::Kick, &a));
         assert!(!r.matches_author(Platform::Twitch, &a));
+    }
+
+    #[test]
+    fn user_rule_matches_author_name_with_leading_at() {
+        // Some platforms carry the name as `@name`; the rule (stored bare) must
+        // still match it.
+        let r = rules(&["user:StreamElements"]);
+        let a = author("@streamelements", "@StreamElements");
+        assert!(r.matches_author(Platform::Kick, &a));
     }
 
     #[test]
