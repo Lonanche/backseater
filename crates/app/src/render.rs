@@ -445,9 +445,11 @@ pub(crate) fn panel_border() -> u32 {
 /// Minimum contrast ratio (WCAG-style, 1..21) a username must clear against the
 /// chat background. Below it the name is moved away from the background (lightened
 /// on a dark bg, darkened on a light bg) until it passes — BTTV's
-/// "readable colors". 2.0 keeps even fairly low-contrast hues legible without
-/// washing colors out the way the AA text threshold (4.5) would.
-const MIN_NAME_CONTRAST: f32 = 2.0;
+/// "readable colors". 3.0 is WCAG's large/bold-text threshold (names render bold);
+/// 2.0 let dim blues/reds/purples (pure blue was only ~2.2 on the near-black log)
+/// through unadjusted, while 3.0 still preserves the hue rather than washing to
+/// near-white the way the AA body-text threshold (4.5) would.
+const MIN_NAME_CONTRAST: f32 = 3.0;
 
 /// Relative luminance of a packed `0xRRGGBB` color (WCAG sRGB formula), in 0..1.
 fn luminance(color: u32) -> f32 {
