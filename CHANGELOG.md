@@ -3,6 +3,23 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.4.5-beta.3
+
+### Features
+
+- The AutoMod held-message chatter name and the pin banner's message author and
+  pinning-moderator names are now clickable, opening that user's usercard.
+
+### Fixes
+
+- Watch-streak rows now show the real streak length from Twitch's data instead of
+  accidentally reading digits out of the chatter's username (a viewer like
+  `user67` with an 80-stream streak showed 67).
+- A failed Twitch unban of a user who wasn't banned now shows as a muted notice
+  instead of a red error row.
+- Tightened the gap between words in chat so spacing reads evenly across the log,
+  mentions, AutoMod rows, event rows, and reply previews.
+
 ## v0.4.5-beta.2
 
 ### Features
