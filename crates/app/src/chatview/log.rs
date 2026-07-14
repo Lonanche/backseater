@@ -28,7 +28,8 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::{h_flex, v_flex, ActiveTheme};
 
 use super::{
-    mention_click_for, mod_click_for, name_click_for, pin_click_for, reply_click_for, ChatView,
+    mention_click_for, mention_click_for_platform, mod_click_for, name_click_for, pin_click_for,
+    reply_click_for, ChatView,
     EmotePopup, Row,
 };
 use crate::channel_store::ChannelModel;
@@ -279,9 +280,11 @@ impl Render for LogView {
                     text,
                     message,
                     accent,
+                    actor,
                     ..
                 } => {
                     highlight = Some(render::highlight_event(*kind, *accent));
+                    let mention_click = mention_click_for_platform(&render_entity, *platform);
                     render::render_event(
                         *platform,
                         *kind,
@@ -289,6 +292,8 @@ impl Render for LogView {
                         None,
                         message.as_deref(),
                         *accent,
+                        actor.as_deref(),
+                        Some(&mention_click),
                         font_size,
                         false,
                     )

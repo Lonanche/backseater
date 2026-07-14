@@ -586,6 +586,7 @@ impl ChannelModel {
                     self.events_base + self.events.len() as u64,
                 );
                 let accent = details.accent;
+                let actor = details.actor.clone();
                 self.events.push_back(RetainedEvent {
                     platform,
                     kind,
@@ -615,6 +616,7 @@ impl ChannelModel {
                         timestamp,
                         message,
                         accent,
+                        actor,
                     },
                     cx,
                 );

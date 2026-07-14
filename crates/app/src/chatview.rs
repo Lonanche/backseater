@@ -156,6 +156,10 @@ pub(crate) enum Row {
         /// A platform-assigned highlight color (Twitch announcement colors)
         /// overriding the kind's default accent; see `EventDetails::accent`.
         accent: Option<u32>,
+        /// The acting user's display name (`EventDetails::actor`) when the
+        /// connector supplied one, so the log can make the leading name (e.g.
+        /// the person redeeming / subscribing) clickable to open their usercard.
+        actor: Option<String>,
     },
     /// A stream going live or offline, shown as a highlighted notice row (green
     /// on live, muted on offline) with the platform icon.
@@ -3757,6 +3761,7 @@ impl ChatView {
                         message: if hide_msgs { None } else { ev.message.as_deref() },
                         expandable,
                         expanded_names: names,
+                        mention_click: Some(mention_click_for_platform(&view, ev.platform)),
                     },
                     font_size,
                 );
@@ -5052,8 +5057,18 @@ fn name_click_for(entity: &Entity<ChatView>, msg: &Message) -> render::NameClick
 /// a mention in a Kick message opens a Kick card). Captures only the view handle
 /// and the platform; the name arrives from the clicked token.
 fn mention_click_for(entity: &Entity<ChatView>, msg: &Message) -> render::MentionClick {
+    mention_click_for_platform(entity, msg.platform)
+}
+
+/// The mention-click callback keyed on a platform alone (no source message):
+/// used by event rows, where the clickable name is the acting user / an
+/// `@mention` in the event text and there's no chat message to key on. Opens the
+/// clicked name's usercard on the event's platform.
+fn mention_click_for_platform(
+    entity: &Entity<ChatView>,
+    platform: bks_core::Platform,
+) -> render::MentionClick {
     let entity = entity.clone();
-    let platform = msg.platform;
     std::rc::Rc::new(move |login: &str, _window: &mut Window, cx: &mut App| {
         entity.update(cx, |this, cx| {
             this.open_usercard_named(login, platform, cx);

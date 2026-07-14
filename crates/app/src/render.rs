@@ -2225,6 +2225,70 @@ pub fn render_automod(
         )
 }
 
+/// Extracts the clickable name from an event word, or `None` if the word isn't
+/// a name to open a usercard for. A word is clickable when it's an `@mention` or
+/// when it (stripped of surrounding punctuation) equals the event's `actor` — the
+/// acting user "alice" in "alice redeemed …" / "alice subscribed …". Returns the
+/// bare name (no `@`, no surrounding punctuation) in its original casing; the
+/// usercard lookup (`open_usercard_named`) case-folds it.
+fn event_name_login(word: &str, actor: Option<&str>) -> Option<String> {
+    // The word core: leading `@` and any surrounding non-name punctuation
+    // trimmed (so "@alice," and "alice." both yield "alice"), matching the
+    // mention grammar in `bks_core::mention`.
+    let core = word
+        .trim_matches(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .trim_start_matches('@');
+    if core.is_empty() {
+        return None;
+    }
+    let is_mention = word.trim_start().starts_with('@');
+    let is_actor = actor.is_some_and(|a| a.eq_ignore_ascii_case(core));
+    (is_mention || is_actor).then(|| core.to_string())
+}
+
+/// Builds the word-token elements for an event's text line, making the acting
+/// user's name (`actor`) and any `@mention` clickable when a [`MentionClick`] is
+/// supplied — clicking opens that user's usercard, exactly like a chat mention.
+/// `muted` tints the words (the events panel's condensed detail text); the actor,
+/// when it appears, stays at full color so a clickable name reads as one. Non-name
+/// words are plain, non-interactive `div`s (unchanged from the old inline tokens).
+fn event_word_tokens(
+    text: &str,
+    actor: Option<&str>,
+    muted: bool,
+    row_id: u64,
+    mention_click: Option<&MentionClick>,
+) -> Vec<gpui::AnyElement> {
+    let p = palette();
+    split_words(text)
+        .into_iter()
+        .filter(|word| !word.trim().is_empty())
+        .enumerate()
+        .map(|(i, word)| {
+            let base = div().when(muted, |d| d.text_color(rgb(p.timestamp)));
+            match (mention_click, event_name_login(word, actor)) {
+                (Some(cb), Some(login)) => {
+                    let cb = cb.clone();
+                    // The id base is the row's text hash, so a clickable name in
+                    // one event row can't collide with one in another.
+                    base.id(("event-name", row_id.wrapping_add(i as u64)))
+                        // A clickable name stays full-strength even in muted
+                        // detail text, and underlines on hover like a mention.
+                        .when(muted, |d| d.text_color(rgb(p.link)))
+                        .cursor_pointer()
+                        .hover(|s| s.underline())
+                        .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                            cb(&login, window, cx);
+                        })
+                        .child(SharedString::from(word.to_string()))
+                        .into_any_element()
+                }
+                _ => base.child(SharedString::from(word.to_string())).into_any_element(),
+            }
+        })
+        .collect()
+}
+
 /// A public channel event (sub/gift/raid/watch-streak): a highlighted row with
 /// the platform icon and the ready-made event text. On a sub/resub the chatter's
 /// attached chat message (`message`) is rendered *under* the system text as its
@@ -2246,6 +2310,8 @@ pub fn render_event(
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
     message: Option<&Message>,
     accent: Option<u32>,
+    actor: Option<&str>,
+    mention_click: Option<&MentionClick>,
     font_size: f32,
     panel: bool,
 ) -> impl IntoElement {
@@ -2258,17 +2324,11 @@ pub fn render_event(
     // narrow) row/panel. Each word keeps its trailing whitespace as the gap (no
     // margin — like chat body words; a margin on top of the space reads double
     // wide). A per-row id (hashed from the text) gives each emote a stable
-    // element id so GPUI advances its animation frames.
+    // element id so GPUI advances its animation frames. The acting user's name
+    // and any `@mention` in the text are clickable (open the usercard) when a
+    // handler is supplied.
     let row_id = stable_id(text);
-    let tokens: Vec<gpui::AnyElement> = split_words(text)
-        .into_iter()
-        .filter(|word| !word.trim().is_empty())
-        .map(|word| {
-            div()
-                .child(SharedString::from(word.to_string()))
-                .into_any_element()
-        })
-        .collect();
+    let tokens = event_word_tokens(text, actor, false, row_id, mention_click);
 
     let time = timestamp.map(|ts| ts.with_timezone(&chrono::Local).format("%H:%M").to_string());
 
@@ -2319,7 +2379,7 @@ pub fn render_event(
         .text_size(px(scale.font))
         .child(header)
         .when_some(message, |col, msg| {
-            col.child(event_message_line(msg, scale, row_id))
+            col.child(event_message_line(msg, scale, row_id, mention_click))
         })
 }
 
@@ -2353,6 +2413,9 @@ pub struct PanelEvent<'a> {
     pub expandable: bool,
     /// The recipient names to reveal — `Some` while expanded.
     pub expanded_names: Option<Vec<String>>,
+    /// Opens a clicked name's usercard (the actor + any `@mention`); `None`
+    /// leaves the names non-interactive.
+    pub mention_click: Option<MentionClick>,
 }
 
 /// The redesigned events-panel row: compact and information-first. A
@@ -2377,30 +2440,40 @@ pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElem
 
     // The condensed actor + detail line, or the full text as wrapping word
     // tokens (same tokenization as `render_event` so long lines wrap at word
-    // boundaries; each word keeps its trailing space as the gap).
-    let words = |text: &str, muted: bool| -> Vec<gpui::AnyElement> {
-        split_words(text)
-            .into_iter()
-            .filter(|word| !word.trim().is_empty())
-            .map(|word| {
-                div()
-                    .when(muted, |d| d.text_color(rgb(p.timestamp)))
-                    .child(SharedString::from(word.to_string()))
-                    .into_any_element()
-            })
-            .collect()
-    };
+    // boundaries; each word keeps its trailing space as the gap). The actor name
+    // and any `@mention` in the text open a usercard when a handler is supplied.
+    let actor = ev.details.actor.as_deref();
+    let mention_click = ev.mention_click.as_ref();
     let mut content = h_flex().flex_1().min_w_0().flex_wrap().items_center();
     content = match (&ev.details.actor, &ev.details.compact) {
-        (Some(actor), Some(detail)) => content
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .mr_1()
-                    .child(SharedString::from(actor.clone())),
-            )
-            .children(words(detail, true)),
-        _ => content.children(words(ev.text, false)),
+        (Some(actor_name), Some(detail)) => {
+            // The actor leads as a distinct bold token; make it clickable itself
+            // rather than routing through the word helper, so it keeps its
+            // emphasis (the helper only styles muted detail names).
+            let actor_token = div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .mr_1()
+                .child(SharedString::from(actor_name.clone()));
+            let actor_el = match mention_click {
+                Some(cb) => {
+                    let cb = cb.clone();
+                    let login = actor_name.clone();
+                    actor_token
+                        .id(("event-actor", row_id))
+                        .cursor_pointer()
+                        .hover(|s| s.underline())
+                        .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                            cb(&login, window, cx);
+                        })
+                        .into_any_element()
+                }
+                None => actor_token.into_any_element(),
+            };
+            content
+                .child(actor_el)
+                .children(event_word_tokens(detail, actor, true, row_id, mention_click))
+        }
+        _ => content.children(event_word_tokens(ev.text, actor, false, row_id, mention_click)),
     };
     if ev.expandable {
         // A visible affordance, not a bare glyph: a small tinted chip in the
@@ -2468,19 +2541,26 @@ pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElem
     }
 
     if let Some(msg) = ev.message {
-        col = col.child(event_message_line(msg, scale, row_id));
+        col = col.child(event_message_line(msg, scale, row_id, mention_click));
     }
 
     col
 }
 
-/// The chat line shown under a sub/resub's system text: the chatter's attached
-/// message rendered like a normal chat row — timestamp, author badges, bold
-/// colored name, then the body's words/emotes — but non-interactive, matching the
-/// rest of the event pill. A solid 7TV paint colors the name; a gradient paint is
-/// collapsed to its midpoint color (the full per-char gradient needs the
-/// selectable-token machinery the event row doesn't carry).
-fn event_message_line(msg: &Message, scale: Scale, row_id: u64) -> impl IntoElement {
+/// The chat line shown under a sub/resub/redemption's system text: the chatter's
+/// attached message rendered like a normal chat row — timestamp, author badges,
+/// bold colored name, then the body's words/emotes. The author name and any
+/// `@mention` in the body open a usercard when `mention_click` is supplied (the
+/// text/selection machinery of a full chat row isn't here, but names are still
+/// clickable). A solid 7TV paint colors the name; a gradient paint is collapsed to
+/// its midpoint color (the full per-char gradient needs the selectable-token
+/// machinery the event row doesn't carry).
+fn event_message_line(
+    msg: &Message,
+    scale: Scale,
+    row_id: u64,
+    mention_click: Option<&MentionClick>,
+) -> impl IntoElement {
     let p = palette();
     let time = msg
         .timestamp
@@ -2530,28 +2610,52 @@ fn event_message_line(msg: &Message, scale: Scale, row_id: u64) -> impl IntoElem
                 .child(time),
         )
         .children(badges)
-        .child(
-            div()
+        .child({
+            let name = div()
                 .mr_1()
                 .font_weight(NAME_WEIGHT)
                 .text_color(rgb(name_color))
-                .child(SharedString::from(format!("{}:", msg.author.display_name))),
-        )
-        .children(inline_tokens(&msg.elements, scale, ("event-emote", row_id)))
+                .child(SharedString::from(format!("{}:", msg.author.display_name)));
+            // The author (the user who typed the attached message) opens their
+            // usercard on click, like their name would in the main log.
+            match mention_click {
+                Some(cb) => {
+                    let cb = cb.clone();
+                    let login = msg.author.login.clone();
+                    name.id(("event-msg-author", row_id))
+                        .cursor_pointer()
+                        .hover(|s| s.underline())
+                        .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                            cb(&login, window, cx);
+                        })
+                        .into_any_element()
+                }
+                None => name.into_any_element(),
+            }
+        })
+        .children(inline_tokens(
+            &msg.elements,
+            scale,
+            ("event-emote", row_id),
+            mention_click,
+        ))
 }
 
-/// Renders a message's token stream as non-interactive inline elements (words +
-/// inline emote images), the shared core of the event row and the reply preview.
-/// `seed` gives each emote a stable element id (so GPUI animates it); the per-row
-/// part is the caller's, the index is added per emote here.
+/// Renders a message's token stream as inline elements (words + inline emote
+/// images), the shared core of the event row and the reply preview. `seed` gives
+/// each emote a stable element id (so GPUI animates it); the per-row part is the
+/// caller's, the index is added per emote here. When `mention_click` is supplied
+/// (the event message line), `@mention` tokens open the mentioned user's
+/// usercard; the reply preview passes `None`, keeping the preview inert.
 fn inline_tokens(
     message: &[MessageElement],
     scale: Scale,
     seed: (&'static str, u64),
+    mention_click: Option<&MentionClick>,
 ) -> Vec<gpui::AnyElement> {
     let mut tokens: Vec<gpui::AnyElement> = Vec::new();
     let mut emote_index = 0u64;
-    for element in message {
+    for (i, element) in message.iter().enumerate() {
         match element {
             MessageElement::Text { text, .. } => {
                 // Each word keeps its trailing whitespace as the inter-word gap,
@@ -2580,14 +2684,23 @@ fn inline_tokens(
                 );
                 emote_index += 1;
             }
-            // Mentions/links render as plain text; these previews aren't interactive.
             MessageElement::Mention { login } => {
-                tokens.push(
-                    div()
-                        .mr_1()
-                        .child(SharedString::from(format!("@{login}")))
-                        .into_any_element(),
-                );
+                let token = div().mr_1().child(SharedString::from(format!("@{login}")));
+                tokens.push(match mention_click {
+                    Some(cb) => {
+                        let cb = cb.clone();
+                        let login = login.clone();
+                        token
+                            .id((seed.0, seed.1.wrapping_add(0x1000_0000 + i as u64)))
+                            .cursor_pointer()
+                            .hover(|s| s.underline())
+                            .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                                cb(&login, window, cx);
+                            })
+                            .into_any_element()
+                    }
+                    None => token.into_any_element(),
+                });
             }
             MessageElement::Link { text, .. } => {
                 tokens.push(
@@ -2620,6 +2733,7 @@ pub fn render_reply_preview(
             elements,
             scale,
             ("reply-preview-emote", id_seed),
+            None,
         ))
 }
 
@@ -2670,9 +2784,9 @@ fn stable_id(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        break_long_word, contrast_ratio, emote_tooltip_text, lerp_color, readable_color_on,
-        sample_gradient, seventv_emote_id, split_words, strip_reply_prefix, DARK, LIGHT,
-        LONG_WORD_CHARS, MIN_NAME_CONTRAST,
+        break_long_word, contrast_ratio, emote_tooltip_text, event_name_login, lerp_color,
+        readable_color_on, sample_gradient, seventv_emote_id, split_words, strip_reply_prefix,
+        DARK, LIGHT, LONG_WORD_CHARS, MIN_NAME_CONTRAST,
     };
     use bks_core::PaintStop;
     use bks_core::{Emote, EmoteTooltip};
@@ -2832,6 +2946,27 @@ mod tests {
         );
         assert_eq!(split_words(" end"), vec![" end"]);
         assert_eq!(split_words("a  b"), vec!["a  ", "b"]);
+    }
+
+    #[test]
+    fn event_name_login_matches_actor_and_mentions() {
+        // The acting user's name is clickable (leading token, with trailing
+        // punctuation from the formatted line).
+        assert_eq!(event_name_login("alice", Some("alice")).as_deref(), Some("alice"));
+        assert_eq!(
+            event_name_login("Alice", Some("alice")).as_deref(),
+            Some("Alice"),
+            "case-insensitive actor match keeps the display casing"
+        );
+        // Any `@mention` in the text is clickable regardless of the actor.
+        assert_eq!(event_name_login("@bob", None).as_deref(), Some("bob"));
+        assert_eq!(event_name_login("@bob,", None).as_deref(), Some("bob"));
+        // A plain word that isn't the actor and isn't an @mention is inert.
+        assert_eq!(event_name_login("redeemed", Some("alice")), None);
+        assert_eq!(event_name_login("(500", Some("alice")), None);
+        // Punctuation-only / empty words never yield a login.
+        assert_eq!(event_name_login("·", None), None);
+        assert_eq!(event_name_login("", None), None);
     }
 
     #[test]
