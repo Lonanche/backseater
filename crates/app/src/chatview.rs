@@ -4127,7 +4127,9 @@ impl ChatView {
                         // header, above the pinned banner that floats over the
                         // log) when the user opted in; otherwise they sit above
                         // the input, inside the composer.
-                        if crate::settings::chat_modes_on_top() {
+                        if crate::settings::chat_modes_placement()
+                            == crate::settings::ChatModesPlacement::Top
+                        {
                             col = col.children(self.render_mode_bar(true, cx));
                         }
                         col.child(log)
@@ -4831,10 +4833,12 @@ impl ChatView {
                 col.child(self.render_emote_picker(cx))
             })
             // Active chat restrictions (follower-only, slow, ...), when any —
-            // unless the user moved them to the top of the chat panel.
-            .when(!crate::settings::chat_modes_on_top(), |col| {
-                col.children(self.render_mode_bar(false, cx))
-            })
+            // only when placed above the input (not at the top, or hidden).
+            .when(
+                crate::settings::chat_modes_placement()
+                    == crate::settings::ChatModesPlacement::Bottom,
+                |col| col.children(self.render_mode_bar(false, cx)),
+            )
             // The "replying to" bar, when a reply is pending, sits just above input.
             .children(self.render_reply_bar(cx))
             .child(

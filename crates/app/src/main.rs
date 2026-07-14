@@ -2453,18 +2453,12 @@ impl BackseaterApp {
                     ))
                     .child(card_divider())
                     .child(setting_row(
-                        "Chat modes at top",
+                        "Chat modes bar",
                         Some(
-                            "Show active restrictions (slow, followers-only, sub-only, \
-                             ...) at the top of the chat panel instead of above the input.",
+                            "Where active restrictions (slow, followers-only, sub-only, \
+                             ...) show: off, at the top of the chat panel, or above the input.",
                         ),
-                        Switch::new("chat-modes-on-top")
-                            .small()
-                            .checked(self.settings.chat_modes_on_top)
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.set_chat_modes_on_top(*checked, cx);
-                            }))
-                            .into_any_element(),
+                        self.chat_modes_placement_seg(cx),
                     ))
                     .child(card_divider())
                     .child(setting_row(
@@ -3925,11 +3919,47 @@ impl BackseaterApp {
     /// Toggles whether the chat-mode bar sits at the top of the chat panel or
     /// above the input. Persists, flips the process-wide flag, and repaints every
     /// tab (the bar lives outside the cached log, so a plain notify reaches it).
-    fn set_chat_modes_on_top(&mut self, on: bool, cx: &mut Context<Self>) {
-        if self.settings.chat_modes_on_top == on {
+    /// A small three-segment control (Off / Top / Bottom) picking where the
+    /// chat-mode bar sits, matching the mod-button-mode selector's style.
+    fn chat_modes_placement_seg(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use settings::ChatModesPlacement;
+        let current = self.settings.chat_modes_placement;
+        let seg = |choice: ChatModesPlacement, label: &'static str, cx: &mut Context<Self>| {
+            let selected = current == choice;
+            div()
+                .id(SharedString::from(format!("chat-modes-{label}")))
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .when(selected, |s| {
+                    s.bg(cx.theme().secondary).font_weight(FontWeight::MEDIUM)
+                })
+                .when(!selected, |s| s.text_color(cx.theme().muted_foreground))
+                .hover(|s| s.bg(cx.theme().secondary))
+                .child(SharedString::from(label))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| this.set_chat_modes_placement(choice, cx)),
+                )
+        };
+        h_flex()
+            .gap_1()
+            .child(seg(ChatModesPlacement::Off, "Off", cx))
+            .child(seg(ChatModesPlacement::Top, "Top", cx))
+            .child(seg(ChatModesPlacement::Bottom, "Bottom", cx))
+            .into_any_element()
+    }
+
+    fn set_chat_modes_placement(
+        &mut self,
+        placement: settings::ChatModesPlacement,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.chat_modes_placement == placement {
             return;
         }
-        self.settings.chat_modes_on_top = on;
+        self.settings.chat_modes_placement = placement;
         self.settings.save();
         self.settings.apply_visibility_flags();
         for tab in &self.tabs {

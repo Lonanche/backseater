@@ -72,6 +72,18 @@ pub enum StreamerModeChoice {
     Auto,
 }
 
+/// Where the chat-mode bar (slow / followers-only / sub-only / ...) sits:
+/// hidden entirely, at the top of the chat panel (below the "Chat" header,
+/// above pinned messages), or just above the input box. `Top` by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatModesPlacement {
+    Off,
+    #[default]
+    Top,
+    Bottom,
+}
+
 /// How the per-message moderation buttons show: on every row the user can
 /// moderate, only while the row is hovered, or not at all. `Hover` still
 /// reserves the strip's width so message text doesn't shift as the pointer moves.
@@ -201,11 +213,10 @@ pub struct Settings {
     /// chat log. On by default.
     #[serde(default = "default_true")]
     pub show_status_bar: bool,
-    /// Whether the chat-mode bar (slow / followers-only / sub-only / ...) sits at
-    /// the top of the chat panel (below the "Chat" header, above pinned messages)
-    /// instead of just above the input box. Off by default (bottom placement).
+    /// Where the chat-mode bar (slow / followers-only / sub-only / ...) sits:
+    /// off, at the top of the chat panel, or above the input box. Top by default.
     #[serde(default)]
-    pub chat_modes_on_top: bool,
+    pub chat_modes_placement: ChatModesPlacement,
     /// Whether message timestamps show in the chat log. On by default.
     #[serde(default = "default_true")]
     pub show_timestamps_chat: bool,
@@ -286,7 +297,7 @@ impl Default for Settings {
             show_pinned_twitch: true,
             show_pinned_kick: true,
             show_status_bar: true,
-            chat_modes_on_top: false,
+            chat_modes_placement: ChatModesPlacement::default(),
             show_timestamps_chat: true,
             pause_chat_on_hover: false,
             show_timestamps_events: true,
@@ -351,7 +362,7 @@ impl Settings {
         SHOW_PINNED_TWITCH.store(self.show_pinned_twitch, Ordering::Relaxed);
         SHOW_PINNED_KICK.store(self.show_pinned_kick, Ordering::Relaxed);
         SHOW_STATUS_BAR.store(self.show_status_bar, Ordering::Relaxed);
-        CHAT_MODES_ON_TOP.store(self.chat_modes_on_top, Ordering::Relaxed);
+        CHAT_MODES_PLACEMENT.store(self.chat_modes_placement as u8, Ordering::Relaxed);
         SHOW_TIMESTAMPS_CHAT.store(self.show_timestamps_chat, Ordering::Relaxed);
         SHOW_TIMESTAMPS_EVENTS.store(self.show_timestamps_events, Ordering::Relaxed);
         SHOW_TIMESTAMPS_MENTIONS.store(self.show_timestamps_mentions, Ordering::Relaxed);
@@ -407,7 +418,7 @@ pub fn streamer_mute_sounds() -> bool {
 static MENTION_SOUND: AtomicBool = AtomicBool::new(false);
 static STREAMER_MUTE: AtomicBool = AtomicBool::new(true);
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// Suppressed-message opacity, stored as `f32::to_bits` (an atomic float has no
@@ -423,7 +434,7 @@ pub fn suppressed_opacity() -> f32 {
 static SHOW_PINNED_TWITCH: AtomicBool = AtomicBool::new(true);
 static SHOW_PINNED_KICK: AtomicBool = AtomicBool::new(true);
 static SHOW_STATUS_BAR: AtomicBool = AtomicBool::new(true);
-static CHAT_MODES_ON_TOP: AtomicBool = AtomicBool::new(false);
+static CHAT_MODES_PLACEMENT: AtomicU8 = AtomicU8::new(ChatModesPlacement::Top as u8);
 static SHOW_TIMESTAMPS_CHAT: AtomicBool = AtomicBool::new(true);
 static SHOW_TIMESTAMPS_EVENTS: AtomicBool = AtomicBool::new(true);
 static SHOW_TIMESTAMPS_MENTIONS: AtomicBool = AtomicBool::new(true);
@@ -440,10 +451,14 @@ pub fn show_status_bar() -> bool {
     SHOW_STATUS_BAR.load(Ordering::Relaxed)
 }
 
-/// Whether the chat-mode bar sits at the top of the chat panel instead of just
-/// above the input box (persisted, process-wide).
-pub fn chat_modes_on_top() -> bool {
-    CHAT_MODES_ON_TOP.load(Ordering::Relaxed)
+/// Where the chat-mode bar sits: off, at the top of the chat panel, or above
+/// the input box (persisted, process-wide).
+pub fn chat_modes_placement() -> ChatModesPlacement {
+    match CHAT_MODES_PLACEMENT.load(Ordering::Relaxed) {
+        x if x == ChatModesPlacement::Off as u8 => ChatModesPlacement::Off,
+        x if x == ChatModesPlacement::Bottom as u8 => ChatModesPlacement::Bottom,
+        _ => ChatModesPlacement::Top,
+    }
 }
 
 /// Whether message timestamps show in the chat log (persisted, process-wide).
