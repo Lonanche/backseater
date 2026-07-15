@@ -37,7 +37,7 @@ static CLIENT: Lazy<Client> = Lazy::new(|| {
 
 /// Issues a GET to a Cloudflare-fronted Kick URL with the shared emulated client
 /// plus browser-looking headers (Accept / UA-ish referer). Returns the response.
-async fn kick_get(url: impl wreq::IntoUrl) -> wreq::Result<wreq::Response> {
+pub(crate) async fn kick_get(url: impl wreq::IntoUrl) -> wreq::Result<wreq::Response> {
     CLIENT
         .get(url)
         .header("accept", "application/json")

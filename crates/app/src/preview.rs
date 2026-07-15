@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use bks_kick::KickClipPreviewProvider;
 use bks_preview::{LinkPreview, Lookup, PreviewCache};
 use bks_twitch::TwitchClipPreviewProvider;
 use bks_youtube::YoutubePreviewProvider;
@@ -24,6 +25,7 @@ pub fn cache() -> &'static Arc<PreviewCache> {
         Arc::new(PreviewCache::new(vec![
             Box::new(YoutubePreviewProvider::new()),
             Box::new(TwitchClipPreviewProvider::new()),
+            Box::new(KickClipPreviewProvider::new()),
         ]))
     })
 }
@@ -46,12 +48,12 @@ pub enum PreviewState {
 
 /// Reads `url`'s current preview state **without** starting a fetch — for the
 /// render path, which must not spawn work (the hover [`lookup`] already armed any
-/// needed fetch). A supported-but-not-yet-ready URL reads as `Loading`.
+/// needed fetch). A *failed* fetch reads as `None` (hide the card), not `Loading`.
 pub fn peek(url: &str) -> PreviewState {
     match cache().lookup_peek(url) {
-        Some(preview) => PreviewState::Ready(preview),
-        None if cache().is_supported(url) => PreviewState::Loading,
-        None => PreviewState::None,
+        Lookup::Ready(preview) => PreviewState::Ready(preview),
+        Lookup::Pending => PreviewState::Loading,
+        Lookup::Unsupported | Lookup::Failed => PreviewState::None,
     }
 }
 

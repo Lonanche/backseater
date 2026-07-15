@@ -173,15 +173,22 @@ impl PreviewCache {
         }
     }
 
-    /// Reads a fresh, resolved preview for `url` **without** starting or marking
-    /// a fetch — for the render path, which must not mutate cache state. Returns
-    /// `None` for an absent/pending/failed/stale entry (the caller distinguishes
-    /// loading vs unsupported via [`is_supported`](Self::is_supported)).
-    pub fn lookup_peek(&self, url: &str) -> Option<Arc<LinkPreview>> {
+    /// Reads `url`'s current state **without** starting or marking a fetch — for
+    /// the render path, which must not mutate cache state. Distinguishes Ready /
+    /// Pending / Failed / Unsupported so the caller can hide a *failed* preview
+    /// rather than show it as perpetually loading.
+    pub fn lookup_peek(&self, url: &str) -> Lookup {
+        if !self.is_supported(url) {
+            return Lookup::Unsupported;
+        }
         let entries = self.entries.lock().unwrap();
         match entries.get(url) {
-            Some(Entry::Ready(preview, at)) if at.elapsed() < TTL => Some(preview.clone()),
-            _ => None,
+            Some(Entry::Ready(preview, at)) if at.elapsed() < TTL => Lookup::Ready(preview.clone()),
+            Some(Entry::Failed(at)) if at.elapsed() < NEGATIVE_TTL => Lookup::Failed,
+            Some(Entry::Pending) => Lookup::Pending,
+            // Absent, or a stale Ready/Failed → a fetch will (re)start on the next
+            // hover `lookup`; until then treat it as pending (loading).
+            _ => Lookup::Pending,
         }
     }
 
