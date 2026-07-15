@@ -253,10 +253,10 @@ pub type ChannelId = String;
 /// The message a reply points at, shown as a muted "replying to" line above the
 /// message body. Both Twitch (IRC `reply-parent-*` tags) and Kick (`metadata.
 /// original_*`) provide the parent's author + body for the one-line context the
-/// UI renders; Twitch additionally gives the parent's id and the thread root's
-/// id, which let the UI reconstruct a whole reply thread from the session buffer
-/// (see `crate::thread`). Kick has no separate thread root — its replies are
-/// flat — so `thread_root_id` mirrors `parent_id` there.
+/// UI renders, plus the parent's id and a best-effort thread-root id. Thread
+/// reconstruction (`bks_app::thread`) walks the reliable `parent_id` links rather
+/// than trusting `thread_root_id` — Twitch's is a stable root, but Kick's
+/// `thread_parent_id` only names the direct parent past the first reply.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReplyParent {
     /// Display name of the user being replied to.
@@ -265,10 +265,12 @@ pub struct ReplyParent {
     pub text: String,
     /// Id of the message this reply points at directly. `None` when the connector
     /// couldn't provide it (older serialized data, or a platform that omits it).
+    /// This is the reliable link thread reconstruction walks.
     #[serde(default)]
     pub parent_id: Option<String>,
-    /// Id of the root message of the thread this reply belongs to. Stable for the
-    /// whole thread, so it groups every reply in the chain. `None` when unknown.
+    /// The platform's best-effort thread-root id — reliable on Twitch, only the
+    /// direct parent on Kick past the first level, so reconstruction resolves the
+    /// real root from `parent_id` links instead. Kept for the reply-bar hint.
     #[serde(default)]
     pub thread_root_id: Option<String>,
 }
@@ -316,11 +318,22 @@ pub struct Message {
 impl Message {
     /// The id of the thread this message belongs to: the reply's thread-root id
     /// if it's a reply, otherwise its own id (a message with replies under it is
-    /// the root of its own thread). Used to group a whole reply chain.
+    /// the root of its own thread). ⚠️ Only a *hint* — the platform-supplied root
+    /// can be unreliable (Kick's `thread_parent_id` points at the direct parent,
+    /// not the true root, past the first level), so the buffer-walking
+    /// reconstruction in `bks_app::thread` resolves the real root via
+    /// [`parent_id`](Self::parent_id) links instead of trusting this.
     pub fn thread_id(&self) -> &str {
         self.reply
             .as_ref()
             .and_then(|r| r.thread_root_id.as_deref())
             .unwrap_or(&self.id)
+    }
+
+    /// The id of the message this one directly replies to, if it's a reply.
+    /// Reliable on both platforms (Twitch `reply-parent-msg-id`, Kick
+    /// `metadata.original_message.id`), so it's what thread reconstruction walks.
+    pub fn parent_id(&self) -> Option<&str> {
+        self.reply.as_ref().and_then(|r| r.parent_id.as_deref())
     }
 }

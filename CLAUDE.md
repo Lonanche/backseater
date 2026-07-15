@@ -198,14 +198,17 @@ platform = implement one trait + one message builder, with zero UI changes**.
   (`ChatView::schedule_pin_expiry` + render-time check); a pin with no expiry stays until unpinned.
 - **Reply threads (Twitch + Kick)**: a hover ↩ button starts a reply (threads under the message
   on its platform); a reply renders a muted "↪ replying to @name: text" context line above the
-  body. `ReplyParent` now carries the parent's id + the **thread-root id** (Twitch IRC
-  `reply-parent-msg-id` + `reply-thread-parent-msg-id`; **Kick mirrors this** — the direct parent
-  is `metadata.original_message.id`, the thread root is the **top-level `thread_parent_id`** field
-  on the chat frame (distinct from the parent; empty/absent → the parent id doubles as the root)),
-  which lets a whole chain be reconstructed **from the session's row buffer**
-  (`crates/app/src/thread.rs::reconstruct` — group every message sharing `Message::thread_id`, in
-  buffer order). There's no fetch-a-thread API on either platform, so members that scrolled out of
-  the `MAX_ROWS` buffer or predate the session don't appear (same limit as the web clients).
+  body. `ReplyParent` carries the reliable **direct-parent id** (`Message::parent_id`: Twitch IRC
+  `reply-parent-msg-id`, Kick `metadata.original_message.id`) plus a best-effort `thread_root_id`.
+  ⚠️ Thread reconstruction (`crates/app/src/thread.rs::reconstruct`) **walks the parent-id links up
+  to the deepest buffered ancestor** and groups by that resolved root — it does NOT trust
+  `thread_root_id`, because Kick's `thread_parent_id` only names the *direct parent* (not the true
+  root) past the first reply, so grouping by it fragments a deep chain into parent-sized pieces
+  (verified against a live 4-message chain: `a←b←c←d` where c/d report root `b`, not `a`). Twitch's
+  root field *is* stable, but the parent-walk is correct for both, so it's the single path. A cycle
+  guard caps the walk at buffer size. There's no fetch-a-thread API on either platform, so members
+  that scrolled out of the `MAX_ROWS` buffer or predate the session don't appear (the furthest
+  buffered ancestor becomes the visible root); same limit as the web clients.
   **Clicking the "replying to" line opens the thread panel** (`ChatView::render_thread_panel`, a
   `deferred()` card **anchored just above the clicked line** — not centered — flipping below only
   when it won't fit, over a full-window transparent dismiss layer): the full chain oldest-first,
