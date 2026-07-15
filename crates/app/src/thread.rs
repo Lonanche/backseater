@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn single_message_is_its_own_thread() {
-        let rows = vec![msg("a", None)];
+        let rows = [msg("a", None)];
         let t = reconstruct(rows.iter(), "a").unwrap();
         assert_eq!(t.root_id, "a");
         assert_eq!(t.len(), 1);
@@ -166,7 +166,7 @@ mod tests {
     fn collects_whole_chain_from_any_member() {
         // root "a"; "b" replies to a (thread root a); "c" replies to b (root a);
         // "x" is unrelated.
-        let rows = vec![
+        let rows = [
             msg("a", None),
             msg("x", None),
             msg("b", Some(("a", "a"))),
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn unrelated_reply_is_a_separate_thread() {
-        let rows = vec![
+        let rows = [
             msg("a", None),
             msg("b", Some(("a", "a"))),
             msg("p", None),
@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn missing_seed_returns_none() {
-        let rows = vec![msg("a", None)];
+        let rows = [msg("a", None)];
         assert!(reconstruct(rows.iter(), "zzz").is_none());
     }
 
@@ -206,7 +206,7 @@ mod tests {
     fn root_scrolled_out_still_groups_replies() {
         // If the root "a" was trimmed from the buffer, its replies still share the
         // thread id and group together (seeded from either reply).
-        let rows = vec![msg("b", Some(("a", "a"))), msg("c", Some(("b", "a")))];
+        let rows = [msg("b", Some(("a", "a"))), msg("c", Some(("b", "a")))];
         let t = reconstruct(rows.iter(), "c").unwrap();
         assert_eq!(t.root_id, "a");
         let ids: Vec<&str> = t.messages.iter().map(|m| m.id.as_str()).collect();
@@ -220,7 +220,7 @@ mod tests {
         // the first level — so grouping by it would split a←b←c←d into {a,b} and
         // {c,d}. Walking parent_id links must still yield one thread rooted at a.
         //   a (root)  b→a(root a)  c→b(root *b*)  d→c(root *b*)
-        let rows = vec![
+        let rows = [
             msg("a", None),
             msg("b", Some(("a", "a"))),
             msg("c", Some(("b", "b"))), // wrong root field (should be a)
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn parent_cycle_is_bounded() {
         // Defensive: a (corrupt) parent cycle must not loop forever.
-        let rows = vec![msg("x", Some(("y", "y"))), msg("y", Some(("x", "x")))];
+        let rows = [msg("x", Some(("y", "y"))), msg("y", Some(("x", "x")))];
         // Just needs to terminate and return *something* without hanging.
         let t = reconstruct(rows.iter(), "x").unwrap();
         assert!(!t.messages.is_empty());
@@ -250,7 +250,7 @@ mod tests {
         // platform, the parent walk stays on Twitch: the thread is {a, b}, both
         // Twitch — the Kick "a" is never pulled in. (Real ids are per-platform
         // UUIDs and never collide; this proves scoping makes a collision harmless.)
-        let rows = vec![
+        let rows = [
             msg_on(Platform::Twitch, "a", None),
             msg_on(Platform::Kick, "a", None),
             msg_on(Platform::Twitch, "b", Some(("a", "a"))),
