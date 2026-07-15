@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use bks_core::{Author, Badge, Color, Emote, EmoteTooltip, Message, MessageElement, Platform};
-use bks_platform::{ChatEvent, EventKind};
+use bks_platform::{ChatEvent, EventDetails, EventKind};
 use chrono::{TimeZone, Utc};
 use serde_json::Value;
 
@@ -37,6 +37,11 @@ pub enum ParsedItem {
         text: String,
         timestamp: chrono::DateTime<chrono::Utc>,
         message: Option<Box<Message>>,
+        /// Compact events-panel actor (bold name), if the event has a structured
+        /// form; `None` falls the panel back to `text`.
+        actor: Option<String>,
+        /// Condensed detail following the actor ("sent $5.00", "became a member").
+        compact: Option<String>,
     },
     Ignored,
 }
@@ -69,33 +74,13 @@ fn build_text_message(channel: &str, r: &Value) -> ParsedItem {
         return ParsedItem::Ignored;
     }
 
-    let user_id = str_field(r, "authorExternalChannelId");
-    let has_member_badge = author_badges(r).iter().any(|b| b.membership);
-    let color = author_name_color(r).or(if has_member_badge {
-        Some(MEMBER_NAME_COLOR)
-    } else {
-        None
-    });
+    let color = author_color(r);
+    let author = build_author(r, author_name.to_string(), color);
 
     let mut elements = parse_message_runs(&r["message"], color);
     elements = bks_core::mentionize(bks_core::linkify(elements));
-
-    let badges = author_badges(r)
-        .into_iter()
-        .filter_map(|b| b.badge)
-        .collect();
-
     let raw_text = elements_to_text(&elements);
     let timestamp = parse_timestamp_usec(&str_field(r, "timestampUsec"));
-
-    let author = Author {
-        login: author_name.to_lowercase(),
-        display_name: author_name,
-        color,
-        badges,
-        user_id,
-        paint: None,
-    };
 
     ParsedItem::Message(Box::new(Message {
         id,
@@ -113,30 +98,90 @@ fn build_text_message(channel: &str, r: &Value) -> ParsedItem {
     }))
 }
 
+/// The name color for a renderer's author: YouTube's explicit `authorNameTextColor`,
+/// else the member green when the author carries a membership badge.
+fn author_color(r: &Value) -> Option<Color> {
+    let has_member_badge = author_badges(r).iter().any(|b| b.membership);
+    author_name_color(r).or(if has_member_badge {
+        Some(MEMBER_NAME_COLOR)
+    } else {
+        None
+    })
+}
+
+/// Builds an [`Author`] from any live-chat renderer that carries the standard
+/// `authorName`/`authorExternalChannelId`/`authorBadges` fields (text messages
+/// and Super Chats share this shape).
+fn build_author(r: &Value, display_name: String, color: Option<Color>) -> Author {
+    let badges = author_badges(r)
+        .into_iter()
+        .filter_map(|b| b.badge)
+        .collect();
+    Author {
+        login: display_name.to_lowercase(),
+        display_name,
+        color,
+        badges,
+        user_id: str_field(r, "authorExternalChannelId"),
+        paint: None,
+    }
+}
+
 /// A Super Chat / Super Sticker → a Bits-kind event. `with_body` includes the
-/// attached message (Super Chats have one, Super Stickers don't).
+/// attached message (Super Chats have one, Super Stickers don't). Like a Twitch
+/// resub, the donor's comment rides as a full [`Message`] (author color, badges,
+/// inline emotes) so it renders as a chat line under the "sent $5.00" header
+/// rather than being flattened into the event text; the panel's compact row
+/// reads "**Author** · sent $5.00".
 fn paid_event(r: &Value, kind: EventKind, with_body: bool) -> ParsedItem {
     let raw_author = parse_runs_text(&r["authorName"]);
-    let author = bks_core::normalize_username(&raw_author);
+    let author_name = bks_core::normalize_username(&raw_author).to_string();
     let amount = parse_runs_text(&r["purchaseAmountText"]);
-    if author.is_empty() || amount.is_empty() {
+    if author_name.is_empty() || amount.is_empty() {
         return ParsedItem::Ignored;
     }
-    let body = if with_body {
-        parse_runs_text(&r["message"])
+    let timestamp = parse_timestamp_usec(&str_field(r, "timestampUsec"));
+    let compact = format!("sent {amount}");
+
+    // The donor's comment, if any, as a chat line under the header. Super Chats
+    // color their name via `authorNameTextColor` (Super Chat tiers have their
+    // own name colors) like a normal message; reuse the same author/element path.
+    let color = author_color(r);
+    let mut elements = if with_body {
+        let mut els = parse_message_runs(&r["message"], color);
+        els = bks_core::mentionize(bks_core::linkify(els));
+        els
     } else {
-        String::new()
+        Vec::new()
     };
-    let text = if body.is_empty() {
-        format!("{author} sent {amount}")
+    let message = if elements.is_empty() {
+        None
     } else {
-        format!("{author} sent {amount}: {body}")
+        let raw_text = elements_to_text(&elements);
+        Some(Box::new(Message {
+            id: str_field(r, "id"),
+            platform: Platform::YouTube,
+            channel: String::new(),
+            timestamp,
+            author: build_author(r, author_name.clone(), color),
+            elements: std::mem::take(&mut elements),
+            raw_text,
+            reply: None,
+            first_message: false,
+            highlighted: false,
+            historical: false,
+            reward_id: None,
+        }))
     };
+
     ParsedItem::Event {
         kind,
-        text,
-        timestamp: parse_timestamp_usec(&str_field(r, "timestampUsec")),
-        message: None,
+        // Fallback for renderers that don't use the compact actor/detail row.
+        text: format!("{author_name} sent {amount}"),
+        timestamp,
+        message,
+        actor: Some(author_name),
+        compact: Some(compact),
     }
 }
 
@@ -157,6 +202,11 @@ fn membership_event(r: &Value) -> ParsedItem {
     if author.is_empty() {
         return ParsedItem::Ignored;
     }
+    let compact = if header.is_empty() {
+        "became a member".to_string()
+    } else {
+        header.clone()
+    };
     let text = if header.is_empty() {
         format!("{author} became a member")
     } else {
@@ -167,6 +217,8 @@ fn membership_event(r: &Value) -> ParsedItem {
         text,
         timestamp: parse_timestamp_usec(&str_field(r, "timestampUsec")),
         message: None,
+        actor: Some(author.to_string()),
+        compact: Some(compact),
     }
 }
 
@@ -182,15 +234,29 @@ fn gift_event(r: &Value) -> ParsedItem {
     // `primaryText` is like "Gifted 5 memberships"; prefix the gifter's name.
     let text = match (author.is_empty(), primary.is_empty()) {
         (false, false) => format!("{author} {}", lowercase_first(&primary)),
-        (true, false) => primary,
+        (true, false) => primary.clone(),
         (false, true) => format!("{author} gifted memberships"),
         (true, true) => unreachable!(),
+    };
+    // With a gifter name, split it into the bold actor + condensed detail; an
+    // anonymous gift keeps only the pre-formatted text (no actor).
+    let (actor, compact) = if author.is_empty() {
+        (None, None)
+    } else {
+        let detail = if primary.is_empty() {
+            "gifted memberships".to_string()
+        } else {
+            lowercase_first(&primary)
+        };
+        (Some(author.to_string()), Some(detail))
     };
     ParsedItem::Event {
         kind: EventKind::Gift,
         text,
         timestamp: parse_timestamp_usec(&str_field(r, "timestampUsec")),
         message: None,
+        actor,
+        compact,
     }
 }
 
@@ -423,16 +489,28 @@ pub fn item_to_event(channel: &str, item: &Value) -> Option<ChatEvent> {
             kind,
             text,
             timestamp,
-            message,
-        } => Some(ChatEvent::Event {
-            platform: Platform::YouTube,
-            kind,
-            text,
-            timestamp,
-            message,
-            // No condensed form yet: the panel falls back to the full text.
-            details: Default::default(),
-        }),
+            mut message,
+            actor,
+            compact,
+        } => {
+            // The attached message is built without channel context in
+            // `build_item`; fill it in here (it's stored on each row).
+            if let Some(msg) = message.as_mut() {
+                msg.channel = channel.to_string();
+            }
+            Some(ChatEvent::Event {
+                platform: Platform::YouTube,
+                kind,
+                text,
+                timestamp,
+                message,
+                details: EventDetails {
+                    actor,
+                    compact,
+                    ..Default::default()
+                },
+            })
+        }
         ParsedItem::Ignored => None,
     }
 }
@@ -568,9 +646,41 @@ mod tests {
             }
         });
         match build_item("chan", &item) {
-            ParsedItem::Event { kind, text, .. } => {
+            ParsedItem::Event {
+                kind,
+                text,
+                message,
+                actor,
+                compact,
+                ..
+            } => {
                 assert_eq!(kind, EventKind::Bits);
-                assert_eq!(text, "Carol sent $5.00: great stream");
+                // The donor comment now rides as an attached chat line (like a
+                // Twitch resub), not flattened into the event text.
+                assert_eq!(text, "Carol sent $5.00");
+                assert_eq!(actor.as_deref(), Some("Carol"));
+                assert_eq!(compact.as_deref(), Some("sent $5.00"));
+                let msg = message.expect("super chat body should attach a message");
+                assert_eq!(msg.author.display_name, "Carol");
+                assert_eq!(kinds(&msg.elements), vec!["T:great stream"]);
+            }
+            _ => panic!("expected event"),
+        }
+    }
+
+    #[test]
+    fn super_chat_without_message_has_no_attached_line() {
+        let item = serde_json::json!({
+            "liveChatPaidMessageRenderer": {
+                "id": "sc2",
+                "authorName": { "simpleText": "Carol" },
+                "purchaseAmountText": { "simpleText": "$2.00" }
+            }
+        });
+        match build_item("chan", &item) {
+            ParsedItem::Event { text, message, .. } => {
+                assert_eq!(text, "Carol sent $2.00");
+                assert!(message.is_none());
             }
             _ => panic!("expected event"),
         }
