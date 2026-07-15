@@ -1373,6 +1373,11 @@ pub type ReplyClick = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
 /// logged-in user can moderate the row's platform; `None` hides the button.
 pub type PinClick = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
 
+/// A callback run when a reply's "↪ replying to" context line is clicked: opens
+/// the thread panel showing the whole reply chain. Built per-row by the view for
+/// reply messages in the live log; `None` leaves the context line inert.
+pub type ThreadClick = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
+
 /// The shared shape of a row's hover-action callbacks ([`ReplyClick`],
 /// [`PinClick`]), for the chip builder.
 type RowAction = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
@@ -1416,6 +1421,9 @@ pub struct RowHandlers {
     pub emote_click: Option<EmoteClick>,
     pub seventv_link_click: Option<SeventvLinkClick>,
     pub reply_click: Option<ReplyClick>,
+    /// Set in the live log on a reply row: clicking its "replying to" context line
+    /// opens the thread panel. `None` leaves the line inert (panels, usercard).
+    pub thread_click: Option<ThreadClick>,
     /// Set only when the logged-in user can moderate this row's platform — the
     /// pin button renders (on hover) only then.
     pub pin_click: Option<PinClick>,
@@ -1477,6 +1485,7 @@ pub fn render_message(
         emote_click,
         seventv_link_click,
         reply_click,
+        thread_click,
         pin_click,
         mod_strip,
         inline_preview,
@@ -1897,7 +1906,13 @@ pub fn render_message(
                 .mx(px(-HIGHLIGHT_INSET))
         })
         .when_some(msg.reply.as_ref(), |col, reply| {
-            col.child(reply_line(reply, scale))
+            let id_seed = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                msg.id.hash(&mut h);
+                h.finish()
+            };
+            col.child(reply_line(reply, scale, thread_click.clone(), id_seed))
         })
         .child(body)
         // The inline link-preview card (when enabled + the message has a
@@ -2203,19 +2218,37 @@ fn strip_reply_prefix(text: &str, author: Option<&str>) -> String {
 }
 
 /// The muted "↪ replying to @name: text" line shown above a reply, with the
-/// parent body truncated to [`REPLY_PREVIEW_CHARS`].
-fn reply_line(reply: &ReplyParent, scale: Scale) -> impl IntoElement {
+/// parent body truncated to [`REPLY_PREVIEW_CHARS`]. When `thread_click` is set
+/// (live log), the line is clickable to open the thread panel and hints at it
+/// with a pointer cursor + a hover underline; `id_seed` gives the clickable
+/// element a stable id (the message id).
+fn reply_line(
+    reply: &ReplyParent,
+    scale: Scale,
+    thread_click: Option<ThreadClick>,
+    id_seed: u64,
+) -> impl IntoElement {
     let mut preview: String = reply.text.chars().take(REPLY_PREVIEW_CHARS).collect();
     if reply.text.chars().count() > REPLY_PREVIEW_CHARS {
         preview.push('…');
     }
-    div()
+    let text = SharedString::from(format!("↪ replying to @{}: {preview}", reply.author));
+    let base = div()
         .text_size(px(scale.small))
-        .text_color(rgb(palette().reply))
-        .child(SharedString::from(format!(
-            "↪ replying to @{}: {preview}",
-            reply.author
-        )))
+        .text_color(rgb(palette().reply));
+    match thread_click {
+        Some(cb) => base
+            .id(("reply-thread-line", id_seed as usize))
+            .cursor_pointer()
+            .hover(|s| s.underline())
+            .on_mouse_down(
+                MouseButton::Left,
+                move |_, window: &mut Window, cx: &mut App| cb(window, cx),
+            )
+            .child(text)
+            .into_any_element(),
+        None => base.child(text).into_any_element(),
+    }
 }
 
 /// A connector notice (connected, errors, ...), rendered muted.
@@ -3040,6 +3073,56 @@ pub fn render_reply_preview(
             ("reply-preview-emote", id_seed),
             None,
         ))
+}
+
+/// One compact line of a reply thread ("name: message with emotes inline") for
+/// the thread context shown in the reply bar. The author name keeps its (readable)
+/// color; `id_seed` keys the inline emote images. `highlight` tints the row for
+/// the message the reply directly targets.
+pub fn render_thread_line(
+    msg: &Message,
+    font_size: f32,
+    id_seed: u64,
+    highlight: bool,
+) -> impl IntoElement {
+    let scale = Scale::new(font_size);
+    let name_color = readable_color(
+        msg.author
+            .color
+            .map(Color::to_u32)
+            .unwrap_or_else(|| palette().default_name),
+    );
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .items_baseline()
+        .gap_1()
+        .px_1()
+        .when(highlight, |row| {
+            row.bg(rgb(palette().reply))
+                .rounded_sm()
+                .border_l_2()
+                .border_color(rgb(palette().reply))
+        })
+        .child(
+            div()
+                .flex_none()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(name_color))
+                .child(SharedString::from(format!("{}:", msg.author.display_name))),
+        )
+        .child(
+            div().flex_1().min_w_0().overflow_hidden().child(h_flex()
+                .min_w_0()
+                .items_center()
+                .overflow_hidden()
+                .children(inline_tokens(
+                    &msg.elements,
+                    scale,
+                    ("thread-line-emote", id_seed),
+                    None,
+                ))),
+        )
 }
 
 /// A stream live/offline notice: a highlighted row with the platform icon and a

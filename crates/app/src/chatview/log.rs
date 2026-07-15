@@ -29,7 +29,7 @@ use gpui_component::{h_flex, v_flex, ActiveTheme};
 
 use super::{
     mention_click_for, mention_click_for_platform, mod_click_for, name_click_for,
-    name_right_click_for, pin_click_for, reply_click_for, ChatView,
+    name_right_click_for, pin_click_for, reply_click_for, thread_click_for, ChatView,
     EmotePopup, Row,
 };
 use crate::channel_store::ChannelModel;
@@ -275,6 +275,12 @@ impl Render for LogView {
                     let name_click = name_click_for(&render_entity, msg);
                     let name_right_click = name_right_click_for(&render_entity, msg);
                     let reply_click = reply_click_for(&render_entity, msg);
+                    // A reply's context line is clickable to open the thread panel;
+                    // non-reply rows have no context line, so no handler.
+                    let thread_click = msg
+                        .reply
+                        .is_some()
+                        .then(|| thread_click_for(&render_entity, msg));
                     // The 📌 button only renders for Twitch rows the user can
                     // moderate that carry a real platform message id (not a
                     // local echo) — pinning is Helix-only; Kick's site API
@@ -339,6 +345,7 @@ impl Render for LogView {
                             emote_click: Some(emote_click.clone()),
                             seventv_link_click: Some(seventv_link_click.clone()),
                             reply_click: Some(reply_click),
+                            thread_click,
                             pin_click,
                             mod_strip,
                             inline_preview,

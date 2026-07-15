@@ -30,6 +30,7 @@ mod sound;
 mod stale_hover;
 mod streamer_mode;
 mod tabs;
+mod thread;
 mod updater;
 mod usercard;
 mod viewerlist;

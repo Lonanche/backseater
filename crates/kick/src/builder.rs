@@ -65,6 +65,9 @@ pub struct ReplyUser {
 
 #[derive(Deserialize)]
 pub struct ReplyMessage {
+    /// Id of the parent message; lets the UI link the reply into a thread.
+    #[serde(default)]
+    pub id: Option<String>,
     #[serde(default)]
     pub content: String,
 }
@@ -316,8 +319,18 @@ pub fn build_message(
     // carries no mention prefix, so `content` is already what the user typed.
     let reply = msg.metadata.and_then(|m| {
         let author = bks_core::normalize_username(&m.original_sender?.username).to_string();
-        let text = m.original_message.map(|o| o.content).unwrap_or_default();
-        Some(ReplyParent { author, text })
+        let (text, parent_id) = m
+            .original_message
+            .map(|o| (o.content, o.id))
+            .unwrap_or_default();
+        Some(ReplyParent {
+            author,
+            text,
+            // Kick replies are flat (no separate thread root), so the parent id
+            // doubles as the thread root — chains still link one level deep.
+            thread_root_id: parent_id.clone(),
+            parent_id,
+        })
     });
 
     Message {
@@ -452,6 +465,9 @@ mod tests {
         let reply = msg.reply.expect("reply parent");
         assert_eq!(reply.author, "Alice");
         assert_eq!(reply.text, "hot take");
+        assert_eq!(reply.parent_id.as_deref(), Some("m0"));
+        // Kick has no separate thread root; parent id doubles as it.
+        assert_eq!(reply.thread_root_id.as_deref(), Some("m0"));
     }
 
     #[test]

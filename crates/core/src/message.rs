@@ -252,14 +252,25 @@ pub type ChannelId = String;
 
 /// The message a reply points at, shown as a muted "replying to" line above the
 /// message body. Both Twitch (IRC `reply-parent-*` tags) and Kick (`metadata.
-/// original_*`) provide the parent's author + body, so we keep just those — no
-/// thread model, just the one-line context the UI renders.
+/// original_*`) provide the parent's author + body for the one-line context the
+/// UI renders; Twitch additionally gives the parent's id and the thread root's
+/// id, which let the UI reconstruct a whole reply thread from the session buffer
+/// (see `crate::thread`). Kick has no separate thread root — its replies are
+/// flat — so `thread_root_id` mirrors `parent_id` there.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReplyParent {
     /// Display name of the user being replied to.
     pub author: String,
     /// The parent message's text (already stripped of any reply mention prefix).
     pub text: String,
+    /// Id of the message this reply points at directly. `None` when the connector
+    /// couldn't provide it (older serialized data, or a platform that omits it).
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// Id of the root message of the thread this reply belongs to. Stable for the
+    /// whole thread, so it groups every reply in the chain. `None` when unknown.
+    #[serde(default)]
+    pub thread_root_id: Option<String>,
 }
 
 /// A single chat message in platform-agnostic form.
@@ -300,4 +311,16 @@ pub struct Message {
     /// messages and non-Twitch platforms.
     #[serde(default)]
     pub reward_id: Option<String>,
+}
+
+impl Message {
+    /// The id of the thread this message belongs to: the reply's thread-root id
+    /// if it's a reply, otherwise its own id (a message with replies under it is
+    /// the root of its own thread). Used to group a whole reply chain.
+    pub fn thread_id(&self) -> &str {
+        self.reply
+            .as_ref()
+            .and_then(|r| r.thread_root_id.as_deref())
+            .unwrap_or(&self.id)
+    }
 }

@@ -196,6 +196,25 @@ platform = implement one trait + one message builder, with zero UI changes**.
   wreq cookie jar + `x-xsrf-token` CSRF handshake, is removed; it's in git history if ever
   needed.) Timed pins expire client-side
   (`ChatView::schedule_pin_expiry` + render-time check); a pin with no expiry stays until unpinned.
+- **Reply threads (Twitch + Kick)**: a hover ↩ button starts a reply (threads under the message
+  on its platform); a reply renders a muted "↪ replying to @name: text" context line above the
+  body. `ReplyParent` now carries the parent's id + the **thread-root id** (Twitch IRC
+  `reply-parent-msg-id` + `reply-thread-parent-msg-id`; Kick's flat replies reuse the parent id as
+  the root), which lets a whole chain be reconstructed **from the session's row buffer**
+  (`crates/app/src/thread.rs::reconstruct` — group every message sharing `Message::thread_id`, in
+  buffer order). There's no fetch-a-thread API on either platform, so members that scrolled out of
+  the `MAX_ROWS` buffer or predate the session don't appear (same limit as the web clients).
+  **Clicking the "replying to" line opens the thread panel** (`ChatView::render_thread_panel`, a
+  `deferred()` backdrop-dimmed centered card): the full chain oldest-first, each name/`@mention`
+  opening the usercard, the clicked message tinted, with an ✕ and a "↩ Reply to thread" button
+  (replies to the newest message in the chain). Handler seam mirrors the others:
+  `render::ThreadClick` on `RowHandlers.thread_click`, built per reply row by `thread_click_for`
+  (only set when `msg.reply.is_some()`). **The reply bar shows the whole thread too**: when the
+  message being replied to is part of a multi-message chain still in the buffer,
+  `render_reply_bar` renders the scrollable chain (each line `render::render_thread_line`, the
+  target tinted) instead of the single parent preview; a single/absent chain falls back to the
+  one-line "Replying to name: preview". `thread_panel: Option<String>` on `ChatView` holds the
+  open panel's seed id (the chain is rebuilt live each render so it grows as replies arrive).
 - **Twitch viewer list** (👥 button on the input bar, or `/chatters`/`/viewers`): a child OS
   window listing who's connected to the tab's Twitch chat, with a live search filter, count,
   Refresh, and click-a-name → usercard. Data is Helix `GET /chat/chatters` (paginated,

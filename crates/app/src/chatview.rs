@@ -632,6 +632,11 @@ pub(crate) struct ChatView {
     /// next sent line threads under it (on the parent's platform); shown as a
     /// "replying to" bar above the input. Cleared on send or cancel.
     replying_to: Option<controller::ReplyTo>,
+    /// When set, the thread panel is open showing the reply chain seeded from this
+    /// message id (opened by clicking a "replying to" line). Rebuilt from the live
+    /// buffer each render so it grows as new replies arrive. Cleared on ✕ or a
+    /// backdrop click.
+    thread_panel: Option<String>,
     /// While dragging a layout divider: which one, the two adjacent shares, and
     /// the pointer position at grab time, so each move applies a delta. `None`
     /// when not resizing.
@@ -905,6 +910,7 @@ impl ChatView {
             link_preview_gen: 0,
             link_preview_offset: std::rc::Rc::new(std::cell::Cell::new(Point::default())),
             replying_to: None,
+            thread_panel: None,
             layout_drag: None,
             grid_bounds: std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default())),
             events_list_state,
@@ -1653,10 +1659,26 @@ impl ChatView {
             parent: bks_core::ReplyParent {
                 author: msg.author.display_name.clone(),
                 text: msg.raw_text.clone(),
+                parent_id: Some(msg.id.clone()),
+                thread_root_id: Some(msg.thread_id().to_string()),
             },
             parent_elements: msg.elements.clone(),
         });
         self.input.update(cx, |this, cx| this.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Opens the thread panel seeded from `msg_id` (a reply's "replying to" line
+    /// was clicked). The chain itself is rebuilt from the live buffer each render,
+    /// so the panel keeps up as new replies land.
+    fn open_thread_panel(&mut self, msg_id: &str, cx: &mut Context<Self>) {
+        self.thread_panel = Some(msg_id.to_string());
+        cx.notify();
+    }
+
+    /// Closes the thread panel.
+    fn close_thread_panel(&mut self, cx: &mut Context<Self>) {
+        self.thread_panel = None;
         cx.notify();
     }
 
@@ -4761,9 +4783,12 @@ impl ChatView {
         )
     }
 
-    /// The "Replying to <name>: <preview>" bar shown above the input when a reply
-    /// is pending, with the parent's emotes rendered inline and an ✕ to cancel.
-    /// `None` when not replying.
+    /// The "Replying to" bar above the input when a reply is pending. When the
+    /// message being replied to is part of a multi-message thread that's still in
+    /// the buffer, the bar shows the whole chain (scrollable, oldest first) so the
+    /// user sees the conversation they're joining; the message they're replying to
+    /// is tinted. Otherwise it's a single "Replying to name: preview" line. An ✕
+    /// cancels. `None` when not replying.
     fn render_reply_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let reply = self.replying_to.as_ref()?;
         // A stable per-reply id seed so the preview's emote images animate.
@@ -4773,6 +4798,75 @@ impl ChatView {
             reply.message_id.hash(&mut h);
             h.finish()
         };
+
+        let cancel = div()
+            .id("cancel-reply")
+            .flex_none()
+            .px_1()
+            .cursor_pointer()
+            .child(SharedString::from("✕"))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.replying_to = None;
+                    cx.notify();
+                }),
+            );
+
+        // Reconstruct the thread the target belongs to; show the whole chain when
+        // it's a real conversation (>1 message still buffered).
+        let thread = self.build_thread(&reply.message_id, cx);
+        let show_chain = thread.as_ref().is_some_and(|t| t.is_multi());
+
+        if let (true, Some(thread)) = (show_chain, thread) {
+            let font_size = self.font_size;
+            let target_id = reply.message_id.clone();
+            let lines: Vec<gpui::AnyElement> = thread
+                .messages
+                .iter()
+                .map(|m| {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    m.id.hash(&mut h);
+                    render::render_thread_line(m, font_size, h.finish(), m.id == target_id)
+                        .into_any_element()
+                })
+                .collect();
+            return Some(
+                v_flex()
+                    .w_full()
+                    .bg(cx.theme().secondary)
+                    .text_color(cx.theme().muted_foreground)
+                    .text_size(px(font_size))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .px_2()
+                            .pt_1()
+                            .items_center()
+                            .justify_between()
+                            .child(SharedString::from(format!(
+                                "Replying in thread ({}):",
+                                thread.len()
+                            )))
+                            .child(cancel),
+                    )
+                    .child(
+                        v_flex()
+                            .id("reply-thread-chain")
+                            .w_full()
+                            .px_2()
+                            .pb_1()
+                            // Cap the chain's height so a long thread scrolls rather
+                            // than shoving the composer off-screen.
+                            .max_h(px(140.))
+                            .overflow_y_scroll()
+                            .children(lines),
+                    )
+                    .into_any_element(),
+            );
+        }
+
         Some(
             h_flex()
                 .w_full()
@@ -4790,22 +4884,178 @@ impl ChatView {
                 .child(div().flex_1().min_w_0().overflow_hidden().child(
                     render::render_reply_preview(&reply.parent_elements, self.font_size, seed),
                 ))
-                .child(
-                    div()
-                        .id("cancel-reply")
-                        .px_1()
-                        .cursor_pointer()
-                        .child(SharedString::from("✕"))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.replying_to = None;
-                                cx.notify();
-                            }),
-                        ),
-                )
+                .child(cancel)
                 .into_any_element(),
         )
+    }
+
+    /// Reconstructs the thread seeded from `seed_id` off the live buffer and
+    /// renders each message with the shared renderer (names/emotes/badges), the
+    /// seed subtly tinted. `None` if the panel is closed or the seed row is gone.
+    fn build_thread(&self, seed_id: &str, cx: &App) -> Option<crate::thread::Thread> {
+        let model = self.channel.read(cx);
+        let messages = model.rows.iter().filter_map(|row| match row {
+            Row::Message { msg } => Some(msg),
+            _ => None,
+        });
+        crate::thread::reconstruct(messages, seed_id)
+    }
+
+    /// The thread panel: a floating card listing the whole reply chain the clicked
+    /// message belongs to, oldest at top, each row's name/`@mentions` opening the
+    /// usercard. A backdrop dims + dismisses; the header has an ✕ and a "Reply to
+    /// thread" button that starts a reply to the newest message in the chain.
+    /// `None` when the panel is closed or its seed scrolled out of the buffer.
+    fn render_thread_panel(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let seed_id = self.thread_panel.clone()?;
+        let thread = self.build_thread(&seed_id, cx)?;
+        let entity = cx.entity();
+
+        // Each message renders against a throwaway selection (the panel isn't part
+        // of the log's drag-select); names + mentions open usercards like the log.
+        let selection = selectable::Selection::new();
+        selection.begin_frame();
+        let mut ordinal = 0usize;
+        let font_size = self.font_size;
+
+        let rows: Vec<gpui::AnyElement> = thread
+            .messages
+            .iter()
+            .map(|msg| {
+                let is_seed = msg.id == seed_id;
+                let handlers = render::RowHandlers {
+                    name_click: Some(name_click_for(&entity, msg)),
+                    mention_click: Some(mention_click_for(&entity, msg)),
+                    ..Default::default()
+                };
+                let struck = self.channel.read(cx).is_struck(msg);
+                let body = render::render_message(
+                    msg,
+                    render::RowFlags {
+                        struck,
+                        ..Default::default()
+                    },
+                    font_size,
+                    &selection,
+                    &mut ordinal,
+                    handlers,
+                );
+                let mut row = div().w_full().px_2().py_0p5().child(body);
+                if is_seed {
+                    // The message the user clicked from: a subtle tint + accent bar
+                    // so it's findable in a long thread (tint only, not the text).
+                    row = row
+                        .bg(cx.theme().secondary)
+                        .rounded_md()
+                        .border_l_2()
+                        .border_color(cx.theme().primary);
+                }
+                row.into_any_element()
+            })
+            .collect();
+
+        let count = thread.len();
+        // "Reply to thread" targets the newest message in the chain, so the reply
+        // threads under the live conversation (Twitch keys the thread off it).
+        let reply_target = thread.messages.last().map(|m| m.id.clone());
+
+        let header = h_flex()
+            .w_full()
+            .px_3()
+            .py_2()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(cx.theme().foreground)
+                    .child(SharedString::from(format!("Thread ({count})"))),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .when_some(reply_target, |row, target| {
+                        row.child(
+                            div()
+                                .id("thread-reply")
+                                .px_2()
+                                .py_0p5()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .bg(cx.theme().secondary)
+                                .text_color(cx.theme().secondary_foreground)
+                                .text_size(px(font_size - 1.))
+                                .child(SharedString::from("↩ Reply to thread"))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.close_thread_panel(cx);
+                                        this.start_reply(&target, window, cx);
+                                    }),
+                                ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id("thread-close")
+                            .px_1()
+                            .cursor_pointer()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from("✕"))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| this.close_thread_panel(cx)),
+                            ),
+                    ),
+            );
+
+        let card = v_flex()
+            .id("thread-panel")
+            .w(px(440.))
+            .max_h(px(520.))
+            .bg(cx.theme().popover)
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded_lg()
+            .shadow_lg()
+            .text_color(cx.theme().popover_foreground)
+            .text_size(px(font_size))
+            .child(header)
+            .child(
+                v_flex()
+                    .id("thread-panel-list")
+                    .flex_1()
+                    .min_h_0()
+                    .py_1()
+                    .overflow_y_scroll()
+                    .children(rows),
+            );
+
+        // A dimming backdrop that centers the card and dismisses on an outside
+        // click; the card swallows its own clicks so they don't dismiss.
+        let backdrop = div()
+            .id("thread-backdrop")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::rgba(0x00000066))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.close_thread_panel(cx)),
+            )
+            .child(
+                div()
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, _| {})
+                    .child(card),
+            );
+
+        Some(gpui::deferred(backdrop).into_any_element())
     }
 }
 
@@ -5251,6 +5501,7 @@ impl Render for ChatView {
 
         let emote_popup_overlay = self.render_emote_popup(window, cx);
         let link_preview_overlay = self.render_link_preview(window, cx);
+        let thread_panel_overlay = self.render_thread_panel(cx);
 
         let layout_grid = self.render_layout_grid(cx);
 
@@ -5269,6 +5520,7 @@ impl Render for ChatView {
             // only renders when a preview is showing.
             .child(self.link_preview_probe())
             .children(link_preview_overlay)
+            .children(thread_panel_overlay)
     }
 }
 
@@ -5602,6 +5854,19 @@ fn reply_click_for(entity: &Entity<ChatView>, msg: &Message) -> render::ReplyCli
     std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
         entity.update(cx, |this, cx| {
             this.start_reply(&msg_id, window, cx);
+        });
+    })
+}
+
+/// Builds the "replying to" line's click callback for one reply message: opens
+/// the thread panel seeded from it. Captures the view handle + message id; the
+/// chain is rebuilt from the live buffer when the panel renders.
+fn thread_click_for(entity: &Entity<ChatView>, msg: &Message) -> render::ThreadClick {
+    let entity = entity.clone();
+    let msg_id = msg.id.clone();
+    std::rc::Rc::new(move |_window: &mut Window, cx: &mut App| {
+        entity.update(cx, |this, cx| {
+            this.open_thread_panel(&msg_id, cx);
         });
     })
 }

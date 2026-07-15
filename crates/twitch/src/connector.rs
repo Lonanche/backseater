@@ -426,6 +426,10 @@ pub(crate) fn privmsg_to_message(
     let reply = pm.reply_to().map(|r| ReplyParent {
         author: r.sender().name().to_string(),
         text: r.text().to_string(),
+        // `message_id` is the message replied to directly; `thread_parent_message_id`
+        // is the thread root — both let the UI reconstruct the whole chain.
+        parent_id: Some(r.message_id().to_string()),
+        thread_root_id: Some(r.thread_parent_message_id().to_string()),
     });
 
     // Twitch message bodies carry no per-run color; the whole run is uncolored.
@@ -541,6 +545,14 @@ mod tests {
         let reply = msg.reply.expect("reply parent");
         assert_eq!(reply.author, "Posty");
         assert_eq!(reply.text, "hello");
+        assert_eq!(
+            reply.parent_id.as_deref(),
+            Some("6b13e51b-7ecb-43b5-ba5b-2bb5288df696")
+        );
+        assert_eq!(
+            reply.thread_root_id.as_deref(),
+            Some("6b13e51b-7ecb-43b5-ba5b-2bb5288df696")
+        );
     }
 
     #[test]
