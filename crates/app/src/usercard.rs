@@ -54,6 +54,10 @@ pub struct UserCard {
     /// While streamer mode is active the avatar renders as a placeholder;
     /// clicking it sets this to show the real image (per card, not persisted).
     pub avatar_revealed: bool,
+    /// Twitch mod-only deep link to twitch.tv's own viewer card
+    /// (`/popout/{channel}/viewercard/{user}`), set by the host when the logged-in
+    /// user can moderate this Twitch channel. `None` otherwise (no link shown).
+    pub mod_viewercard_url: Option<String>,
 }
 
 impl UserCard {
@@ -79,6 +83,7 @@ impl UserCard {
                 _ => Stats::Unavailable("Account details aren't available yet".into()),
             },
             avatar_revealed: false,
+            mod_viewercard_url: None,
         }
     }
 
@@ -144,7 +149,21 @@ impl UserCard {
         if let Some(url) = self.profile_url() {
             name_row = name_row.child(
                 Button::new("usercard-open-profile")
-                    .label("Open profile ↗")
+                    .label("Channel ↗")
+                    .ghost()
+                    .xsmall()
+                    .compact()
+                    .on_click(move |_, _, cx| {
+                        cx.open_url(&url);
+                    }),
+            );
+        }
+        // Mod-only: twitch.tv's own viewer card (moderation actions/history in the
+        // Twitch UI), set by the host only when the user can moderate this channel.
+        if let Some(url) = self.mod_viewercard_url.clone() {
+            name_row = name_row.child(
+                Button::new("usercard-mod-viewercard")
+                    .label("Mod card ↗")
                     .ghost()
                     .xsmall()
                     .compact()

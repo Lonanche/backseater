@@ -403,6 +403,11 @@ impl Controller {
         !self.twitch_channel.is_empty()
     }
 
+    /// The tab's Twitch channel login (empty if none is set).
+    pub fn twitch_channel(&self) -> &str {
+        &self.twitch_channel
+    }
+
     /// Cycles the send target Twitch → Kick → Both (only meaningful when logged
     /// into Kick and this tab has both channels — a single-platform tab has
     /// nothing to switch to).

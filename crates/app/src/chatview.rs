@@ -2649,9 +2649,22 @@ impl ChatView {
 
     /// Shows `card` in the usercard window (shared by name clicks in chat and
     /// the viewer list) and starts the async account-stats fetch for it.
-    fn show_usercard(&mut self, card: usercard::UserCard, cx: &mut Context<Self>) {
+    fn show_usercard(&mut self, mut card: usercard::UserCard, cx: &mut Context<Self>) {
         let login = card.login.clone();
         let platform = card.platform;
+        // Mods get a deep link to twitch.tv's own viewer card
+        // (`/popout/{channel}/viewercard/{user}`) for a Twitch chatter — only when
+        // the logged-in user can moderate this channel and both slugs are known.
+        if platform == bks_core::Platform::Twitch
+            && self.channel.read(cx).can_moderate(bks_core::Platform::Twitch)
+        {
+            let channel = self.controller.twitch_channel();
+            if !channel.is_empty() && !login.is_empty() {
+                card.mod_viewercard_url = Some(format!(
+                    "https://www.twitch.tv/popout/{channel}/viewercard/{login}"
+                ));
+            }
+        }
         self.usercard = Some(card);
         // A stale custom-timeout/warn error would misread as being about the new card.
         self.usercard_timeout_error = None;
