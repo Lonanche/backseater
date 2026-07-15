@@ -15,7 +15,15 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use gpui::{px, App, Bounds, Pixels, Point, Size, WindowBounds, WindowOptions};
+use gpui_component::TitleBar;
 use serde::{Deserialize, Serialize};
+
+/// Smallest the main window may be shrunk to (a hard floor so the tab strip +
+/// title bar controls always fit).
+const MAIN_MIN_SIZE: Size<Pixels> = Size {
+    width: px(480.),
+    height: px(320.),
+};
 
 const STORE_NAME: &str = "windows";
 /// Coalesces the burst of bounds events a drag/resize fires into one write.
@@ -93,8 +101,16 @@ pub fn main_window_options(cx: &mut App) -> WindowOptions {
         let s = state().lock().unwrap();
         (s.main, s.main_maximized)
     };
+    // Transparent OS caption + a min size: the kit `TitleBar` draws our own
+    // caption (login status + gear), and on Windows still hands the min/max/close
+    // buttons back to the OS via `window_control_area`.
+    let base = WindowOptions {
+        titlebar: Some(TitleBar::title_bar_options()),
+        window_min_size: Some(MAIN_MIN_SIZE),
+        ..Default::default()
+    };
     let Some(bounds) = saved.map(SavedBounds::to_bounds).filter(|b| on_screen(b, cx)) else {
-        return WindowOptions::default();
+        return base;
     };
     WindowOptions {
         window_bounds: Some(if maximized {
@@ -106,7 +122,7 @@ pub fn main_window_options(cx: &mut App) -> WindowOptions {
         // *primary* monitor and silently swaps them for its default bounds
         // when their center is elsewhere (same bug as `child_window::open`).
         display_id: crate::child_window::resolve_display(bounds, None, cx),
-        ..Default::default()
+        ..base
     }
 }
 

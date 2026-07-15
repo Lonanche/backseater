@@ -49,8 +49,9 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::searchable_list::SearchableVec;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{
-    h_flex, v_flex, ActiveTheme, IconName, IndexPath, Root, Sizable, WindowExt,
+    h_flex, v_flex, ActiveTheme, IconName, IndexPath, Root, Sizable, TitleBar, WindowExt,
 };
 
 use chatview::{ChatView, LiveInfo};
@@ -2047,6 +2048,17 @@ impl BackseaterApp {
             // Closed, or showing a tab's settings: show (switch to) app settings.
             _ => self.show_settings_panel(Panel::App, cx),
         }
+    }
+
+    /// Opens app settings focused on the Account category (used by the title-bar
+    /// login indicators). Unlike the gear it never toggles closed — clicking a
+    /// login icon always lands you on Account.
+    fn open_account_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_category = SettingsCategory::Account;
+        if !matches!(self.settings_window, Some((_, Panel::App))) {
+            self.show_settings_panel(Panel::App, cx);
+        }
+        cx.notify();
     }
 
     /// The body of the app-settings panel: a full-height category rail on the
@@ -4630,6 +4642,148 @@ impl BackseaterApp {
             .into_any_element()
     }
 
+    /// The custom title bar (kit `TitleBar`): a draggable caption whose right
+    /// side carries the per-platform login indicators + the settings gear, with
+    /// the OS min/max/close controls the kit draws after them. Replaces the
+    /// native Windows caption (the window is opened with a transparent titlebar —
+    /// see `window_state::main_window_options`).
+    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.session.login_state();
+        // Clicking any login icon (or the app name) opens Account settings; the
+        // gear toggles the settings window like before.
+        TitleBar::new()
+            // Left: the app name, so the empty caption still reads as "Backseater"
+            // and gives a comfortable drag target.
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .min_w_0()
+                    .flex_shrink(1.0)
+                    .overflow_hidden()
+                    .truncate()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from("Backseater")),
+            )
+            // Right: login indicators + gear. Shrinks (login names truncate) so a
+            // narrow window keeps the window controls reachable; the gear stays
+            // fixed. `stop_propagation` on mouse-down so clicking a control doesn't
+            // also start a window drag.
+            .child(
+                h_flex()
+                    .items_center()
+                    .justify_end()
+                    .min_w_0()
+                    .flex_shrink(1.0)
+                    .pr_1()
+                    .gap_0p5()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(self.login_indicator(
+                        bks_core::Platform::Twitch,
+                        state.twitch.clone(),
+                        cx,
+                    ))
+                    .child(self.login_indicator(bks_core::Platform::Kick, state.kick.clone(), cx))
+                    .child(self.titlebar_gear(cx)),
+            )
+    }
+
+    /// One platform's login indicator in the title bar: the platform logo
+    /// (full-opacity when logged in, dimmed when not) followed by the account
+    /// name when logged in — truncating on a narrow window so it never pushes the
+    /// window controls off — or a muted "○" hint when logged out. Hover shows the
+    /// account name / a "Log in to <platform>" hint; click opens Account settings.
+    fn login_indicator(
+        &self,
+        platform: bks_core::Platform,
+        account: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let logged_in = account.is_some();
+        let icon_url = platform.icon_url().map(SharedString::from);
+        let name = account.clone().map(SharedString::from);
+        let tip = SharedString::from(match &account {
+            Some(name) => format!("{}: {}", platform.label(), name),
+            None => format!("Log in to {}", platform.label()),
+        });
+
+        h_flex()
+            .id(("login", platform as usize))
+            .h_6()
+            .px_1()
+            .gap_1()
+            .items_center()
+            .rounded_md()
+            .cursor_pointer()
+            // The whole chip may shrink (name-first) so it never pushes the window
+            // controls off a narrow window.
+            .min_w_0()
+            .flex_shrink(1.0)
+            .hover(|s| s.bg(render::chrome_hover()))
+            .when_some(icon_url, |this, url| {
+                this.child(
+                    img(url)
+                        .id("login-icon")
+                        .flex_shrink_0()
+                        .h(px(15.))
+                        .w(px(15.))
+                        // Dim the logo when logged out so "logged in" reads at a glance.
+                        .when(!logged_in, |img| img.opacity(0.4)),
+                )
+            })
+            .map(|this| match name {
+                // Logged in: show the account name (truncating on a tight window,
+                // where it clips before the controls do). The visible name already
+                // signals "logged in", so no status dot is needed.
+                Some(name) => this.child(
+                    div()
+                        .min_w_0()
+                        .max_w(px(120.))
+                        .overflow_hidden()
+                        .truncate()
+                        .text_sm()
+                        .text_color(cx.theme().foreground)
+                        .child(name),
+                ),
+                // Logged out: a small muted dot as the "not logged in" hint.
+                None => this.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(8.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(SharedString::from("○")),
+                ),
+            })
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            .on_click(cx.listener(move |this, _, _, cx| this.open_account_settings(cx)))
+    }
+
+    /// The settings gear in the title bar (same action as the old strip gear).
+    fn titlebar_gear(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .id("titlebar-settings")
+            .h_6()
+            .w_6()
+            .flex_shrink_0()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .cursor_pointer()
+            .text_color(cx.theme().muted_foreground)
+            .hover(|s| {
+                s.bg(render::chrome_hover())
+                    .text_color(cx.theme().foreground)
+            })
+            .child(SharedString::from("⚙"))
+            .tooltip(|window, cx| Tooltip::new("Settings").build(window, cx))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.open_app_settings(cx)),
+            )
+    }
+
     fn tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.active;
         // While the global Mentions pseudo-tab is selected, no normal chip is.
@@ -4827,10 +4981,10 @@ impl BackseaterApp {
 
         // No hard border under the strip: the bar sits one elevation step above
         // the chat surface, and that contrast is the separation. Compact pill chips
-        // are vertically centered on the bar. Only the gear is pinned outside the
-        // wrapping strip; when there are more tabs than fit one line they wrap onto
-        // additional rows (Chatterino-style) rather than scrolling horizontally, and
-        // each wrapped row starts at the strip's true left edge.
+        // are vertically centered on the bar. The settings gear + login status now
+        // live in the title bar above; when there are more tabs than fit one line
+        // they wrap onto additional rows (Chatterino-style) rather than scrolling
+        // horizontally, and each wrapped row starts at the strip's true left edge.
         h_flex()
             .w_full()
             .px_1()
@@ -4875,28 +5029,6 @@ impl BackseaterApp {
                                 MouseButton::Left,
                                 cx.listener(|this, _, window, cx| this.add_tab(window, cx)),
                             ),
-                    ),
-            )
-            // The gear matches a tab chip's box too, pinned to the far right.
-            .child(
-                h_flex()
-                    .id("app-settings")
-                    .flex_none()
-                    .h_6()
-                    .my_0p5()
-                    .px_2p5()
-                    .items_center()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_color(cx.theme().muted_foreground)
-                    .hover(|s| {
-                        s.bg(render::chrome_hover())
-                            .text_color(cx.theme().foreground)
-                    })
-                    .child(SharedString::from("⚙"))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| this.open_app_settings(cx)),
                     ),
             )
     }
@@ -5392,6 +5524,7 @@ impl Render for BackseaterApp {
         v_flex()
             .size_full()
             .bg(cx.theme().background)
+            .child(self.render_title_bar(cx))
             .child(self.tab_strip(cx))
             .when(
                 streamer_mode::is_active() && !self.streamer_banner_dismissed,
