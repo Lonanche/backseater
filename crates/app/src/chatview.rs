@@ -5136,9 +5136,18 @@ impl ChatView {
         let mut ordinal = 0usize;
         let font_size = self.font_size;
 
-        // Read the shared model once for the whole thread (its `is_struck`
-        // side-table lookup per row), not once per message.
-        let model = self.channel.read(cx);
+        // Read the shared model once to snapshot which of this thread's messages
+        // are struck (ban/delete), then drop the borrow — the render loop below
+        // doesn't touch the model, so it can't re-borrow it per row.
+        let struck_ids: std::collections::HashSet<&str> = {
+            let model = self.channel.read(cx);
+            thread
+                .messages
+                .iter()
+                .filter(|m| model.is_struck(m))
+                .map(|m| m.id.as_str())
+                .collect()
+        };
         let rows: Vec<gpui::AnyElement> = thread
             .messages
             .iter()
@@ -5149,7 +5158,7 @@ impl ChatView {
                     mention_click: Some(mention_click_for(&entity, msg)),
                     ..Default::default()
                 };
-                let struck = model.is_struck(msg);
+                let struck = struck_ids.contains(msg.id.as_str());
                 let body = render::render_message(
                     msg,
                     render::RowFlags {

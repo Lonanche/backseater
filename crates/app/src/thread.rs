@@ -80,14 +80,21 @@ pub fn reconstruct<'a>(
     messages: impl Iterator<Item = &'a Arc<Message>>,
     seed_id: &str,
 ) -> Option<Thread> {
-    // Buffer the messages once (the iterator is single-use) + index by id for the
-    // parent-link walk.
+    // Buffer the messages once (the iterator is single-use), learn the seed's
+    // platform, then index + walk within *that platform only*. Threads never cross
+    // platforms, and scoping the id map to one platform keeps the parent-link walk
+    // from ever following a cross-platform id collision (astronomically unlikely
+    // with UUIDs, but this makes it impossible by construction).
     let all: Vec<&Arc<Message>> = messages.collect();
-    let by_id: HashMap<&str, &Arc<Message>> =
-        all.iter().map(|m| (m.id.as_str(), *m)).collect();
+    let platform = all.iter().find(|m| m.id == seed_id)?.platform;
+
+    let by_id: HashMap<&str, &Arc<Message>> = all
+        .iter()
+        .filter(|m| m.platform == platform)
+        .map(|m| (m.id.as_str(), *m))
+        .collect();
 
     let seed = *by_id.get(seed_id)?;
-    let platform = seed.platform;
     let root_id = resolve_root(seed, &by_id);
 
     let members: Vec<Arc<Message>> = all
@@ -109,6 +116,10 @@ mod tests {
     use chrono::Utc;
 
     fn msg(id: &str, reply_to: Option<(&str, &str)>) -> Arc<Message> {
+        msg_on(Platform::Twitch, id, reply_to)
+    }
+
+    fn msg_on(platform: Platform, id: &str, reply_to: Option<(&str, &str)>) -> Arc<Message> {
         // `reply_to` = (parent_id, thread_root_id).
         let reply = reply_to.map(|(pid, root)| ReplyParent {
             author: "someone".into(),
@@ -118,7 +129,7 @@ mod tests {
         });
         Arc::new(Message {
             id: id.into(),
-            platform: Platform::Twitch,
+            platform,
             channel: "chan".into(),
             timestamp: Utc::now(),
             author: Author {
@@ -230,5 +241,23 @@ mod tests {
         // Just needs to terminate and return *something* without hanging.
         let t = reconstruct(rows.iter(), "x").unwrap();
         assert!(!t.messages.is_empty());
+    }
+
+    #[test]
+    fn same_id_on_other_platform_never_crosses() {
+        // A Twitch reply "b" whose parent id "a" collides with an *unrelated* Kick
+        // message that also has id "a". Because the id map is scoped to the seed's
+        // platform, the parent walk stays on Twitch: the thread is {a, b}, both
+        // Twitch — the Kick "a" is never pulled in. (Real ids are per-platform
+        // UUIDs and never collide; this proves scoping makes a collision harmless.)
+        let rows = vec![
+            msg_on(Platform::Twitch, "a", None),
+            msg_on(Platform::Kick, "a", None),
+            msg_on(Platform::Twitch, "b", Some(("a", "a"))),
+        ];
+        let t = reconstruct(rows.iter(), "b").unwrap();
+        assert_eq!(t.root_id, "a");
+        assert_eq!(t.messages.len(), 2);
+        assert!(t.messages.iter().all(|m| m.platform == Platform::Twitch));
     }
 }
