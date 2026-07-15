@@ -410,6 +410,33 @@ platform = implement one trait + one message builder, with zero UI changes**.
 - **Mentions + links** parsed and rendered: `@name` mentions tint/emit `MessageElement::Mention`
   (`core/mention.rs`), URLs become clickable links (`core/links.rs`) — a 7TV emote link opens an
   in-app emote popup, other links confirm-then-open.
+- **Link previews** (`crates/preview` + `app/src/preview.rs`): a card of a link's title / channel /
+  view count / thumbnail (+ a clip's "Clipped by X"), shown as a **hover tooltip** or an **inline
+  in-chat card** or off (Appearance → "Link previews", `Settings.link_preview_mode`:
+  `LinkPreviewMode` Off/Tooltip/Inline, process-wide `settings::link_preview_mode()`). It's an
+  *expandability seam* mirroring the emote-provider one: `bks_preview::LinkPreviewProvider`
+  (`match_url` → `PreviewTarget`, async `fetch` → `LinkPreview`) with a process-wide URL-keyed
+  `PreviewCache` (30-min TTL, in-flight dedupe, 60s negative cache). Three providers, each
+  **anonymous/keyless** via that platform's existing infra: `YoutubePreviewProvider` (`bks-youtube`,
+  InnerTube `player`), `TwitchClipPreviewProvider` (`bks-twitch`, `gql.twitch.tv` raw query +
+  web Client-Id), `KickClipPreviewProvider` (`bks-kick`, the Cloudflare-fronted clips endpoint via
+  the shared `wreq` client). **Adding a source = one provider + one line in
+  `app/src/preview.rs::cache()`.** The app owns the runtime + drives fetches (`lookup` spawns on
+  `controller.runtime()`, `peek` is the render-path read that never spawns; a *failed* fetch reads
+  as `None` → the card hides, not a perpetual "loading"). ⚠️ The tooltip overlay isn't at window
+  origin (it's a flow child of the non-`relative` root, offset by the chrome above it), so its card
+  is placed in *window* coords minus a canvas-measured layer offset (`ChatView::link_preview_offset`,
+  kept warm by an always-on `link_preview_probe` so the first tooltip doesn't flash). The **inline
+  card** reserves its fixed height (`render::INLINE_PREVIEW_H`) with a skeleton up front so the
+  virtualized row never jumps when the async fetch lands (repaint-only on success, re-measure only on
+  the rare fail-collapse); the card's element id is keyed by **message id**, not URL (the same clip
+  posted twice would collide ids and only the first would be clickable); previews are armed on
+  message append (`ChatView::arm_inline_preview`) + for the buffer on switching to Inline. Streamer
+  Mode can **hide the thumbnail** (it can reveal what a posted link points at on stream) — a 🕶
+  placeholder on inline cards, omitted on tooltips; title/channel/views still show
+  (`Settings.streamer_hide_thumbnails`, gated by `settings::hide_preview_thumbnails()` =
+  toggle AND `streamer_mode::is_active()`). The compact-count formatter is shared from
+  `bks_core::format_count_compact` ("1.2K"/"3.4M", distinct from the comma-grouping `format_count`).
 - **Badge tooltips** on Twitch and Kick (hover a badge → larger preview + title;
   Kick titles from `kick_badge_title` in `kick/src/builder.rs`).
 - **7TV cosmetics**: animated name **paints** (per-char gradient) + 7TV badges, by `(platform, user_id)`.
@@ -461,6 +488,7 @@ crates/
   kick/      # ChatSource impl (anonymous Pusher WebSocket) + chat-event builder (+ tests)
   youtube/   # anonymous InnerTube live-chat reader (read-only)
   emotes/    # EmoteRegistry + EmoteProvider trait (7TV / BTTV / FFZ)
+  preview/   # LinkPreviewProvider trait + cache (link previews: YouTube video / Twitch+Kick clip)
   auth/      # OAuth flows (Twitch implicit, Kick PKCE+broker) + stores (keyring for
              #   credentials on Windows, JSON files for app data)
   app/       # GPUI binary: tokio<->GPUI bridge, flex-wrap token rendering
