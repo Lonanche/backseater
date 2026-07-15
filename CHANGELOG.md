@@ -24,6 +24,8 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
   its channels goes live (Appearance).
 - Compact chat mode packs message rows tighter to fit more lines on screen
   (Appearance, off by default).
+- A mod-only "Mod card ↗" link in the Twitch usercard opens twitch.tv's moderator
+  viewer card for that user, and "Open profile" is renamed "Channel".
 
 ### Fixes
 
