@@ -64,6 +64,7 @@ const APP_ICONS: &[(&str, &[u8])] = app_icons![
     "circle-alert",
     "octagon-alert",
     "pin",
+    "reply",
     "message-square-off",
 ];
 

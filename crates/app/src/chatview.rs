@@ -4883,11 +4883,27 @@ impl ChatView {
             h.finish()
         };
 
+        let font_size = self.font_size;
+        let accent = gpui::rgb(render::palette().reply);
+        let label_size = font_size * 0.82;
+
+        // A small circular ✕ that lifts on hover — a cleaner dismiss than a bare
+        // glyph, matching the app's chrome buttons.
         let cancel = div()
             .id("cancel-reply")
             .flex_none()
-            .px_1()
+            .size(px(font_size + 6.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
             .cursor_pointer()
+            .text_color(cx.theme().muted_foreground)
+            .text_size(px(font_size * 0.85))
+            .hover(|s| {
+                s.bg(render::chrome_hover())
+                    .text_color(cx.theme().foreground)
+            })
             .child(SharedString::from("✕"))
             .on_mouse_down(
                 MouseButton::Left,
@@ -4897,13 +4913,61 @@ impl ChatView {
                 }),
             );
 
+        // The small reply icon + "Replying to <name>" caption, shared by both the
+        // single-line bar and the thread header. `name` is emphasized in the reply
+        // accent; the lead-in is muted and smaller.
+        let caption = |lead: &str, name: Option<SharedString>, fg: gpui::Hsla| {
+            h_flex()
+                .flex_none()
+                .items_center()
+                .gap_1p5()
+                .child(
+                    gpui::svg()
+                        .path("icons/reply.svg")
+                        .size(px(font_size * 0.9))
+                        .flex_none()
+                        .text_color(accent),
+                )
+                .child(
+                    div()
+                        .text_size(px(label_size))
+                        .text_color(fg)
+                        .child(SharedString::from(lead.to_string())),
+                )
+                .when_some(name, |row, name| {
+                    row.child(
+                        div()
+                            .text_size(px(label_size))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(accent)
+                            .child(name),
+                    )
+                })
+        };
+
+        // The modern reply-bar shell: a rounded, elevated pill inset from the
+        // composer edges, with a reply-accent bar down its left edge — reads as a
+        // distinct, dismissible affordance rather than a flat full-bleed strip.
+        let shell = |body: gpui::AnyElement| {
+            v_flex()
+                .w_full()
+                .mx_2()
+                .mt_1()
+                .rounded_lg()
+                .bg(gpui::rgb(render::panel_bg()))
+                .border_l_2()
+                .border_color(accent)
+                .overflow_hidden()
+                .child(body)
+        };
+
         // Reconstruct the thread the target belongs to; show the whole chain when
         // it's a real conversation (>1 message still buffered).
         let thread = self.build_thread(&message_id, cx);
         let show_chain = thread.as_ref().is_some_and(|t| t.is_multi());
 
         if let (true, Some(thread)) = (show_chain, thread) {
-            let font_size = self.font_size;
+            let muted = cx.theme().muted_foreground;
             let lines: Vec<gpui::AnyElement> = thread
                 .messages
                 .iter()
@@ -4918,61 +4982,62 @@ impl ChatView {
             // Open the chain at the newest message, older ones scrollable above.
             let scroll = self.reply_chain_scroll.clone();
             self.open_at_bottom(ScrollTarget::ReplyChain, &scroll, cx);
-            return Some(
-                v_flex()
-                    .w_full()
-                    .bg(cx.theme().secondary)
-                    .text_color(cx.theme().muted_foreground)
-                    .text_size(px(font_size))
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .px_2()
-                            .pt_1()
-                            .items_center()
-                            .justify_between()
-                            .child(SharedString::from(format!(
-                                "Replying in thread ({}):",
-                                thread.len()
-                            )))
-                            .child(cancel),
-                    )
-                    .child(
-                        v_flex()
-                            .id("reply-thread-chain")
-                            .w_full()
-                            .px_2()
-                            .pb_1()
-                            // Cap the chain's height so a long thread scrolls rather
-                            // than shoving the composer off-screen.
-                            .max_h(px(140.))
-                            .overflow_y_scroll()
-                            .track_scroll(&scroll)
-                            .children(lines),
-                    )
-                    .into_any_element(),
-            );
+            let count = thread.len();
+            let body = v_flex()
+                .w_full()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .items_center()
+                        .justify_between()
+                        .child(caption("Replying in thread", None, muted).child(
+                            div()
+                                .text_size(px(label_size))
+                                .text_color(muted)
+                                .child(SharedString::from(format!("· {count}"))),
+                        ))
+                        .child(cancel),
+                )
+                .child(
+                    v_flex()
+                        .id("reply-thread-chain")
+                        .w_full()
+                        .px_2()
+                        .pb_1p5()
+                        .gap_0p5()
+                        // Cap the chain's height so a long thread scrolls rather
+                        // than shoving the composer off-screen.
+                        .max_h(px(140.))
+                        .overflow_y_scroll()
+                        .track_scroll(&scroll)
+                        .children(lines),
+                )
+                .into_any_element();
+            return Some(shell(body).into_any_element());
         }
 
-        Some(
-            h_flex()
-                .w_full()
-                .px_2()
-                .py_1()
-                .gap_2()
-                .items_center()
-                .bg(cx.theme().secondary)
-                .text_color(cx.theme().muted_foreground)
-                .text_size(px(self.font_size))
-                .child(div().flex_none().child(SharedString::from(format!(
-                    "Replying to {parent_author}:"
-                ))))
-                .child(div().flex_1().min_w_0().overflow_hidden().child(
-                    render::render_reply_preview(&parent_elements, self.font_size, seed),
-                ))
-                .child(cancel)
-                .into_any_element(),
-        )
+        let muted = cx.theme().muted_foreground;
+        let body = h_flex()
+            .w_full()
+            .px_2()
+            .py_1()
+            .gap_2()
+            .items_center()
+            .child(caption("Replying to", Some(SharedString::from(parent_author)), muted))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_size(px(label_size))
+                    .text_color(muted)
+                    .child(render::render_reply_preview(&parent_elements, font_size, seed)),
+            )
+            .child(cancel)
+            .into_any_element();
+        Some(shell(body).into_any_element())
     }
 
     /// Reconstructs the thread seeded from `seed_id` off the live buffer and

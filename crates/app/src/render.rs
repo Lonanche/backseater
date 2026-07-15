@@ -29,8 +29,8 @@ pub(crate) struct Palette {
     timestamp: u32,
     /// Connector notice text (the legacy system line).
     system: u32,
-    /// "replying to" context line.
-    reply: u32,
+    /// "replying to" context line (also the reply-bar accent, hence crate-visible).
+    pub(crate) reply: u32,
     /// Default username color when a chatter has none.
     default_name: u32,
     /// Background tint for a message that mentions the user, plus the accent

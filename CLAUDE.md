@@ -223,7 +223,10 @@ platform = implement one trait + one message builder, with zero UI changes**.
   `scroll_to_newest` flags set on open (`open_thread_panel`/`start_reply`): it re-issues
   `scroll_to_bottom` on the tracked `ScrollHandle` each render until the list has laid out (its
   `bounds().size.height > 0`, so it clears even on a short non-overflowing thread instead of
-  spinning), then clears the flag.
+  spinning), then clears the flag. The bar itself is a **rounded, elevated pill** (`panel_bg()`)
+  inset from the composer edges with a reply-accent (`palette().reply`) left bar + a bundled
+  `icons/reply.svg` (lucide, `text_color`ed like `pin.svg`), a muted "Replying to" lead-in with
+  the name in the accent color, and a circular hover-lifting ✕ — not the old flat full-bleed strip.
 - **Twitch viewer list** (👥 button on the input bar, or `/chatters`/`/viewers`): a child OS
   window listing who's connected to the tab's Twitch chat, with a live search filter, count,
   Refresh, and click-a-name → usercard. Data is Helix `GET /chat/chatters` (paginated,
