@@ -4533,10 +4533,17 @@ impl ChatView {
             );
         }
 
-        // A canvas at the layer's origin records where its local (0,0) paints in
-        // window space — the offset the card placement above subtracts.
+        Some(gpui::deferred(div().absolute().inset_0().child(card)).into_any_element())
+    }
+
+    /// A zero-cost element that continuously records the overlay layer's
+    /// window-space origin into [`link_preview_offset`]. Rendered *unconditionally*
+    /// (see [`render`](Self::render)) so the offset is always warm — otherwise the
+    /// first preview would paint one frame at the wrong spot (offset still `(0,0)`)
+    /// before the measure landed. Matches the `inset_0` layer the card renders in.
+    fn link_preview_probe(&self) -> gpui::AnyElement {
         let offset_cell = self.link_preview_offset.clone();
-        let layer = div()
+        div()
             .absolute()
             .inset_0()
             .child(
@@ -4544,9 +4551,7 @@ impl ChatView {
                     .absolute()
                     .size_full(),
             )
-            .child(card);
-
-        Some(gpui::deferred(layer).into_any_element())
+            .into_any_element()
     }
 
     /// The emote-info popup overlay when one is open, else `None`. A transparent
@@ -5158,6 +5163,10 @@ impl Render for ChatView {
             .children(self.render_status_bar(cx))
             .child(layout_grid)
             .children(emote_popup_overlay)
+            // Always-on probe keeps the preview offset warm so the first tooltip
+            // paints in the right place (no one-frame flash); the card overlay
+            // only renders when a preview is showing.
+            .child(self.link_preview_probe())
             .children(link_preview_overlay)
     }
 }
