@@ -2745,6 +2745,10 @@ fn event_message_line(
         .min_w_0()
         .flex_wrap()
         .items_start()
+        // The same line box the timestamp/badge prefixes use so the name + body
+        // text share their baseline — without it they shape at gpui's taller
+        // default line height and sit below the timestamp (see `render_message`).
+        .line_height(px(scale.line))
         .child(
             line_box(scale)
                 .mr_1()
