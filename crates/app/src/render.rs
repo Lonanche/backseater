@@ -2511,7 +2511,7 @@ pub fn render_event(
         .text_size(px(scale.font))
         .child(header)
         .when_some(message, |col, msg| {
-            col.child(event_message_line(msg, scale, row_id, mention_click))
+            col.child(event_message_line(msg, scale, row_id, mention_click, false))
         })
 }
 
@@ -2604,6 +2604,12 @@ pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElem
                         .id(("event-actor", row_id))
                         .cursor_pointer()
                         .hover(|s| s.underline())
+                        // Swallow the mouse-down so an expandable gift row's
+                        // wrapper doesn't toggle its recipient list when the actor
+                        // name is clicked — the name opens the usercard on mouse-up.
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
                         .on_mouse_up(MouseButton::Left, move |_, window, cx| {
                             cb(&login, window, cx);
                         })
@@ -2683,7 +2689,7 @@ pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElem
     }
 
     if let Some(msg) = ev.message {
-        col = col.child(event_message_line(msg, scale, row_id, mention_click));
+        col = col.child(event_message_line(msg, scale, row_id, mention_click, true));
     }
 
     col
@@ -2697,11 +2703,16 @@ pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElem
 /// clickable). A solid 7TV paint colors the name; a gradient paint is collapsed to
 /// its midpoint color (the full per-char gradient needs the selectable-token
 /// machinery the event row doesn't carry).
+///
+/// `compact` (the events panel) drops the timestamp and the author's name — the
+/// event row already shows who subscribed above, so a second timestamp + name
+/// before their message is just noise; only the badges + message body remain.
 fn event_message_line(
     msg: &Message,
     scale: Scale,
     row_id: u64,
     mention_click: Option<&MentionClick>,
+    compact: bool,
 ) -> impl IntoElement {
     let p = palette();
     let time = msg
@@ -2749,35 +2760,39 @@ fn event_message_line(
         // text share their baseline — without it they shape at gpui's taller
         // default line height and sit below the timestamp (see `render_message`).
         .line_height(px(scale.line))
-        .child(
-            line_box(scale)
-                .mr_1()
-                .text_color(rgb(p.timestamp))
-                .child(time),
-        )
+        .when(!compact, |row| {
+            row.child(
+                line_box(scale)
+                    .mr_1()
+                    .text_color(rgb(p.timestamp))
+                    .child(time),
+            )
+        })
         .children(badges)
-        .child({
-            let name = div()
-                .mr_1()
-                .font_weight(NAME_WEIGHT)
-                .text_color(rgb(name_color))
-                .child(SharedString::from(format!("{}:", msg.author.display_name)));
-            // The author (the user who typed the attached message) opens their
-            // usercard on click, like their name would in the main log.
-            match mention_click {
-                Some(cb) => {
-                    let cb = cb.clone();
-                    let login = msg.author.login.clone();
-                    name.id(("event-msg-author", row_id))
-                        .cursor_pointer()
-                        .hover(|s| s.underline())
-                        .on_mouse_up(MouseButton::Left, move |_, window, cx| {
-                            cb(&login, window, cx);
-                        })
-                        .into_any_element()
+        .when(!compact, |row| {
+            row.child({
+                let name = div()
+                    .mr_1()
+                    .font_weight(NAME_WEIGHT)
+                    .text_color(rgb(name_color))
+                    .child(SharedString::from(format!("{}:", msg.author.display_name)));
+                // The author (the user who typed the attached message) opens their
+                // usercard on click, like their name would in the main log.
+                match mention_click {
+                    Some(cb) => {
+                        let cb = cb.clone();
+                        let login = msg.author.login.clone();
+                        name.id(("event-msg-author", row_id))
+                            .cursor_pointer()
+                            .hover(|s| s.underline())
+                            .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                                cb(&login, window, cx);
+                            })
+                            .into_any_element()
+                    }
+                    None => name.into_any_element(),
                 }
-                None => name.into_any_element(),
-            }
+            })
         })
         .children(inline_tokens(
             &msg.elements,
