@@ -63,6 +63,12 @@ impl LinkPreviewProvider for KickClipPreviewProvider {
             .view_count()
             .map(|n| format!("{} views", bks_core::format_count_compact(n)));
         let thumbnail_url = clip.thumbnail();
+        let byline = clip
+            .creator
+            .as_ref()
+            .map(|c| c.best_name())
+            .filter(|s| !s.is_empty())
+            .map(|name| format!("Clipped by {name}"));
         let title = clip.title.unwrap_or_default();
         if title.is_empty() {
             anyhow::bail!("kick clip has no title");
@@ -74,6 +80,7 @@ impl LinkPreviewProvider for KickClipPreviewProvider {
             author,
             thumbnail_url,
             stats,
+            byline,
         })
     }
 }
@@ -141,6 +148,9 @@ struct RawClip {
     thumbnail: Option<String>,
     #[serde(default)]
     channel: Option<RawChannel>,
+    /// Who made the clip (shown as "Clipped by X"); same shape as `channel`.
+    #[serde(default)]
+    creator: Option<RawChannel>,
 }
 
 impl RawClip {

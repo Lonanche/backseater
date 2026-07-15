@@ -45,6 +45,10 @@ pub struct LinkPreview {
     pub thumbnail_url: Option<String>,
     /// A short human stats line ("1.2M views", "45K views"), if available.
     pub stats: Option<String>,
+    /// An extra attribution line under the stats, if any — e.g. a clip's
+    /// "Clipped by X" (the [`author`](Self::author) is the streamer; this is who
+    /// made the clip). `None` for sources without one (e.g. YouTube videos).
+    pub byline: Option<String>,
 }
 
 /// A link a provider claimed, carrying the provider-specific id it extracted so
@@ -243,6 +247,7 @@ mod tests {
                 author: "chan".into(),
                 thumbnail_url: None,
                 stats: None,
+                byline: None,
             })
         }
     }
@@ -284,6 +289,7 @@ mod tests {
                 author: "chan".into(),
                 thumbnail_url: None,
                 stats: Some("5 views".into()),
+                byline: None,
             }),
         );
         match c.lookup("fake://abc").state {

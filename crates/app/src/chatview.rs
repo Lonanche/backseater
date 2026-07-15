@@ -4423,7 +4423,9 @@ impl ChatView {
         if !hover.shown {
             return None;
         }
-        let (title, author, stats, thumbnail): (
+        #[allow(clippy::type_complexity)]
+        let (title, author, stats, byline, thumbnail): (
+            SharedString,
             SharedString,
             SharedString,
             SharedString,
@@ -4433,10 +4435,12 @@ impl ChatView {
                 SharedString::from(p.title.clone()),
                 SharedString::from(p.author.clone()),
                 SharedString::from(p.stats.clone().unwrap_or_default()),
+                SharedString::from(p.byline.clone().unwrap_or_default()),
                 p.thumbnail_url.clone().map(SharedString::from),
             ),
             crate::preview::PreviewState::Loading => (
                 SharedString::from("Loading preview…"),
+                SharedString::default(),
                 SharedString::default(),
                 SharedString::default(),
                 None,
@@ -4449,19 +4453,42 @@ impl ChatView {
         const CARD_W: f32 = 240.;
         const GAP: f32 = 10.;
         let thumb_h = if thumbnail.is_some() { CARD_W * 9. / 16. } else { 0. };
-        let meta = match (author.is_empty(), stats.is_empty()) {
-            (false, false) => format!("{author} · {stats}"),
-            (false, true) => author.to_string(),
-            (true, false) => stats.to_string(),
-            (true, true) => String::new(),
+        // The muted meta pieces: "channel · views" and the clip's "Clipped by X".
+        let channel_views = [author, stats]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        // Decide whether the byline fits on the *same* line as channel/views: if so
+        // it joins with a "·" separator; if not it goes on its own line with no
+        // separator (nothing to separate). Static flex can't detect a wrap, so we
+        // estimate the one-line width (~5.5px per char at 11px) against the card's
+        // inner width. `meta_two_lines` then drives both the layout and the height.
+        let one_line = if channel_views.is_empty() {
+            byline.to_string()
+        } else if byline.is_empty() {
+            channel_views.clone()
+        } else {
+            format!("{channel_views} · {byline}")
         };
+        let has_meta = !one_line.is_empty();
+        const META_INNER_W: f32 = CARD_W - 12.; // minus p_1p5 left+right
+        let meta_two_lines =
+            !channel_views.is_empty() && !byline.is_empty() && one_line.chars().count() as f32 * 5.5 > META_INNER_W;
         // The card is top-anchored (grows downward), so the above-the-link gap
-        // depends on estimating its height. Budget a two-line title (an
-        // over-estimate only lifts the card slightly higher — harmless — while an
-        // under-estimate would let the real bottom overlap the link).
+        // depends on estimating its height. Budget two title lines; the meta is one
+        // or two lines by the decision above. An over-estimate only lifts the card
+        // slightly higher — harmless — while an under-estimate would let the real
+        // bottom overlap the link.
         let title_h = 40.; // up to two title lines
-        let meta_h = if meta.is_empty() { 0. } else { 18. };
-        let children = 1 + u32::from(thumbnail.is_some()) + u32::from(!meta.is_empty());
+        let meta_h = if !has_meta {
+            0.
+        } else if meta_two_lines {
+            32.
+        } else {
+            16.
+        };
+        let children = 1 + u32::from(thumbnail.is_some()) + u32::from(has_meta);
         let card_h = 12. // p_1p5 top+bottom
             + 4. * children.saturating_sub(1) as f32 // gap_1 between children
             + thumb_h
@@ -4524,13 +4551,20 @@ impl ChatView {
                 .line_height(px(16.))
                 .child(title),
         );
-        if !meta.is_empty() {
-            card = card.child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from(meta)),
-            );
+        if has_meta {
+            let muted = cx.theme().muted_foreground;
+            let meta_line = |text: SharedString| {
+                div().text_size(px(11.)).text_color(muted).child(text)
+            };
+            if meta_two_lines {
+                // Doesn't fit on one line → "channel · views" then "Clipped by X"
+                // on its own line, with no separator between them.
+                card = card.child(meta_line(SharedString::from(channel_views)));
+                card = card.child(meta_line(byline));
+            } else {
+                // Fits on one line → a single "channel · views · Clipped by X".
+                card = card.child(meta_line(SharedString::from(one_line)));
+            }
         }
 
         Some(gpui::deferred(div().absolute().inset_0().child(card)).into_any_element())

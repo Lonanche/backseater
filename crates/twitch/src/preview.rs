@@ -74,6 +74,11 @@ impl LinkPreviewProvider for TwitchClipPreviewProvider {
         let stats = clip
             .view_count
             .map(|n| format!("{} views", bks_core::format_count_compact(n)));
+        let byline = clip
+            .curator
+            .and_then(|c| c.display_name)
+            .filter(|s| !s.is_empty())
+            .map(|name| format!("Clipped by {name}"));
 
         Ok(LinkPreview {
             kind: PreviewKind::Clip,
@@ -81,6 +86,7 @@ impl LinkPreviewProvider for TwitchClipPreviewProvider {
             author,
             thumbnail_url: clip.thumbnail_url.filter(|s| !s.is_empty()),
             stats,
+            byline,
         })
     }
 }
@@ -133,6 +139,8 @@ struct GqlClip {
     #[serde(rename = "viewCount")]
     view_count: Option<u64>,
     broadcaster: Option<GqlChannel>,
+    /// Who made the clip (shown as "Clipped by X").
+    curator: Option<GqlChannel>,
     #[serde(rename = "thumbnailURL")]
     thumbnail_url: Option<String>,
 }
@@ -203,6 +211,10 @@ mod tests {
         assert_eq!(
             clip.broadcaster.and_then(|b| b.display_name).as_deref(),
             Some("SomeStreamer")
+        );
+        assert_eq!(
+            clip.curator.and_then(|c| c.display_name).as_deref(),
+            Some("Clipper")
         );
     }
 }

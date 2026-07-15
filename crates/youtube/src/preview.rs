@@ -107,6 +107,7 @@ fn parse_player(resp: &Value) -> Option<LinkPreview> {
         author,
         thumbnail_url,
         stats,
+        byline: None, // YouTube videos have no clipper/curator.
     })
 }
 
