@@ -470,6 +470,16 @@ pub(crate) struct TabActivity;
 
 impl gpui::EventEmitter<TabActivity> for ChatView {}
 
+/// Emitted when one of this view's channels goes live (a false→true `live`
+/// transition), so the app can briefly flash the owning tab's chip. Carries the
+/// platform for the flash tint. Like [`TabActivity`], it rides the stable
+/// `ChatView` so the app's subscription survives channel-swap rebuilds.
+pub(crate) struct TabWentLive {
+    pub platform: bks_core::Platform,
+}
+
+impl gpui::EventEmitter<TabWentLive> for ChatView {}
+
 /// One tab's chat feed + input. Owns its connection via [`Controller`].
 pub(crate) struct ChatView {
     /// The shared channel model: the canonical row
@@ -1007,6 +1017,17 @@ impl ChatView {
             // Same deal for the mode bar above the composer: chrome outside the
             // cached log, repaint only.
             ChannelEvent::ChatModesChanged => {
+                cx.notify();
+                return;
+            }
+            // A channel went live: the `Row::Live` push already arrived via
+            // `Appended`; here we just tell the app to flash this tab's chip.
+            // Nothing in this view re-measures, so it's repaint-only like the
+            // count/mode events.
+            ChannelEvent::WentLive { platform } => {
+                cx.emit(TabWentLive {
+                    platform: *platform,
+                });
                 cx.notify();
                 return;
             }

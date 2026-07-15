@@ -256,6 +256,11 @@ pub struct Settings {
     /// screen. Off by default (the roomier layout is the default look).
     #[serde(default)]
     pub compact_chat: bool,
+    /// Briefly flash a tab's chip when one of its channels goes live. Off by
+    /// default. Read only by `BackseaterApp` (the tab strip), so no process-wide
+    /// flag — a plain field is enough.
+    #[serde(default)]
+    pub flash_tab_on_live: bool,
     /// Whether timestamps show on the events panel's rows. On by default.
     #[serde(default = "default_true")]
     pub show_timestamps_events: bool,
@@ -332,6 +337,7 @@ impl Default for Settings {
             show_timestamps_chat: true,
             pause_chat_on_hover: false,
             compact_chat: false,
+            flash_tab_on_live: false,
             show_timestamps_events: true,
             show_timestamps_mentions: true,
             mentions_tab: false,

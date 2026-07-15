@@ -537,8 +537,15 @@ struct TabEntry {
     /// cleared when the tab is selected. Fed by a subscription to the view's
     /// [`TabActivity`] event (set up in [`make_tab`]).
     unread: bool,
+    /// When one of this tab's channels last went live (and which platform),
+    /// driving the brief chip flash (gated on `Settings::flash_tab_on_live`).
+    /// `None` = not flashing; cleared once `TAB_FLASH_DURATION` elapses. The
+    /// platform tints the flash its brand color. See `chip_flash_alpha`.
+    flash_start: Option<(std::time::Instant, bks_core::Platform)>,
     /// Keeps the [`TabActivity`] subscription alive for this tab's lifetime.
     _activity_sub: gpui::Subscription,
+    /// Keeps the [`TabWentLive`] subscription alive for this tab's lifetime.
+    _live_sub: gpui::Subscription,
 }
 
 /// Compiles mention terms into a matcher with the per-term mute flags applied
@@ -612,6 +619,34 @@ const CHIP_TIP_SHOW_DELAY: std::time::Duration = std::time::Duration::from_milli
 /// long enough to move the pointer into the tooltip, short enough that moving
 /// along the strip doesn't drag a stale tooltip around.
 const CHIP_TIP_HIDE_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long a tab chip flashes after one of its channels goes live (a few
+/// pulses over this window, then it settles back to normal).
+const TAB_FLASH_DURATION: std::time::Duration = std::time::Duration::from_millis(2400);
+/// One pulse of the flash; the alpha ramps up and down each pulse.
+const TAB_FLASH_PULSE: std::time::Duration = std::time::Duration::from_millis(600);
+/// Repaint cadence while any chip is flashing (drives the pulse animation
+/// without touching the log — like the viewer-count ease timer).
+const TAB_FLASH_TICK: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The flash tint's current opacity for a chip whose channel went live
+/// `elapsed` ago: a few triangle pulses (up-then-down each `TAB_FLASH_PULSE`)
+/// over `TAB_FLASH_DURATION`, fading to zero as the window closes so the last
+/// pulse doesn't cut off abruptly. `0.0` once the window has elapsed.
+fn chip_flash_alpha(elapsed: std::time::Duration) -> f32 {
+    if elapsed >= TAB_FLASH_DURATION {
+        return 0.0;
+    }
+    let total = TAB_FLASH_DURATION.as_secs_f32();
+    let pulse = TAB_FLASH_PULSE.as_secs_f32();
+    let t = elapsed.as_secs_f32();
+    // Triangle wave within the current pulse: 0 → 1 → 0.
+    let phase = (t % pulse) / pulse;
+    let tri = 1.0 - (phase * 2.0 - 1.0).abs();
+    // Overall fade so successive pulses get gentler toward the end.
+    let fade = 1.0 - t / total;
+    tri * fade
+}
 
 pub(crate) struct BackseaterApp {
     session: Session,
@@ -1291,12 +1326,15 @@ impl BackseaterApp {
             )
         });
         let _activity_sub = Self::subscribe_tab_activity(&view, id, cx);
+        let _live_sub = Self::subscribe_tab_live(&view, id, cx);
         TabEntry {
             id,
             config,
             view,
             unread: false,
+            flash_start: None,
             _activity_sub,
+            _live_sub,
         }
     }
 
@@ -1323,6 +1361,58 @@ impl BackseaterApp {
                 cx.notify();
             }
         })
+    }
+
+    /// Subscribes to a tab view's [`TabWentLive`] so a channel going live
+    /// briefly flashes the owning tab's chip (when the setting is on). Same
+    /// stable-`id` / stable-view keying as [`subscribe_tab_activity`].
+    fn subscribe_tab_live(
+        view: &Entity<ChatView>,
+        id: u64,
+        cx: &mut Context<Self>,
+    ) -> gpui::Subscription {
+        cx.subscribe(
+            view,
+            move |this, _view, ev: &chatview::TabWentLive, cx| {
+                if !this.settings.flash_tab_on_live {
+                    return;
+                }
+                let Some(ix) = this.tabs.iter().position(|t| t.id == id) else {
+                    return;
+                };
+                this.tabs[ix].flash_start = Some((std::time::Instant::now(), ev.platform));
+                this.schedule_tab_flash_tick(cx);
+                cx.notify();
+            },
+        )
+    }
+
+    /// Drives the chip-flash animation: repaints on a coalesced timer while any
+    /// tab is still within its flash window, clearing each tab's `flash_start`
+    /// once it elapses. Repaint-only (the flash is chip chrome — no log touch),
+    /// self-arming, and a no-op once nothing is flashing.
+    fn schedule_tab_flash_tick(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TAB_FLASH_TICK).await;
+            this.update(cx, |this, cx| {
+                let mut any = false;
+                for tab in &mut this.tabs {
+                    if let Some((start, _)) = tab.flash_start {
+                        if start.elapsed() >= TAB_FLASH_DURATION {
+                            tab.flash_start = None;
+                        } else {
+                            any = true;
+                        }
+                    }
+                }
+                if any {
+                    this.schedule_tab_flash_tick(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// One tab's effective mention matcher: the logged-in Twitch/Kick account
@@ -1939,12 +2029,15 @@ impl BackseaterApp {
                 return; // Main window gone (app shutting down).
             };
             let _activity_sub = Self::subscribe_tab_activity(&view, id, cx);
+            let _live_sub = Self::subscribe_tab_live(&view, id, cx);
             self.tabs[ix] = TabEntry {
                 id,
                 config,
                 view,
                 unread: false,
+                flash_start: None,
                 _activity_sub,
+                _live_sub,
             };
         } else {
             self.tabs[ix].config = config;
@@ -2731,6 +2824,21 @@ impl BackseaterApp {
                             .checked(self.settings.compact_chat)
                             .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                 this.set_compact_chat(*checked, cx);
+                            }))
+                            .into_any_element(),
+                    ))
+                    .child(card_divider())
+                    .child(setting_row(
+                        "Flash tab when a channel goes live",
+                        Some(
+                            "Briefly pulse a tab's chip when one of its Twitch, \
+                             Kick, or YouTube channels starts streaming.",
+                        ),
+                        Switch::new("flash-tab-on-live")
+                            .small()
+                            .checked(self.settings.flash_tab_on_live)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.set_flash_tab_on_live(*checked, cx);
                             }))
                             .into_any_element(),
                     ))
@@ -4075,6 +4183,25 @@ impl BackseaterApp {
         cx.notify();
     }
 
+    /// Toggles the go-live tab flash. Persists only — the flag is read per
+    /// render in `tab_strip`, and the flash is armed from the `TabWentLive`
+    /// subscription (which re-reads the setting each time), so turning it off
+    /// just stops future flashes.
+    fn set_flash_tab_on_live(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.settings.flash_tab_on_live == on {
+            return;
+        }
+        self.settings.flash_tab_on_live = on;
+        self.settings.save();
+        // Off should also clear any flash already in progress.
+        if !on {
+            for tab in &mut self.tabs {
+                tab.flash_start = None;
+            }
+        }
+        cx.notify();
+    }
+
     /// Toggles the live status bar (viewer counts). Persists, flips the
     /// process-wide flag, and repaints every tab (the bar lives outside the
     /// cached log, so a plain notify reaches it).
@@ -4882,11 +5009,28 @@ impl BackseaterApp {
                 let any_live = tip_platforms
                     .iter()
                     .any(|p| !p.channel.is_empty() && p.status.as_ref().is_some_and(|s| s.live));
+                // A just-went-live pulse tint (opt-in), in the platform's brand
+                // color. The chip is `relative()` already for the tooltip, so
+                // the flash is an absolute overlay — no layout disturbance,
+                // painted over the base fill.
+                let flash = tab.flash_start.and_then(|(start, platform)| {
+                    let alpha = chip_flash_alpha(start.elapsed());
+                    (alpha > 0.0).then(|| (alpha, platform.color().to_u32()))
+                });
                 // Compact pill chip (see `tab_chip_base`): a rounded, self-contained
                 // pill so each tab reads as its own, active one filled with the accent.
                 Self::tab_chip_base(("tab", ix), selected, cx)
                     // Anchor for the tooltip overlay (absolute, just below the chip).
                     .relative()
+                    .when_some(flash, |this, (alpha, color)| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .rounded_t_md()
+                                .bg(gpui::rgb(color).opacity(alpha * 0.5)),
+                        )
+                    })
                     // A live-status tooltip per set platform, only when the tab has a
                     // channel (an empty tab shows its "right-click → Settings" prompt).
                     // Hand-rolled (see the `chip_tip` field): hover here drives the
@@ -5934,6 +6078,21 @@ fn chip_tooltip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flash_alpha_pulses_then_ends() {
+        use std::time::Duration;
+        // Starts and ends each pulse near zero, peaks at the pulse midpoint.
+        assert!(chip_flash_alpha(Duration::ZERO) < 0.05);
+        let peak = chip_flash_alpha(TAB_FLASH_PULSE / 2);
+        assert!(peak > 0.7, "peak was {peak}");
+        // Later pulses are gentler (the overall fade), but still positive mid-window.
+        let mid = chip_flash_alpha(TAB_FLASH_PULSE + TAB_FLASH_PULSE / 2);
+        assert!(mid > 0.0 && mid < peak, "mid was {mid}");
+        // Nothing past the window.
+        assert_eq!(chip_flash_alpha(TAB_FLASH_DURATION), 0.0);
+        assert_eq!(chip_flash_alpha(TAB_FLASH_DURATION + Duration::from_secs(1)), 0.0);
+    }
 
     #[test]
     fn uptime_formats_compactly() {

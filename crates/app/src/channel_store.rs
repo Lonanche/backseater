@@ -132,6 +132,11 @@ pub enum ChannelEvent {
     /// bar above the composer reads it, so views answer with a bare repaint,
     /// never the log re-measure `Changed` triggers.
     ChatModesChanged,
+    /// A platform's stream just transitioned to live (the `live` flag flipped
+    /// false→true). Fired alongside the `Row::Live` push so the tab strip can
+    /// flash the chip; a mere in-place `Live` update (a late start time, an
+    /// offline seed) does not fire it.
+    WentLive { platform: bks_core::Platform },
 }
 
 /// One channel's shared model: the message buffer + connection + per-channel state.
@@ -769,6 +774,10 @@ impl ChannelModel {
                         },
                         cx,
                     );
+                    // Going live (not offline) fans out for the tab-strip flash.
+                    if live {
+                        cx.emit(ChannelEvent::WentLive { platform });
+                    }
                 } else {
                     cx.emit(ChannelEvent::Changed);
                 }
