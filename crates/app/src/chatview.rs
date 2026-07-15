@@ -492,6 +492,24 @@ struct ThreadPanel {
     anchor: Point<Pixels>,
 }
 
+/// Which just-opened thread views owe a one-shot "scroll to the newest row" on
+/// the next render, so they open at the bottom (chat order) instead of the top.
+/// Each flag is set when its view opens and cleared once the scroll is applied.
+#[derive(Default)]
+struct ScrollToNewest {
+    /// The thread panel's message list.
+    panel: bool,
+    /// The reply bar's thread chain.
+    reply_chain: bool,
+}
+
+/// Selects which [`ScrollToNewest`] flag [`ChatView::open_at_bottom`] consumes.
+#[derive(Clone, Copy)]
+enum ScrollTarget {
+    Panel,
+    ReplyChain,
+}
+
 /// Emitted by a [`ChatView`] when new *live* activity (a chat message or a
 /// public event) lands in its channel, so the app can mark the owning tab
 /// unread when it isn't the active one. Emitted from the log's own
@@ -669,6 +687,15 @@ pub(crate) struct ChatView {
     mentions_scroll: gpui::ScrollHandle,
     /// Set when a new mention arrived; the mentions panel tails on next render.
     mentions_new: bool,
+    /// Scroll position of the thread panel's message list, so it opens at the
+    /// newest message with older ones scrollable above (chat order).
+    thread_scroll: gpui::ScrollHandle,
+    /// Scroll position of the reply bar's thread chain, same bottom-anchoring.
+    reply_chain_scroll: gpui::ScrollHandle,
+    /// Set when the thread panel opens (or the reply chain first appears): the
+    /// next render snaps the corresponding list to its newest row. `Thread` for
+    /// the panel, `Reply` for the composer's chain — cleared once applied.
+    scroll_to_newest: ScrollToNewest,
     /// The logged-in user's personal Twitch emotes (sub/follower/global) —
     /// everything they can actually use, fetched lazily on the first picker
     /// open or `:`/Tab completion. Feeds the picker AND autocomplete.
@@ -925,6 +952,9 @@ impl ChatView {
             events_list_state,
             events_shown,
             mentions_scroll: gpui::ScrollHandle::new(),
+            thread_scroll: gpui::ScrollHandle::new(),
+            reply_chain_scroll: gpui::ScrollHandle::new(),
+            scroll_to_newest: ScrollToNewest::default(),
             mentions_new: false,
             personal_emotes: Vec::new(),
             channel_native_emotes: Vec::new(),
@@ -1673,6 +1703,9 @@ impl ChatView {
             },
             parent_elements: msg.elements.clone(),
         });
+        // If the composer shows the full thread chain, open it at the newest
+        // message (chat order) with older ones scrollable above.
+        self.scroll_to_newest.reply_chain = true;
         self.input.update(cx, |this, cx| this.focus(window, cx));
         cx.notify();
     }
@@ -1685,6 +1718,8 @@ impl ChatView {
             seed_id: msg_id.to_string(),
             anchor,
         });
+        // Open at the newest message, older ones scrollable above.
+        self.scroll_to_newest.panel = true;
         cx.notify();
     }
 
@@ -1692,6 +1727,38 @@ impl ChatView {
     fn close_thread_panel(&mut self, cx: &mut Context<Self>) {
         self.thread_panel = None;
         cx.notify();
+    }
+
+    /// One-shot "open at the newest row": while the `target`'s flag is set, snap
+    /// `scroll` to the bottom. A just-built scroll list reports `max_offset` 0 for
+    /// a frame (content not measured yet), so this keeps the flag — and schedules
+    /// another frame — until the scroll actually reaches the end, then clears it.
+    /// Called from render; the view rebuilds each frame while the panel is open.
+    fn open_at_bottom(
+        &mut self,
+        target: ScrollTarget,
+        scroll: &gpui::ScrollHandle,
+        cx: &mut Context<Self>,
+    ) {
+        let flag = match target {
+            ScrollTarget::Panel => &mut self.scroll_to_newest.panel,
+            ScrollTarget::ReplyChain => &mut self.scroll_to_newest.reply_chain,
+        };
+        if !*flag {
+            return;
+        }
+        scroll.scroll_to_bottom();
+        // A just-built list reports zero bounds for a frame (not painted yet), so
+        // `scroll_to_bottom` has nothing to act on. Once it's been laid out
+        // (non-zero height) the scroll has taken — whether the list overflows or
+        // fits fully — so clear the flag; until then keep it and request another
+        // frame. This avoids spinning on a short, non-overflowing thread (whose
+        // `max_offset` stays 0).
+        if scroll.bounds().size.height > px(0.) {
+            *flag = false;
+        } else {
+            cx.notify();
+        }
     }
 
     /// Right-click-to-tag: appends `@name ` to the composer and switches the send
@@ -4801,13 +4868,18 @@ impl ChatView {
     /// user sees the conversation they're joining; the message they're replying to
     /// is tinted. Otherwise it's a single "Replying to name: preview" line. An ✕
     /// cancels. `None` when not replying.
-    fn render_reply_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    fn render_reply_bar(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        // Copy the reply's fields so the rest of the method can take `&mut self`
+        // (the chain scroll needs it) without holding a borrow of `replying_to`.
         let reply = self.replying_to.as_ref()?;
+        let message_id = reply.message_id.clone();
+        let parent_author = reply.parent.author.clone();
+        let parent_elements = reply.parent_elements.clone();
         // A stable per-reply id seed so the preview's emote images animate.
         let seed = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            reply.message_id.hash(&mut h);
+            message_id.hash(&mut h);
             h.finish()
         };
 
@@ -4827,12 +4899,11 @@ impl ChatView {
 
         // Reconstruct the thread the target belongs to; show the whole chain when
         // it's a real conversation (>1 message still buffered).
-        let thread = self.build_thread(&reply.message_id, cx);
+        let thread = self.build_thread(&message_id, cx);
         let show_chain = thread.as_ref().is_some_and(|t| t.is_multi());
 
         if let (true, Some(thread)) = (show_chain, thread) {
             let font_size = self.font_size;
-            let target_id = reply.message_id.clone();
             let lines: Vec<gpui::AnyElement> = thread
                 .messages
                 .iter()
@@ -4840,10 +4911,13 @@ impl ChatView {
                     use std::hash::{Hash, Hasher};
                     let mut h = std::collections::hash_map::DefaultHasher::new();
                     m.id.hash(&mut h);
-                    render::render_thread_line(m, font_size, h.finish(), m.id == target_id)
+                    render::render_thread_line(m, font_size, h.finish(), m.id == message_id)
                         .into_any_element()
                 })
                 .collect();
+            // Open the chain at the newest message, older ones scrollable above.
+            let scroll = self.reply_chain_scroll.clone();
+            self.open_at_bottom(ScrollTarget::ReplyChain, &scroll, cx);
             return Some(
                 v_flex()
                     .w_full()
@@ -4873,6 +4947,7 @@ impl ChatView {
                             // than shoving the composer off-screen.
                             .max_h(px(140.))
                             .overflow_y_scroll()
+                            .track_scroll(&scroll)
                             .children(lines),
                     )
                     .into_any_element(),
@@ -4890,11 +4965,10 @@ impl ChatView {
                 .text_color(cx.theme().muted_foreground)
                 .text_size(px(self.font_size))
                 .child(div().flex_none().child(SharedString::from(format!(
-                    "Replying to {}:",
-                    reply.parent.author
+                    "Replying to {parent_author}:"
                 ))))
                 .child(div().flex_1().min_w_0().overflow_hidden().child(
-                    render::render_reply_preview(&reply.parent_elements, self.font_size, seed),
+                    render::render_reply_preview(&parent_elements, self.font_size, seed),
                 ))
                 .child(cancel)
                 .into_any_element(),
@@ -5058,8 +5132,15 @@ impl ChatView {
                     .min_h_0()
                     .py_1()
                     .overflow_y_scroll()
+                    .track_scroll(&self.thread_scroll)
                     .children(rows),
             );
+
+        // Open at the newest message: snap to the bottom on the first render(s)
+        // after opening, until the list has laid out and the scroll takes (a
+        // just-built list reports max_offset 0 for a frame).
+        let scroll = self.thread_scroll.clone();
+        self.open_at_bottom(ScrollTarget::Panel, &scroll, cx);
 
         // Place the card above the clicked line (its bottom GAP px above the
         // click), flipping below only when it won't fit; clamp to the viewport.
