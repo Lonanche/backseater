@@ -1912,6 +1912,10 @@ pub struct InlinePreview {
     /// The muted "channel · views · Clipped by X" line (already composed).
     pub meta: SharedString,
     pub thumbnail_url: Option<SharedString>,
+    /// True when the thumbnail is being withheld by streamer mode (as opposed to
+    /// the source simply not having one) — renders a 🕶 placeholder like the
+    /// usercard avatar, so it reads as intentionally hidden.
+    pub thumbnail_hidden: bool,
     /// The clicked-through URL (opens on click, with the confirm dialog).
     pub url: String,
 }
@@ -1946,8 +1950,13 @@ pub fn inline_preview_card(preview: InlinePreview, row_id: &str, font_size: f32)
         .rounded_md()
         .cursor_pointer();
 
-    // Thumbnail (or a plain block placeholder while loading / when absent).
-    let thumb = div().flex_none().w(px(thumb_w)).h_full().bg(rgb(panel_bg()));
+    // Thumbnail on the left. A real image when present; a 🕶 placeholder when
+    // streamer mode is hiding it; a plain block while loading / genuinely absent.
+    let thumb = div()
+        .flex_none()
+        .w(px(thumb_w))
+        .h_full()
+        .bg(rgb(panel_bg()));
     card = card.child(match &preview.thumbnail_url {
         Some(url) => thumb
             .child(
@@ -1956,6 +1965,13 @@ pub fn inline_preview_card(preview: InlinePreview, row_id: &str, font_size: f32)
                     .h_full()
                     .object_fit(gpui::ObjectFit::Cover),
             )
+            .into_any_element(),
+        None if preview.thumbnail_hidden => thumb
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(rgb(palette().timestamp))
+            .child("🕶")
             .into_any_element(),
         None => thumb.into_any_element(),
     });

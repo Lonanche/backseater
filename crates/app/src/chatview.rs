@@ -4497,7 +4497,13 @@ impl ChatView {
                 SharedString::from(p.author.clone()),
                 SharedString::from(p.stats.clone().unwrap_or_default()),
                 SharedString::from(p.byline.clone().unwrap_or_default()),
-                p.thumbnail_url.clone().map(SharedString::from),
+                // Streamer mode can hide the thumbnail (it can reveal what a link
+                // points at on stream); the rest of the card still shows.
+                if crate::settings::hide_preview_thumbnails() {
+                    None
+                } else {
+                    p.thumbnail_url.clone().map(SharedString::from)
+                },
             ),
             crate::preview::PreviewState::Loading => (
                 SharedString::from("Loading preview…"),

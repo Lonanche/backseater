@@ -73,10 +73,19 @@ fn build_inline_preview(msg: &Message, font_size: f32) -> Option<gpui::AnyElemen
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join(" · ");
+            // Streamer mode can hide the thumbnail (it can reveal what a posted
+            // link points at on stream); the rest of the card still shows.
+            let hidden = crate::settings::hide_preview_thumbnails();
+            let thumbnail_url = if hidden {
+                None
+            } else {
+                p.thumbnail_url.clone().map(SharedString::from)
+            };
             render::InlinePreview {
                 title: SharedString::from(p.title.clone()),
                 meta: SharedString::from(meta),
-                thumbnail_url: p.thumbnail_url.clone().map(SharedString::from),
+                thumbnail_url,
+                thumbnail_hidden: hidden,
                 url,
             }
         }
@@ -84,6 +93,7 @@ fn build_inline_preview(msg: &Message, font_size: f32) -> Option<gpui::AnyElemen
             title: SharedString::from("Loading preview…"),
             meta: SharedString::default(),
             thumbnail_url: None,
+            thumbnail_hidden: false,
             url,
         },
         // Failed / unsupported → no card (the reserved space collapses).

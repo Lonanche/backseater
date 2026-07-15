@@ -3442,6 +3442,25 @@ impl BackseaterApp {
                         },
                     ))
                     .child(card_divider())
+                    .child(setting_row(
+                        "Hide link preview thumbnails while active",
+                        Some(
+                            "Link previews still show the title and channel, but the \
+                             thumbnail image is hidden so it can't reveal what a posted \
+                             link points at on stream.",
+                        ),
+                        {
+                            use gpui_component::switch::Switch;
+                            Switch::new("streamer-hide-thumbnails")
+                                .small()
+                                .checked(self.settings.streamer_hide_thumbnails)
+                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                    this.set_streamer_hide_thumbnails(*checked, cx);
+                                }))
+                                .into_any_element()
+                        },
+                    ))
+                    .child(card_divider())
                     .child(
                         h_flex()
                             .w_full()
@@ -3579,6 +3598,18 @@ impl BackseaterApp {
         self.settings.streamer_mute_sounds = on;
         self.settings.save();
         self.settings.apply_sound_flags();
+        cx.notify();
+    }
+
+    fn set_streamer_hide_thumbnails(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.settings.streamer_hide_thumbnails = on;
+        self.settings.save();
+        self.settings.apply_visibility_flags();
+        // The inline card is a fixed height with or without the thumbnail, so a
+        // repaint (not a re-measure) suffices to add/drop the image.
+        for tab in &self.tabs {
+            tab.view.update(cx, |view, cx| view.refresh_log(cx));
+        }
         cx.notify();
     }
 
@@ -4545,7 +4576,13 @@ impl BackseaterApp {
                 self.streamer_banner_dismissed = false;
             }
             for tab in &self.tabs {
-                tab.view.update(cx, |_, cx| cx.notify());
+                tab.view.update(cx, |view, cx| {
+                    // The inline preview thumbnail lives in the cached log, so it
+                    // needs an explicit log refresh (a bare notify wouldn't reach
+                    // it); the usercard-avatar blanking rides the ChatView notify.
+                    view.refresh_log(cx);
+                    cx.notify();
+                });
             }
         }
         cx.notify();
