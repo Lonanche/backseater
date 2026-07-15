@@ -3,6 +3,33 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.5.0
+
+### Features
+
+- Reply threads on Twitch and Kick. Click a reply's "↪ replying to" line to open
+  a thread panel showing the whole conversation, and when you start a reply the
+  bar above the message box shows the full thread you're joining. Usernames in
+  both are clickable to open a usercard.
+- Link previews. Twitch and Kick clips and YouTube videos posted in chat show a
+  preview card — title, channel, and view count with a thumbnail — as a hover
+  tooltip or an inline card under the message (Appearance → Link previews;
+  Streamer Mode can hide the thumbnail while you're live).
+- YouTube Super Chats, new memberships, and gifted memberships now render like
+  Twitch resubs: the donor's comment appears as its own chat line under a compact
+  "Name · sent $5.00" header instead of being flattened into the event text.
+- A new title bar shows which accounts you're logged into on Twitch and Kick at a
+  glance (dimmed when logged out), with the settings gear moved up next to them.
+- An optional setting briefly flashes a tab in the platform's color when one of
+  its channels goes live (Appearance).
+- Compact chat mode packs message rows tighter to fit more lines on screen
+  (Appearance, off by default).
+
+### Fixes
+
+- YouTube standard emoji now show as the emoji character instead of leaking the
+  raw `:shortcut:` text.
+
 ## v0.4.5
 
 ### Features
