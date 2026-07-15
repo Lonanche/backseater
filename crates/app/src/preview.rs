@@ -36,6 +36,16 @@ pub fn is_supported(url: &str) -> bool {
     cache().is_supported(url)
 }
 
+/// The first `Link` element in `msg` whose URL a provider can preview, if any —
+/// the link the inline card shows (one card per message). Cheap: URL matching
+/// only, no fetch.
+pub fn first_previewable_url(msg: &bks_core::Message) -> Option<String> {
+    msg.elements.iter().find_map(|el| match el {
+        bks_core::MessageElement::Link { url, .. } if is_supported(url) => Some(url.clone()),
+        _ => None,
+    })
+}
+
 /// The outcome of asking for a URL's preview, for the view to render.
 pub enum PreviewState {
     /// Ready to show.

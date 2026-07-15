@@ -4277,9 +4277,21 @@ impl BackseaterApp {
         if self.settings.link_preview_mode == mode {
             return;
         }
+        let now_inline = mode == settings::LinkPreviewMode::Inline;
         self.settings.link_preview_mode = mode;
         self.settings.save();
         self.settings.apply_visibility_flags();
+        // Inline cards change row heights, so every tab's log must re-measure;
+        // switching *to* Inline also arms fetches for already-buffered messages
+        // (they arrived before inline was on, so their cards weren't armed).
+        for tab in &self.tabs {
+            tab.view.update(cx, |view, cx| {
+                if now_inline {
+                    view.arm_buffered_inline_previews(cx);
+                }
+                view.remeasure(cx);
+            });
+        }
         self.resync_setting_selects(cx);
         cx.notify();
     }

@@ -1423,6 +1423,10 @@ pub struct RowHandlers {
     /// (the view resolves the visibility mode + hover tracking + which
     /// platforms it moderates — see [`ModStrip`]).
     pub mod_strip: Option<ModStrip>,
+    /// A pre-built inline link-preview card (built by the view from the shared
+    /// preview cache), appended under the message body. `None` when inline
+    /// previews are off or the message has no previewable link.
+    pub inline_preview: Option<gpui::AnyElement>,
 }
 
 /// Per-message display flags, set by the view from the row's state.
@@ -1475,6 +1479,7 @@ pub fn render_message(
         reply_click,
         pin_click,
         mod_strip,
+        inline_preview,
     } = handlers;
     let RowFlags {
         struck,
@@ -1895,6 +1900,99 @@ pub fn render_message(
             col.child(reply_line(reply, scale))
         })
         .child(body)
+        // The inline link-preview card (when enabled + the message has a
+        // previewable link), a compact block under the message body.
+        .children(inline_preview)
+}
+
+/// The data an inline preview card renders. Built by the view from the shared
+/// preview cache; `title` empty + all fields blank = the loading skeleton.
+pub struct InlinePreview {
+    pub title: SharedString,
+    /// The muted "channel · views · Clipped by X" line (already composed).
+    pub meta: SharedString,
+    pub thumbnail_url: Option<SharedString>,
+    /// The clicked-through URL (opens on click, with the confirm dialog).
+    pub url: String,
+}
+
+/// The fixed height of the inline preview card (thumbnail + two text lines),
+/// reserved from the moment a previewable link appears so the row never jumps
+/// when the async fetch fills the card in. The thumbnail is 16:9 at this height.
+pub const INLINE_PREVIEW_H: f32 = 72.;
+
+/// A compact horizontal link-preview card shown under a chat message: a small
+/// 16:9 thumbnail on the left, then the title and a muted meta line. Fixed
+/// height ([`INLINE_PREVIEW_H`]) so it reserves its space up front (skeleton
+/// while loading, filled in on load — no layout jump). A plain click opens the
+/// link through the usual confirm dialog.
+pub fn inline_preview_card(preview: InlinePreview, row_id: &str, font_size: f32) -> gpui::AnyElement {
+    let scale = Scale::new(font_size);
+    let thumb_w = INLINE_PREVIEW_H * 16. / 9.;
+    let border = rgb(panel_border());
+    let mut card = h_flex()
+        // Keyed by the message id, not the URL: the same clip posted several times
+        // renders several cards, and a shared id would collide (only the first
+        // would be clickable). Message ids are unique per row.
+        .id(SharedString::from(format!("inline-preview-{row_id}")))
+        .h(px(INLINE_PREVIEW_H))
+        .max_w(px(360.))
+        .my_1()
+        .overflow_hidden()
+        .items_stretch()
+        .bg(rgb(panel_bg()))
+        .border_1()
+        .border_color(border)
+        .rounded_md()
+        .cursor_pointer();
+
+    // Thumbnail (or a plain block placeholder while loading / when absent).
+    let thumb = div().flex_none().w(px(thumb_w)).h_full().bg(rgb(panel_bg()));
+    card = card.child(match &preview.thumbnail_url {
+        Some(url) => thumb
+            .child(
+                img(url.clone())
+                    .w_full()
+                    .h_full()
+                    .object_fit(gpui::ObjectFit::Cover),
+            )
+            .into_any_element(),
+        None => thumb.into_any_element(),
+    });
+
+    // Text column: title (up to two lines) + muted meta line.
+    let text = v_flex()
+        .flex_1()
+        .min_w_0()
+        .px_2()
+        .py_1()
+        .justify_center()
+        .gap_0p5()
+        .child(
+            div()
+                .font_weight(FontWeight::MEDIUM)
+                .text_size(px(scale.small))
+                .line_height(px(scale.small * 1.25))
+                .line_clamp(2)
+                .child(preview.title),
+        )
+        .when(!preview.meta.is_empty(), |c| {
+            c.child(
+                div()
+                    .text_size(px(scale.small * 0.92))
+                    .text_color(rgb(palette().timestamp))
+                    .overflow_hidden()
+                    .truncate()
+                    .child(preview.meta),
+            )
+        });
+    card = card.child(text);
+
+    // A plain click opens the link through the same confirm dialog as clicking
+    // the link text (a loading card is clickable too — it carries the real URL).
+    let url = preview.url;
+    card.on_click(move |_, window, cx| confirm_open_url(url.clone(), window, cx))
+        .into_any_element()
 }
 
 /// A row's left-side moderation-button strip: the user's button list in list

@@ -972,6 +972,9 @@ impl ChatView {
                 // A new row may be a mention (for our terms) — flag the mentions
                 // panel to tail + feed the all-tabs store.
                 self.note_new_row(msg.as_deref());
+                if let Some(m) = msg.as_deref() {
+                    self.arm_inline_preview(m, cx);
+                }
                 // Live activity → the app marks this tab unread if it's inactive.
                 // A historical row can also arrive via `Appended` (a backfilled
                 // message newer than everything currently buffered lands at the
@@ -993,6 +996,9 @@ impl ChatView {
                     self.list_state.splice(ix..ix, 1);
                 }
                 self.note_new_row(msg.as_deref());
+                if let Some(m) = msg.as_deref() {
+                    self.arm_inline_preview(m, cx);
+                }
             }
             ChannelEvent::RemovedFront => {
                 // Applied even while paused: the frozen view tracks the shared
@@ -3117,6 +3123,61 @@ impl ChatView {
             });
         })
         .detach();
+    }
+
+    /// Kicks off the inline preview fetch for a newly-arrived message, when inline
+    /// mode is on and it has a previewable link. The card renders a fixed-height
+    /// skeleton immediately (so the row doesn't jump), then fills in when the
+    /// fetch lands — a repaint suffices on success (same height); a *failed* fetch
+    /// collapses the card, so that re-measures the log.
+    fn arm_inline_preview(&self, msg: &Message, cx: &mut Context<Self>) {
+        if crate::settings::link_preview_mode() != crate::settings::LinkPreviewMode::Inline {
+            return;
+        }
+        let Some(url) = crate::preview::first_previewable_url(msg) else {
+            return;
+        };
+        let (tx, rx) = smol::channel::bounded::<String>(1);
+        // Only spawns a fetch if the URL isn't already cached/in-flight.
+        crate::preview::lookup(&url, &self.controller.runtime(), tx);
+        cx.spawn(async move |this, cx| {
+            if let Ok(done_url) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| {
+                    // A failed fetch collapses the card (height change → re-measure);
+                    // a ready one is the same height as the skeleton (repaint only).
+                    if matches!(
+                        crate::preview::peek(&done_url),
+                        crate::preview::PreviewState::None
+                    ) {
+                        this.remeasure(cx);
+                    } else {
+                        this.refresh_log(cx);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Arms inline-preview fetches for every message currently in the buffer —
+    /// used when the user switches *to* Inline mode, so already-shown messages
+    /// with links get their cards (later messages are armed on append). Cheap
+    /// when nothing has a previewable link (URL matching only), and the cache
+    /// dedupes so a link posted many times fetches once.
+    pub(crate) fn arm_buffered_inline_previews(&self, cx: &mut Context<Self>) {
+        let msgs: Vec<std::sync::Arc<Message>> = self
+            .channel
+            .read(cx)
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Message { msg } => Some(msg.clone()),
+                _ => None,
+            })
+            .collect();
+        for msg in msgs {
+            self.arm_inline_preview(&msg, cx);
+        }
     }
 
     /// This chatter's recent messages in the current feed (oldest first), capped

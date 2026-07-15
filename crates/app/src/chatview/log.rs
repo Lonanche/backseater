@@ -51,6 +51,47 @@ pub(super) fn decorate<'a>(msg: &'a Message, model: &ChannelModel) -> std::borro
     }
 }
 
+/// Builds the inline link-preview card for a message row, or `None` when inline
+/// previews are off, the message has no previewable link, or its fetch failed.
+/// A still-loading preview renders a fixed-height skeleton (space reserved up
+/// front so the row doesn't jump when the fetch lands — see
+/// [`ChatView::arm_inline_preview`]).
+fn build_inline_preview(msg: &Message, font_size: f32) -> Option<gpui::AnyElement> {
+    if crate::settings::link_preview_mode() != crate::settings::LinkPreviewMode::Inline {
+        return None;
+    }
+    let url = crate::preview::first_previewable_url(msg)?;
+    let preview = match crate::preview::peek(&url) {
+        crate::preview::PreviewState::Ready(p) => {
+            // "channel · views · Clipped by X", each part dropped when absent.
+            let meta = [
+                p.author.clone(),
+                p.stats.clone().unwrap_or_default(),
+                p.byline.clone().unwrap_or_default(),
+            ]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+            render::InlinePreview {
+                title: SharedString::from(p.title.clone()),
+                meta: SharedString::from(meta),
+                thumbnail_url: p.thumbnail_url.clone().map(SharedString::from),
+                url,
+            }
+        }
+        crate::preview::PreviewState::Loading => render::InlinePreview {
+            title: SharedString::from("Loading preview…"),
+            meta: SharedString::default(),
+            thumbnail_url: None,
+            url,
+        },
+        // Failed / unsupported → no card (the reserved space collapses).
+        crate::preview::PreviewState::None => return None,
+    };
+    Some(render::inline_preview_card(preview, &msg.id, font_size))
+}
+
 pub(super) struct LogView {
     host: WeakEntity<ChatView>,
 }
@@ -259,6 +300,10 @@ impl Render for LogView {
                         platforms: mod_platforms,
                         row_moderated: can_moderate,
                     });
+                    // The inline link-preview card (Inline mode + a previewable
+                    // link): a fixed-height skeleton reserves its space up front,
+                    // filled in when the fetch (armed on append) lands.
+                    let inline_preview = build_inline_preview(msg, font_size);
                     // Struck (ban/delete) + cosmetics come from the shared model's
                     // side-tables, not baked onto the immutable message.
                     let struck = model.is_struck(msg);
@@ -286,6 +331,7 @@ impl Render for LogView {
                             reply_click: Some(reply_click),
                             pin_click,
                             mod_strip,
+                            inline_preview,
                         },
                     )
                     .into_any_element()
