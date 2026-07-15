@@ -3,40 +3,18 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
-## v0.4.5-beta.3
+## v0.4.5
 
 ### Features
 
+- Inactive tabs are marked unread (bold, un-dimmed name) when new live chat or
+  events arrive, cleared when you select the tab; join-backlog history never
+  triggers it.
 - The AutoMod held-message chatter name and the pin banner's message author and
   pinning-moderator names are now clickable, opening that user's usercard.
-
-### Fixes
-
-- Watch-streak rows now show the real streak length from Twitch's data instead of
-  accidentally reading digits out of the chatter's username (a viewer like
-  `user67` with an 80-stream streak showed 67).
-- A failed Twitch unban of a user who wasn't banned now shows as a muted notice
-  instead of a red error row.
-- Tightened the gap between words in chat so spacing reads evenly across the log,
-  mentions, AutoMod rows, event rows, and reply previews.
-
-## v0.4.5-beta.2
-
-### Features
-
 - Messages sent by redeeming Twitch's built-in "Highlight My Message" channel-point
   reward now show as a highlighted row with a HIGHLIGHTED tag, in their own color
   you can set under Settings → Themes on a custom theme.
-
-### Fixes
-
-- Raised the username contrast floor so dim blue/red/purple names that sat just
-  below readable on the darkened chat log are nudged legible while keeping their hue.
-
-## v0.4.5-beta.1
-
-### Features
-
 - Right-click a chatter's name in chat to reply to them: their `@name` is added
   to the message box (with sensible spacing) and the send target switches to
   their platform.
@@ -50,6 +28,15 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 
 ### Fixes
 
+- Watch-streak rows now show the real streak length from Twitch's data instead of
+  accidentally reading digits out of the chatter's username (a viewer like
+  `user67` with an 80-stream streak showed 67).
+- A failed Twitch unban of a user who wasn't banned now shows as a muted notice
+  instead of a red error row.
+- Tightened the gap between words in chat so spacing reads evenly across the log,
+  mentions, AutoMod rows, event rows, and reply previews.
+- Raised the username contrast floor so dim blue/red/purple names that sat just
+  below readable on the darkened chat log are nudged legible while keeping their hue.
 - Tabs wrap onto multiple rows instead of scrolling horizontally, so every tab
   stays visible at once (Chatterino-style); the scroll strip and arrows are gone.
 - The account-wide Twitch emote set is fetched once for the whole app instead of
