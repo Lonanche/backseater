@@ -2480,11 +2480,15 @@ pub fn render_event(
         // `flex_1` + `min_w_0` let the content shrink below its width so it wraps
         // to multiple lines instead of overflowing the row on one line.
         .child(
+            // Same line box as the timestamp/icon prefixes so the text shares
+            // their baseline (see the note in `render_event_compact`); `items_start`
+            // matches the row's top-pinned prefixes.
             h_flex()
                 .flex_1()
                 .min_w_0()
                 .flex_wrap()
-                .items_center()
+                .items_start()
+                .line_height(px(scale.line))
                 .children(tokens),
         );
 
@@ -2572,7 +2576,17 @@ pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElem
     // and any `@mention` in the text open a usercard when a handler is supplied.
     let actor = ev.details.actor.as_deref();
     let mention_click = ev.mention_click.as_ref();
-    let mut content = h_flex().flex_1().min_w_0().flex_wrap().items_center();
+    // The same line box the timestamp/icon prefixes use (`scale.line`) so the
+    // text tokens shape at that height and share their baseline — without it the
+    // content shapes at gpui's taller default line height and, under the row's
+    // `items_start`, sits lower than the icon/timestamp (the events-tab
+    // misalignment). `items_start` matches the prefix boxes' top pin.
+    let mut content = h_flex()
+        .flex_1()
+        .min_w_0()
+        .flex_wrap()
+        .items_start()
+        .line_height(px(scale.line));
     content = match (&ev.details.actor, &ev.details.compact) {
         (Some(actor_name), Some(detail)) => {
             // The actor leads as a distinct bold token; make it clickable itself
