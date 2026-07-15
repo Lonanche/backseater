@@ -109,9 +109,9 @@ pub enum Lookup {
 /// A process-wide, URL-keyed preview cache with in-flight dedupe and a short
 /// negative cache. Providers are registered once; the app drives fetches.
 ///
-/// Flow the app follows on hover: call [`PreviewCache::lookup`]; if it returns
-/// `Pending` *and* `started` is true, spawn the returned target's fetch on the
-/// runtime and call [`PreviewCache::store`] with the result, then repaint.
+/// Flow the app follows on hover: call [`PreviewCache::lookup`]; if its result's
+/// `to_fetch` is `Some`, spawn that target's fetch on the runtime and call
+/// [`PreviewCache::store`] with the result, then repaint.
 pub struct PreviewCache {
     providers: Vec<Box<dyn LinkPreviewProvider>>,
     entries: Mutex<HashMap<String, Entry>>,
