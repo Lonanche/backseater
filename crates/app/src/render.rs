@@ -2245,6 +2245,9 @@ fn reply_line(
             .on_mouse_down(
                 MouseButton::Left,
                 move |ev: &gpui::MouseDownEvent, window: &mut Window, cx: &mut App| {
+                    // Don't let the click also reach the log row underneath (its
+                    // hover/selection machinery) — this click only opens the thread.
+                    cx.stop_propagation();
                     cb(ev.position, window, cx)
                 },
             )
@@ -3102,10 +3105,16 @@ pub fn render_thread_line(
         .gap_1()
         .px_1()
         .when(highlight, |row| {
-            row.bg(rgb(palette().reply))
+            // The message being replied to: a *faint* reply-tinted background
+            // (the panel surface nudged toward the reply accent, not the muted
+            // reply text color used as an opaque fill) with the reply color as a
+            // left accent bar — mirrors the tint+accent pair the log's highlights
+            // and the thread panel's seed row use.
+            let p = palette();
+            row.bg(rgb(blend(p.panel_bg, p.reply, 0.18)))
                 .rounded_sm()
                 .border_l_2()
-                .border_color(rgb(palette().reply))
+                .border_color(rgb(p.reply))
         })
         .child(
             div()

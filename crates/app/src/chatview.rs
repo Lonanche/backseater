@@ -1492,6 +1492,7 @@ impl ChatView {
                 // never replies (the controller ignores the target).
                 if !self.handle_ui_command(trimmed, cx) {
                     self.controller.handle_input(&text, self.replying_to.take());
+                    self.scroll_to_newest.reply_chain = false;
                 }
                 self.record_sent(&text);
             }
@@ -1704,7 +1705,10 @@ impl ChatView {
             parent_elements: msg.elements.clone(),
         });
         // If the composer shows the full thread chain, open it at the newest
-        // message (chat order) with older ones scrollable above.
+        // message (chat order) with older ones scrollable above. A *fresh* scroll
+        // handle each open starts with zero bounds, so `open_at_bottom`'s
+        // laid-out check isn't fooled by a previous open's stale bounds.
+        self.reply_chain_scroll = gpui::ScrollHandle::new();
         self.scroll_to_newest.reply_chain = true;
         self.input.update(cx, |this, cx| this.focus(window, cx));
         cx.notify();
@@ -1718,7 +1722,10 @@ impl ChatView {
             seed_id: msg_id.to_string(),
             anchor,
         });
-        // Open at the newest message, older ones scrollable above.
+        // Open at the newest message, older ones scrollable above. A *fresh*
+        // scroll handle each open starts with zero bounds, so `open_at_bottom`'s
+        // laid-out check isn't fooled by a previous open's stale bounds.
+        self.thread_scroll = gpui::ScrollHandle::new();
         self.scroll_to_newest.panel = true;
         cx.notify();
     }
@@ -1730,10 +1737,12 @@ impl ChatView {
     }
 
     /// One-shot "open at the newest row": while the `target`'s flag is set, snap
-    /// `scroll` to the bottom. A just-built scroll list reports `max_offset` 0 for
-    /// a frame (content not measured yet), so this keeps the flag — and schedules
-    /// another frame — until the scroll actually reaches the end, then clears it.
-    /// Called from render; the view rebuilds each frame while the panel is open.
+    /// `scroll` to the bottom. `scroll` is a *fresh* handle each open (reset in
+    /// `open_thread_panel`/`start_reply`), so its `bounds()` start zero and only
+    /// become non-zero once the list has actually laid out — the signal this uses
+    /// to know the `scroll_to_bottom` has real content to act on before clearing
+    /// the flag. Until then it keeps the flag and schedules another frame. Called
+    /// from render; the view rebuilds each frame while the view is open.
     fn open_at_bottom(
         &mut self,
         target: ScrollTarget,
@@ -4909,6 +4918,7 @@ impl ChatView {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.replying_to = None;
+                    this.scroll_to_newest.reply_chain = false;
                     cx.notify();
                 }),
             );
@@ -5079,6 +5089,9 @@ impl ChatView {
         let mut ordinal = 0usize;
         let font_size = self.font_size;
 
+        // Read the shared model once for the whole thread (its `is_struck`
+        // side-table lookup per row), not once per message.
+        let model = self.channel.read(cx);
         let rows: Vec<gpui::AnyElement> = thread
             .messages
             .iter()
@@ -5089,7 +5102,7 @@ impl ChatView {
                     mention_click: Some(mention_click_for(&entity, msg)),
                     ..Default::default()
                 };
-                let struck = self.channel.read(cx).is_struck(msg);
+                let struck = model.is_struck(msg);
                 let body = render::render_message(
                     msg,
                     render::RowFlags {
@@ -5116,9 +5129,17 @@ impl ChatView {
             .collect();
 
         let count = thread.len();
-        // "Reply to thread" targets the newest message in the chain, so the reply
-        // threads under the live conversation (Twitch keys the thread off it).
-        let reply_target = thread.messages.last().map(|m| m.id.clone());
+        // "Reply to thread" replies to the message the panel was opened on (the
+        // one the user clicked), not the newest — the resulting thread is the same
+        // either way (every member shares the root), and replying to the message
+        // in view matches intent. Falls back to the newest if the seed somehow
+        // isn't in the rebuilt chain.
+        let reply_target = thread
+            .messages
+            .iter()
+            .find(|m| m.id == seed_id)
+            .or_else(|| thread.messages.last())
+            .map(|m| m.id.clone());
 
         let header = h_flex()
             .w_full()
