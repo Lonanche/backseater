@@ -2719,6 +2719,21 @@ impl BackseaterApp {
                             }))
                             .into_any_element(),
                     ))
+                    .child(card_divider())
+                    .child(setting_row(
+                        "Compact chat",
+                        Some(
+                            "Tighten the vertical space between messages so more \
+                             lines fit on screen.",
+                        ),
+                        Switch::new("compact-chat")
+                            .small()
+                            .checked(self.settings.compact_chat)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.set_compact_chat(*checked, cx);
+                            }))
+                            .into_any_element(),
+                    ))
             )
             .child(div().h_1())
             .child(section_title("Timestamps"))
@@ -4043,6 +4058,20 @@ impl BackseaterApp {
         self.settings.pause_chat_on_hover = on;
         self.settings.save();
         self.settings.apply_visibility_flags();
+        cx.notify();
+    }
+
+    /// Toggles compact chat. Persists, flips the process-wide flag, and
+    /// re-measures every tab's log — the per-row vertical padding changes, so
+    /// the virtualized list's cached heights must be recomputed.
+    fn set_compact_chat(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.settings.compact_chat == on {
+            return;
+        }
+        self.settings.compact_chat = on;
+        self.settings.save();
+        self.settings.apply_visibility_flags();
+        self.remeasure_tabs(cx);
         cx.notify();
     }
 

@@ -252,6 +252,10 @@ pub struct Settings {
     /// Off by default.
     #[serde(default)]
     pub pause_chat_on_hover: bool,
+    /// Compact chat: less vertical gap between messages, fitting more lines on
+    /// screen. Off by default (the roomier layout is the default look).
+    #[serde(default)]
+    pub compact_chat: bool,
     /// Whether timestamps show on the events panel's rows. On by default.
     #[serde(default = "default_true")]
     pub show_timestamps_events: bool,
@@ -327,6 +331,7 @@ impl Default for Settings {
             chat_modes_placement: ChatModesPlacement::default(),
             show_timestamps_chat: true,
             pause_chat_on_hover: false,
+            compact_chat: false,
             show_timestamps_events: true,
             show_timestamps_mentions: true,
             mentions_tab: false,
@@ -394,6 +399,7 @@ impl Settings {
         SHOW_TIMESTAMPS_EVENTS.store(self.show_timestamps_events, Ordering::Relaxed);
         SHOW_TIMESTAMPS_MENTIONS.store(self.show_timestamps_mentions, Ordering::Relaxed);
         PAUSE_CHAT_ON_HOVER.store(self.pause_chat_on_hover, Ordering::Relaxed);
+        COMPACT_CHAT.store(self.compact_chat, Ordering::Relaxed);
         let opacity = self
             .suppressed_opacity
             .clamp(*SUPPRESSED_OPACITY_RANGE.start(), *SUPPRESSED_OPACITY_RANGE.end());
@@ -466,10 +472,17 @@ static SHOW_TIMESTAMPS_CHAT: AtomicBool = AtomicBool::new(true);
 static SHOW_TIMESTAMPS_EVENTS: AtomicBool = AtomicBool::new(true);
 static SHOW_TIMESTAMPS_MENTIONS: AtomicBool = AtomicBool::new(true);
 static PAUSE_CHAT_ON_HOVER: AtomicBool = AtomicBool::new(false);
+static COMPACT_CHAT: AtomicBool = AtomicBool::new(false);
 
 /// Whether hovering the chat log pauses it (persisted, process-wide).
 pub fn pause_chat_on_hover() -> bool {
     PAUSE_CHAT_ON_HOVER.load(Ordering::Relaxed)
+}
+
+/// Whether chat renders compactly (less vertical gap between messages;
+/// persisted, process-wide). Read per row by `render::render_message`.
+pub fn compact_chat() -> bool {
+    COMPACT_CHAT.load(Ordering::Relaxed)
 }
 
 /// Whether the live status bar (viewer counts) is enabled (a persisted,

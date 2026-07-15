@@ -1831,8 +1831,15 @@ pub fn render_message(
         // A little vertical padding between messages: the line height is tight so
         // wrapped lines within a message stay close, but adjacent messages need a
         // small gap to read as separate. The highlighted-row pill below reuses
-        // this same padded box for its tint.
-        .py_0p5()
+        // this same padded box for its tint. Compact mode zeroes the padding so
+        // consecutive rows butt together; the default roomier gap stays 2px.
+        .map(|row| {
+            if crate::settings::compact_chat() {
+                row.py_0()
+            } else {
+                row.py_0p5()
+            }
+        })
         // Backfilled history is dimmed to set it apart from live chat.
         .when(msg.historical, |row| row.opacity(HISTORY_OPACITY))
         // A suppressed (term-matched) row is faded so the eye skips it, while
