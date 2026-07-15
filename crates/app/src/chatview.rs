@@ -460,6 +460,16 @@ impl EmotePopup {
     }
 }
 
+/// Emitted by a [`ChatView`] when new *live* activity (a chat message or a
+/// public event) lands in its channel, so the app can mark the owning tab
+/// unread when it isn't the active one. Emitted from the log's own
+/// `Appended`/`EventAppended` handling (not backfilled history), so it survives
+/// channel-swap rebuilds (the app subscribes to the stable `ChatView`, not the
+/// swappable inner model).
+pub(crate) struct TabActivity;
+
+impl gpui::EventEmitter<TabActivity> for ChatView {}
+
 /// One tab's chat feed + input. Owns its connection via [`Controller`].
 pub(crate) struct ChatView {
     /// The shared channel model: the canonical row
@@ -910,6 +920,16 @@ impl ChatView {
                 // A new row may be a mention (for our terms) — flag the mentions
                 // panel to tail + feed the all-tabs store.
                 self.note_new_row(msg.as_deref());
+                // Live activity → the app marks this tab unread if it's inactive.
+                // A historical row can also arrive via `Appended` (a backfilled
+                // message newer than everything currently buffered lands at the
+                // end, not through `Inserted`), so gate on `historical` rather
+                // than the event variant — the join backlog must never mark a tab
+                // unread. A non-message row (`None`: a live notice/error) is
+                // genuinely new, so it signals.
+                if msg.as_deref().is_none_or(|m| !m.historical) {
+                    cx.emit(TabActivity);
+                }
             }
             ChannelEvent::Inserted { index, msg } => {
                 // History backfill sorts into place. While paused, an insert
@@ -940,6 +960,7 @@ impl ChatView {
                     let ix = self.events_shown.len();
                     self.events_shown.push_back(*seq);
                     self.events_list_state.splice(ix..ix, 1);
+                    cx.emit(TabActivity);
                 }
             }
             ChannelEvent::EventsTrimmed => {

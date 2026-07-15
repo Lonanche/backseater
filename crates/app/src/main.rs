@@ -531,6 +531,13 @@ struct TabEntry {
     id: u64,
     config: TabConfig,
     view: Entity<ChatView>,
+    /// New activity (a chat message or public event) landed while this tab
+    /// wasn't the active one. Drives the bold-name unread cue on the chip;
+    /// cleared when the tab is selected. Fed by a subscription to the view's
+    /// [`TabActivity`] event (set up in [`make_tab`]).
+    unread: bool,
+    /// Keeps the [`TabActivity`] subscription alive for this tab's lifetime.
+    _activity_sub: gpui::Subscription,
 }
 
 /// Compiles mention terms into a matcher with the per-term mute flags applied
@@ -1254,7 +1261,7 @@ impl BackseaterApp {
         id: u64,
         mention_store: &Entity<MentionStore>,
         window: &mut Window,
-        cx: &mut App,
+        cx: &mut Context<Self>,
     ) -> TabEntry {
         let view_config = config.clone();
         let session = session.clone();
@@ -1273,7 +1280,39 @@ impl BackseaterApp {
                 cx,
             )
         });
-        TabEntry { id, config, view }
+        let _activity_sub = Self::subscribe_tab_activity(&view, id, cx);
+        TabEntry {
+            id,
+            config,
+            view,
+            unread: false,
+            _activity_sub,
+        }
+    }
+
+    /// Subscribes to a tab view's [`TabActivity`] so new chat/events mark the
+    /// owning tab (found by stable `id`) unread when it isn't the active one.
+    /// Keyed by id, not index, so it survives reorders; keyed on the view means
+    /// it survives a channel-swap rebuild (the view entity is stable).
+    fn subscribe_tab_activity(
+        view: &Entity<ChatView>,
+        id: u64,
+        cx: &mut Context<Self>,
+    ) -> gpui::Subscription {
+        cx.subscribe(view, move |this, _view, _ev: &chatview::TabActivity, cx| {
+            let Some(ix) = this.tabs.iter().position(|t| t.id == id) else {
+                return;
+            };
+            // The active tab (and only when a real tab, not the mentions feed,
+            // is showing) is considered read as messages arrive.
+            if ix == this.active && !this.mentions_tab_selected {
+                return;
+            }
+            if !this.tabs[ix].unread {
+                this.tabs[ix].unread = true;
+                cx.notify();
+            }
+        })
     }
 
     /// One tab's effective mention matcher: the logged-in Twitch/Kick account
@@ -1479,6 +1518,7 @@ impl BackseaterApp {
         if ix < self.tabs.len() {
             self.active = ix;
             self.mentions_tab_selected = false;
+            self.tabs[ix].unread = false;
             tabs::save_active(self.active);
             cx.notify();
         }
@@ -1867,14 +1907,35 @@ impl BackseaterApp {
             // still jump here.
             let id = self.tabs[ix].id;
             let store = self.mention_store.clone();
-            let Ok(entry) = self.main_window.update(cx, |_, window, cx| {
-                Self::make_tab(
-                    &session, config, font_size, mentions, ignore, suppress, id, &store, window, cx,
-                )
+            let view_config = config.clone();
+            // Build the view where the main `Window` is reachable; the
+            // `TabActivity` subscription is wired below, back in `Context<Self>`.
+            let Ok(view) = self.main_window.update(cx, |_, window, cx| {
+                cx.new(|cx| {
+                    ChatView::new(
+                        session,
+                        view_config,
+                        font_size,
+                        mentions,
+                        ignore,
+                        suppress,
+                        id,
+                        store,
+                        window,
+                        cx,
+                    )
+                })
             }) else {
                 return; // Main window gone (app shutting down).
             };
-            self.tabs[ix] = entry;
+            let _activity_sub = Self::subscribe_tab_activity(&view, id, cx);
+            self.tabs[ix] = TabEntry {
+                id,
+                config,
+                view,
+                unread: false,
+                _activity_sub,
+            };
         } else {
             self.tabs[ix].config = config;
         }
@@ -4583,6 +4644,10 @@ impl BackseaterApp {
                 let selected = ix == active && !mentions_selected;
                 let label = SharedString::from(tab.config.display_name());
                 let being_dragged = self.dragging == Some(ix);
+                // Unread (new activity while this tab wasn't active) bolds +
+                // un-dims the name, like an unread email. Only meaningful on an
+                // inactive chip — selecting a tab clears its unread flag.
+                let unread = tab.unread && !selected;
                 // Snapshot each set platform's latest live status for the hover
                 // tooltip. Read eagerly so the tooltip closure owns its data (uptime is
                 // still recomputed at show time from the captured start). `None` until
@@ -4647,7 +4712,16 @@ impl BackseaterApp {
                                 .child(SharedString::from("●")),
                         )
                     })
-                    .child(label.clone())
+                    // Unread bolds + un-dims the name (overriding the inactive
+                    // chip's muted weight/color from `tab_chip_base`).
+                    .child(if unread {
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground)
+                            .child(label.clone())
+                    } else {
+                        div().child(label.clone())
+                    })
                     // Drag left/right to reorder. We swap live the moment the cursor
                     // crosses this tab's horizontal midpoint, tracking the dragged
                     // tab's new index in `self.dragging`.
