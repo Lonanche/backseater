@@ -881,6 +881,7 @@ dependencies = [
  "async-trait",
  "bks-core",
  "bks-platform",
+ "bks-preview",
  "chrono",
  "futures-util",
  "reqwest",

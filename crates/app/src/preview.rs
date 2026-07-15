@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use bks_preview::{LinkPreview, Lookup, PreviewCache};
+use bks_twitch::TwitchClipPreviewProvider;
 use bks_youtube::YoutubePreviewProvider;
 use tokio::runtime::Handle;
 
@@ -19,7 +20,12 @@ static CACHE: OnceLock<Arc<PreviewCache>> = OnceLock::new();
 
 /// The shared preview cache, initializing it (and its providers) on first call.
 pub fn cache() -> &'static Arc<PreviewCache> {
-    CACHE.get_or_init(|| Arc::new(PreviewCache::new(vec![Box::new(YoutubePreviewProvider::new())])))
+    CACHE.get_or_init(|| {
+        Arc::new(PreviewCache::new(vec![
+            Box::new(YoutubePreviewProvider::new()),
+            Box::new(TwitchClipPreviewProvider::new()),
+        ]))
+    })
 }
 
 /// Whether any provider can preview `url` (cheap; no fetch). Used by the hover

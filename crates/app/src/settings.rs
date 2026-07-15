@@ -104,7 +104,7 @@ impl ChatModesPlacement {
     pub const LABELS: &'static [&'static str] = &["Off", "Top", "Bottom"];
 }
 
-/// How link previews (YouTube video links today) are shown: not at all, as a
+/// How link previews (YouTube videos + Twitch clips) are shown: not at all, as a
 /// hover tooltip, or (designed-for, not built yet) as an inline in-chat card.
 /// `Tooltip` by default. The `Inline` variant is persisted but currently renders
 /// like `Off` until the inline card lands.

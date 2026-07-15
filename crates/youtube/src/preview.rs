@@ -99,7 +99,7 @@ fn parse_player(resp: &Value) -> Option<LinkPreview> {
     let stats = details["viewCount"]
         .as_str()
         .and_then(|s| s.parse::<u64>().ok())
-        .map(|n| format!("{} views", compact_count(n)));
+        .map(|n| format!("{} views", bks_core::format_count_compact(n)));
 
     Some(LinkPreview {
         kind: PreviewKind::Video,
@@ -118,25 +118,6 @@ fn best_thumbnail(thumbnails: &Value) -> Option<String> {
         .max_by_key(|t| t["width"].as_u64().unwrap_or(0))
         .and_then(|t| t["url"].as_str())
         .map(|s| s.to_string())
-}
-
-/// Formats a raw count into a compact human string: 1234 → "1.2K", 1_500_000 →
-/// "1.5M", 2_000_000_000 → "2B". Whole thousands drop the decimal ("12K" not
-/// "12.0K").
-fn compact_count(n: u64) -> String {
-    const UNITS: &[(u64, char)] = &[(1_000_000_000, 'B'), (1_000_000, 'M'), (1_000, 'K')];
-    for &(threshold, suffix) in UNITS {
-        if n >= threshold {
-            let value = n as f64 / threshold as f64;
-            // One decimal, but trim a trailing ".0" (12.0K → 12K).
-            let rounded = (value * 10.0).round() / 10.0;
-            if (rounded.fract()).abs() < f64::EPSILON {
-                return format!("{}{}", rounded as u64, suffix);
-            }
-            return format!("{rounded:.1}{suffix}");
-        }
-    }
-    n.to_string()
 }
 
 #[cfg(test)]
@@ -173,16 +154,6 @@ mod tests {
         assert!(p.match_url("https://twitch.tv/somechannel").is_none());
         // A channel/handle page has no video id.
         assert!(p.match_url("https://www.youtube.com/@somechannel").is_none());
-    }
-
-    #[test]
-    fn compact_count_formats() {
-        assert_eq!(compact_count(5), "5");
-        assert_eq!(compact_count(999), "999");
-        assert_eq!(compact_count(1_200), "1.2K");
-        assert_eq!(compact_count(12_000), "12K");
-        assert_eq!(compact_count(1_500_000), "1.5M");
-        assert_eq!(compact_count(2_000_000_000), "2B");
     }
 
     #[test]

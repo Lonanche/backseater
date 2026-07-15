@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 bks-core.workspace = true
 bks-platform.workspace = true
+bks-preview.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
