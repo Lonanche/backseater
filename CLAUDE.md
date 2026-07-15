@@ -199,8 +199,10 @@ platform = implement one trait + one message builder, with zero UI changes**.
 - **Reply threads (Twitch + Kick)**: a hover ↩ button starts a reply (threads under the message
   on its platform); a reply renders a muted "↪ replying to @name: text" context line above the
   body. `ReplyParent` now carries the parent's id + the **thread-root id** (Twitch IRC
-  `reply-parent-msg-id` + `reply-thread-parent-msg-id`; Kick's flat replies reuse the parent id as
-  the root), which lets a whole chain be reconstructed **from the session's row buffer**
+  `reply-parent-msg-id` + `reply-thread-parent-msg-id`; **Kick mirrors this** — the direct parent
+  is `metadata.original_message.id`, the thread root is the **top-level `thread_parent_id`** field
+  on the chat frame (distinct from the parent; empty/absent → the parent id doubles as the root)),
+  which lets a whole chain be reconstructed **from the session's row buffer**
   (`crates/app/src/thread.rs::reconstruct` — group every message sharing `Message::thread_id`, in
   buffer order). There's no fetch-a-thread API on either platform, so members that scrolled out of
   the `MAX_ROWS` buffer or predate the session don't appear (same limit as the web clients).
@@ -932,6 +934,12 @@ re-discovered:
   - Subscribe: `{"event":"pusher:subscribe","data":{"auth":"","channel":"chatrooms.{chatroom_id}.v2"}}`.
   - Chat frames: event `App\Events\ChatMessageEvent`; the Pusher `data` field is a JSON *string*
     (parse twice) → `{id, content, created_at, sender:{username, identity:{color}}}`.
+  - **Reply frames**: `type:"reply"` adds `metadata:{original_sender:{id,username},
+    original_message:{id,content}, message_ref}` (the **direct parent** replied to) AND a
+    top-level **`thread_parent_id`** (the **thread root** — like Twitch's
+    `reply-thread-parent-msg-id`, distinct from the parent; `""` on some replies). `message_ref` is
+    a client send-ref, ignored. The `/history` endpoint serializes `metadata` as a JSON *string*
+    (dropped — backlog carries no reply context). See `crates/kick/src/builder.rs`.
   - Inline emotes: `[emote:{id}:{name}]` in `content`; CDN `https://files.kick.com/emotes/{id}/fullsize`.
   - Respond to `pusher:ping` with `{"event":"pusher:pong","data":{}}` to stay connected.
   - ⚠️ **Cloudflare fronts the read endpoints** (`kick.com/api/v2/channels/{slug}`, `kick.com/emotes/

@@ -34,6 +34,12 @@ pub struct KickChatMessage {
     /// pinned history entry doesn't need reply context).
     #[serde(default, deserialize_with = "metadata_object_only")]
     pub metadata: Option<Metadata>,
+    /// The **thread root** id — the message that started the thread this reply
+    /// belongs to. Distinct from `metadata.original_message.id` (the *direct*
+    /// parent replied to): Kick threads mirror Twitch's, so this groups a whole
+    /// multi-level chain (empty string / absent on non-replies).
+    #[serde(default)]
+    pub thread_parent_id: Option<String>,
 }
 
 /// Deserializes `metadata` only when it's the object the live socket sends,
@@ -314,9 +320,11 @@ pub fn build_message(
 
     let elements = parse_content(&msg.content, None);
 
-    // On a reply, Kick nests the parent under `metadata.original_*`; surface it
-    // as a `ReplyParent` for the "replying to" line. Unlike Twitch, the body
-    // carries no mention prefix, so `content` is already what the user typed.
+    // On a reply, Kick nests the *direct* parent under `metadata.original_*` and
+    // carries the **thread root** in the top-level `thread_parent_id` (mirrors
+    // Twitch's parent-vs-thread-root split, so a whole multi-level chain groups by
+    // one root). The body has no mention prefix, so `content` is what the user typed.
+    let thread_parent_id = msg.thread_parent_id.filter(|id| !id.is_empty());
     let reply = msg.metadata.and_then(|m| {
         let author = bks_core::normalize_username(&m.original_sender?.username).to_string();
         let (text, parent_id) = m
@@ -326,9 +334,10 @@ pub fn build_message(
         Some(ReplyParent {
             author,
             text,
-            // Kick replies are flat (no separate thread root), so the parent id
-            // doubles as the thread root — chains still link one level deep.
-            thread_root_id: parent_id.clone(),
+            // Thread root from `thread_parent_id`; when it's absent (a first-level
+            // reply whose parent *is* the root, or a history entry that omits it)
+            // the direct parent id doubles as the root so the chain still links.
+            thread_root_id: thread_parent_id.or_else(|| parent_id.clone()),
             parent_id,
         })
     });
@@ -466,7 +475,56 @@ mod tests {
         assert_eq!(reply.author, "Alice");
         assert_eq!(reply.text, "hot take");
         assert_eq!(reply.parent_id.as_deref(), Some("m0"));
-        // Kick has no separate thread root; parent id doubles as it.
+        // No `thread_parent_id` here → the direct parent id doubles as the root.
+        assert_eq!(reply.thread_root_id.as_deref(), Some("m0"));
+    }
+
+    #[test]
+    fn reply_thread_root_differs_from_direct_parent() {
+        // A real live-socket reply capture: `thread_parent_id` (thread root) is a
+        // separate top-level field, distinct from `metadata.original_message.id`
+        // (the direct parent) — so a multi-level chain groups by the root.
+        let data = r#"{
+            "id": "bb5b881b-a520-4d52-9137-dcc330c8dbc9",
+            "chatroom_id": 83425049,
+            "content": "cxzcasdas",
+            "type": "reply",
+            "sender": { "id": 84907698, "username": "trausi" },
+            "metadata": {
+                "original_sender": { "id": 40988309, "username": "u_got_ratted" },
+                "original_message": { "id": "689e3a2d-4871-4404-b721-6193ca4ff828", "content": "czxczcx" },
+                "message_ref": "1784116613579"
+            },
+            "thread_parent_id": "799ba788-0758-44ec-bc25-29780e955010"
+        }"#;
+        let chat: KickChatMessage = serde_json::from_str(data).unwrap();
+        let msg = build_message("chan", &[], chat);
+        let reply = msg.reply.expect("reply parent");
+        assert_eq!(reply.author, "u_got_ratted");
+        assert_eq!(reply.parent_id.as_deref(), Some("689e3a2d-4871-4404-b721-6193ca4ff828"));
+        // The thread root comes from the top-level `thread_parent_id`, NOT the parent.
+        assert_eq!(
+            reply.thread_root_id.as_deref(),
+            Some("799ba788-0758-44ec-bc25-29780e955010")
+        );
+    }
+
+    #[test]
+    fn empty_thread_parent_id_falls_back_to_parent() {
+        // An empty `thread_parent_id` (Kick sends "" on some replies) must not
+        // become the thread root — the direct parent id is used instead.
+        let data = r#"{
+            "id": "m1",
+            "content": "agreed",
+            "sender": { "id": 5, "username": "Bob" },
+            "metadata": {
+                "original_sender": { "username": "Alice" },
+                "original_message": { "id": "m0", "content": "hot take" }
+            },
+            "thread_parent_id": ""
+        }"#;
+        let chat: KickChatMessage = serde_json::from_str(data).unwrap();
+        let reply = build_message("chan", &[], chat).reply.expect("reply parent");
         assert_eq!(reply.thread_root_id.as_deref(), Some("m0"));
     }
 

@@ -837,6 +837,7 @@ fn sub_message(
                 identity: crate::builder::Identity::default(),
             },
             metadata: None,
+            thread_parent_id: None,
         },
     )
 }

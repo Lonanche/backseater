@@ -60,7 +60,11 @@ impl HistoryMessage {
             content: self.content,
             created_at: self.created_at,
             sender: self.sender,
+            // Backlog drops reply context (the history `metadata` string form
+            // omits `original_*`, so no `ReplyParent` is built) — the thread root
+            // alone can't form a chain without it, so leave it out too.
             metadata: None,
+            thread_parent_id: None,
         }
     }
 }
