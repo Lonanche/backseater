@@ -2835,7 +2835,7 @@ impl BackseaterApp {
                         "Link previews",
                         Some(
                             "Show a YouTube video's or a Twitch/Kick clip's title, channel, \
-                             views, and thumbnail: off, as a hover tooltip, or (coming soon) \
+                             views, and thumbnail: off, as a hover tooltip, or as a card \
                              inline in chat.",
                         ),
                         self.link_preview_mode_seg(),

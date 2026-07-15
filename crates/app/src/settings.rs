@@ -105,9 +105,8 @@ impl ChatModesPlacement {
 }
 
 /// How link previews (YouTube videos + Twitch/Kick clips) are shown: not at all,
-/// as a hover tooltip, or (designed-for, not built yet) as an inline in-chat card.
-/// `Tooltip` by default. The `Inline` variant is persisted but currently renders
-/// like `Off` until the inline card lands.
+/// as a hover tooltip, or as an inline in-chat card under the message.
+/// `Tooltip` by default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LinkPreviewMode {
@@ -319,7 +318,7 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub streamer_hide_thumbnails: bool,
     /// How link previews show (off / hover tooltip / inline card). Tooltip by
-    /// default; `Inline` is reserved (renders like `Off` until built).
+    /// default.
     #[serde(default)]
     pub link_preview_mode: LinkPreviewMode,
     /// How the per-message moderation buttons show (always / on hover / off).
