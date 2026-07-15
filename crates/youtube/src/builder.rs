@@ -288,12 +288,25 @@ fn parse_message_runs(value: &Value, text_color: Option<Color>) -> Vec<MessageEl
         if let Some(text) = run.get("text").and_then(Value::as_str) {
             text_buf.push_str(text);
         } else if let Some(emoji) = run.get("emoji") {
-            match emoji_emote(emoji) {
-                Some(emote) => {
-                    flush(&mut text_buf, &mut elements);
-                    elements.push(MessageElement::Emote(Arc::new(emote)));
+            // Custom channel emojis render as an inline image. Standard unicode
+            // emoji render as their actual character (the font draws it) — the
+            // `:shortcut:` text was leaking through before. If a standard emoji
+            // somehow has no character, fall back to its image, then its shortcut.
+            if is_custom_emoji(emoji) {
+                match emoji_emote(emoji) {
+                    Some(emote) => {
+                        flush(&mut text_buf, &mut elements);
+                        elements.push(MessageElement::Emote(Arc::new(emote)));
+                    }
+                    None => text_buf.push_str(&emoji_fallback_text(emoji)),
                 }
-                None => text_buf.push_str(&emoji_fallback_text(emoji)),
+            } else if let Some(ch) = unicode_emoji_char(emoji) {
+                text_buf.push_str(&ch);
+            } else if let Some(emote) = emoji_emote(emoji) {
+                flush(&mut text_buf, &mut elements);
+                elements.push(MessageElement::Emote(Arc::new(emote)));
+            } else {
+                text_buf.push_str(&emoji_fallback_text(emoji));
             }
         }
     }
@@ -301,19 +314,11 @@ fn parse_message_runs(value: &Value, text_color: Option<Color>) -> Vec<MessageEl
     elements
 }
 
-/// Builds an inline [`Emote`] from an `emoji` run. Returns `None` for a standard
-/// unicode emoji (no custom image / `isCustomEmoji` false) — those render as text.
+/// Builds an inline [`Emote`] from an `emoji` run. Custom channel emojis
+/// (`isCustomEmoji: true`) always become an inline image. Standard unicode emoji
+/// are used only as a fallback when the raw character isn't available — see
+/// `parse_message_runs`, which prefers the unicode character as text.
 fn emoji_emote(emoji: &Value) -> Option<Emote> {
-    // Standard unicode emoji carry an image too, but we only want *custom* channel
-    // emojis as inline images; unicode ones render fine as text (and the font has
-    // them). YouTube marks channel emojis with `isCustomEmoji: true`.
-    if !emoji
-        .get("isCustomEmoji")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return None;
-    }
     let url = best_thumbnail(&emoji["image"])?;
     let name = emoji_fallback_text(emoji);
     let id = emoji
@@ -336,9 +341,35 @@ fn emoji_emote(emoji: &Value) -> Option<Emote> {
     })
 }
 
-/// The text to show for an emoji when it has no inline image: its shortcut
-/// (`:shortcut:`), else its id, else its accessibility label.
+/// Whether an `emoji` run is a *custom* channel emoji (a per-channel image) vs a
+/// standard unicode emoji (:smile: etc.). YouTube marks the former `isCustomEmoji`.
+fn is_custom_emoji(emoji: &Value) -> bool {
+    emoji
+        .get("isCustomEmoji")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// The actual unicode character(s) of a *standard* emoji run. YouTube puts the
+/// literal glyph in `emojiId` (e.g. `"😀"`, `"🤣"`); a custom emoji's `emojiId`
+/// is instead an id path (`UC…/…`) so this returns `None` for those.
+fn unicode_emoji_char(emoji: &Value) -> Option<String> {
+    let id = emoji.get("emojiId").and_then(Value::as_str)?;
+    // A custom emoji's id is a channel path, not a glyph; a standard emoji's id
+    // is the character itself (no `/`, and it isn't ASCII).
+    if id.is_empty() || id.contains('/') || id.is_ascii() {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+/// The text to show for an emoji when it isn't rendered as an image: the actual
+/// unicode character (standard emoji), else its shortcut (`:shortcut:`), else its
+/// id, else its accessibility label.
 fn emoji_fallback_text(emoji: &Value) -> String {
+    if let Some(ch) = unicode_emoji_char(emoji) {
+        return ch;
+    }
     if let Some(shortcut) = emoji["shortcuts"]
         .as_array()
         .and_then(|a| a.first())
@@ -611,7 +642,43 @@ mod tests {
     }
 
     #[test]
-    fn standard_unicode_emoji_stays_text() {
+    fn standard_unicode_emoji_renders_as_its_character() {
+        // A standard emoji's `emojiId` is the literal glyph; we render that (not
+        // the `:shortcut:`, which used to leak through), and the font draws it.
+        let item = serde_json::json!({
+            "liveChatTextMessageRenderer": {
+                "id": "abc",
+                "timestampUsec": "1700000000000000",
+                "authorName": { "simpleText": "Bob" },
+                "message": { "runs": [
+                    { "text": "lol " },
+                    { "emoji": {
+                        "emojiId": "🤣",
+                        "isCustomEmoji": false,
+                        "shortcuts": [":rolling_on_the_floor_laughing:"],
+                        "image": { "thumbnails": [{ "url": "//x/y.png", "width": 24 }] }
+                    }},
+                    { "emoji": {
+                        "emojiId": "🤣",
+                        "isCustomEmoji": false,
+                        "shortcuts": [":rolling_on_the_floor_laughing:"],
+                        "image": { "thumbnails": [{ "url": "//x/y.png", "width": 24 }] }
+                    }}
+                ]}
+            }
+        });
+        match build_item("chan", &item) {
+            ParsedItem::Message(msg) => {
+                assert_eq!(kinds(&msg.elements), vec!["T:lol 🤣🤣"]);
+            }
+            _ => panic!("expected message"),
+        }
+    }
+
+    #[test]
+    fn standard_emoji_without_char_falls_back_to_image() {
+        // Defensive: a standard emoji whose `emojiId` isn't a glyph (ASCII/empty)
+        // still shows — as its image, not the raw `:shortcut:` text.
         let item = serde_json::json!({
             "liveChatTextMessageRenderer": {
                 "id": "abc",
@@ -619,7 +686,7 @@ mod tests {
                 "authorName": { "simpleText": "Bob" },
                 "message": { "runs": [
                     { "emoji": {
-                        "emojiId": "😀",
+                        "emojiId": "",
                         "isCustomEmoji": false,
                         "shortcuts": [":grinning:"],
                         "image": { "thumbnails": [{ "url": "//x/y.png", "width": 24 }] }
@@ -629,7 +696,7 @@ mod tests {
         });
         match build_item("chan", &item) {
             ParsedItem::Message(msg) => {
-                assert_eq!(kinds(&msg.elements), vec!["T::grinning:"]);
+                assert_eq!(kinds(&msg.elements), vec!["E::grinning::https://x/y.png"]);
             }
             _ => panic!("expected message"),
         }
