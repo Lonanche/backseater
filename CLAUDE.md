@@ -227,6 +227,10 @@ platform = implement one trait + one message builder, with zero UI changes**.
   inset from the composer edges with a reply-accent (`palette().reply`) left bar + a bundled
   `icons/reply.svg` (lucide, `text_color`ed like `pin.svg`), a muted "Replying to" lead-in with
   the name in the accent color, and a circular hover-lifting ✕ — not the old flat full-bleed strip.
+  **Usernames in the reply bar are clickable** (open the chatter's usercard): the single-line
+  caption name via `open_usercard_named(name, reply_platform)` (resolves by name, bare-card
+  fallback), each thread-chain line's name via `render_thread_line`'s optional `NameClick`
+  (`name_click_for`, keyed on the buffered message) — same usercard affordance as the log.
 - **Twitch viewer list** (👥 button on the input bar, or `/chatters`/`/viewers`): a child OS
   window listing who's connected to the tab's Twitch chat, with a live search filter, count,
   Refresh, and click-a-name → usercard. Data is Helix `GET /chat/chatters` (paginated,

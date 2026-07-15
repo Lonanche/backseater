@@ -4884,6 +4884,7 @@ impl ChatView {
         let message_id = reply.message_id.clone();
         let parent_author = reply.parent.author.clone();
         let parent_elements = reply.parent_elements.clone();
+        let reply_platform = reply.platform;
         // A stable per-reply id seed so the preview's emote images animate.
         let seed = {
             use std::hash::{Hash, Hasher};
@@ -4925,7 +4926,9 @@ impl ChatView {
 
         // The small reply icon + "Replying to <name>" caption, shared by both the
         // single-line bar and the thread header. `name` is emphasized in the reply
-        // accent; the lead-in is muted and smaller.
+        // accent; the lead-in is muted and smaller. When a name is shown it's
+        // clickable (opens the chatter's usercard on the reply's platform).
+        let entity = cx.entity();
         let caption = |lead: &str, name: Option<SharedString>, fg: gpui::Hsla| {
             h_flex()
                 .flex_none()
@@ -4945,12 +4948,27 @@ impl ChatView {
                         .child(SharedString::from(lead.to_string())),
                 )
                 .when_some(name, |row, name| {
+                    let entity = entity.clone();
+                    let target = name.to_string();
                     row.child(
                         div()
+                            .id("reply-bar-name")
                             .text_size(px(label_size))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(accent)
-                            .child(name),
+                            .cursor_pointer()
+                            .hover(|s| s.underline())
+                            .child(name)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                move |_, _window: &mut Window, cx: &mut App| {
+                                    let name = target.clone();
+                                    entity.update(cx, |this, cx| {
+                                        this.open_usercard_named(&name, reply_platform, cx);
+                                        cx.notify();
+                                    });
+                                },
+                            ),
                     )
                 })
         };
@@ -4978,6 +4996,7 @@ impl ChatView {
 
         if let (true, Some(thread)) = (show_chain, thread) {
             let muted = cx.theme().muted_foreground;
+            let entity = cx.entity();
             let lines: Vec<gpui::AnyElement> = thread
                 .messages
                 .iter()
@@ -4985,8 +5004,14 @@ impl ChatView {
                     use std::hash::{Hash, Hasher};
                     let mut h = std::collections::hash_map::DefaultHasher::new();
                     m.id.hash(&mut h);
-                    render::render_thread_line(m, font_size, h.finish(), m.id == message_id)
-                        .into_any_element()
+                    render::render_thread_line(
+                        m,
+                        font_size,
+                        h.finish(),
+                        m.id == message_id,
+                        Some(name_click_for(&entity, m)),
+                    )
+                    .into_any_element()
                 })
                 .collect();
             // Open the chain at the newest message, older ones scrollable above.

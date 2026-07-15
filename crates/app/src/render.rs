@@ -3083,13 +3083,15 @@ pub fn render_reply_preview(
 
 /// One compact line of a reply thread ("name: message with emotes inline") for
 /// the thread context shown in the reply bar. The author name keeps its (readable)
-/// color; `id_seed` keys the inline emote images. `highlight` tints the row for
-/// the message the reply directly targets.
+/// color; `id_seed` keys the inline emote images and the name's clickable id.
+/// `highlight` tints the row for the message the reply directly targets. When
+/// `name_click` is set the author name opens that chatter's usercard.
 pub fn render_thread_line(
     msg: &Message,
     font_size: f32,
     id_seed: u64,
     highlight: bool,
+    name_click: Option<NameClick>,
 ) -> impl IntoElement {
     let scale = Scale::new(font_size);
     let name_color = readable_color(
@@ -3098,6 +3100,24 @@ pub fn render_thread_line(
             .map(Color::to_u32)
             .unwrap_or_else(|| palette().default_name),
     );
+    let name_text = SharedString::from(format!("{}:", msg.author.display_name));
+    let name = div()
+        .flex_none()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(name_color));
+    let name = match name_click {
+        Some(cb) => name
+            .id(("thread-line-name", id_seed as usize))
+            .cursor_pointer()
+            .hover(|s| s.underline())
+            .child(name_text)
+            .on_mouse_down(
+                MouseButton::Left,
+                move |_, window: &mut Window, cx: &mut App| cb(window, cx),
+            )
+            .into_any_element(),
+        None => name.child(name_text).into_any_element(),
+    };
     h_flex()
         .w_full()
         .min_w_0()
@@ -3116,13 +3136,7 @@ pub fn render_thread_line(
                 .border_l_2()
                 .border_color(rgb(p.reply))
         })
-        .child(
-            div()
-                .flex_none()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(name_color))
-                .child(SharedString::from(format!("{}:", msg.author.display_name))),
-        )
+        .child(name)
         .child(
             div().flex_1().min_w_0().overflow_hidden().child(h_flex()
                 .min_w_0()
