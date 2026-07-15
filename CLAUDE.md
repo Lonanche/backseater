@@ -205,16 +205,20 @@ platform = implement one trait + one message builder, with zero UI changes**.
   buffer order). There's no fetch-a-thread API on either platform, so members that scrolled out of
   the `MAX_ROWS` buffer or predate the session don't appear (same limit as the web clients).
   **Clicking the "replying to" line opens the thread panel** (`ChatView::render_thread_panel`, a
-  `deferred()` backdrop-dimmed centered card): the full chain oldest-first, each name/`@mention`
-  opening the usercard, the clicked message tinted, with an ✕ and a "↩ Reply to thread" button
-  (replies to the newest message in the chain). Handler seam mirrors the others:
-  `render::ThreadClick` on `RowHandlers.thread_click`, built per reply row by `thread_click_for`
-  (only set when `msg.reply.is_some()`). **The reply bar shows the whole thread too**: when the
-  message being replied to is part of a multi-message chain still in the buffer,
-  `render_reply_bar` renders the scrollable chain (each line `render::render_thread_line`, the
-  target tinted) instead of the single parent preview; a single/absent chain falls back to the
-  one-line "Replying to name: preview". `thread_panel: Option<String>` on `ChatView` holds the
-  open panel's seed id (the chain is rebuilt live each render so it grows as replies arrive).
+  `deferred()` card **anchored just above the clicked line** — not centered — flipping below only
+  when it won't fit, over a full-window transparent dismiss layer): the full chain oldest-first,
+  each name/`@mention` opening the usercard, the clicked message tinted, with an ✕ and a "↩ Reply
+  to thread" button (replies to the newest message in the chain). The click position rides the
+  handler (`render::ThreadClick` = `Fn(Point<Pixels>, &mut Window, &mut App)` on
+  `RowHandlers.thread_click`, built per reply row by `thread_click_for` only when
+  `msg.reply.is_some()`) and is stored on `ChatView::thread_panel` (a `ThreadPanel { seed_id,
+  anchor }`); placement reuses the link-preview window→overlay-local math + the always-warm
+  `link_preview_offset` (both cards render in the same `inset_0` layer). **The reply bar shows the
+  whole thread too**: when the message being replied to is part of a multi-message chain still in
+  the buffer, `render_reply_bar` renders the scrollable chain (each line
+  `render::render_thread_line`, the target tinted) instead of the single parent preview; a
+  single/absent chain falls back to the one-line "Replying to name: preview". The chain is rebuilt
+  live each render so it grows as replies arrive.
 - **Twitch viewer list** (👥 button on the input bar, or `/chatters`/`/viewers`): a child OS
   window listing who's connected to the tab's Twitch chat, with a live search filter, count,
   Refresh, and click-a-name → usercard. Data is Helix `GET /chat/chatters` (paginated,

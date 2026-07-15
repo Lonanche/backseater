@@ -1374,9 +1374,10 @@ pub type ReplyClick = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
 pub type PinClick = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// A callback run when a reply's "↪ replying to" context line is clicked: opens
-/// the thread panel showing the whole reply chain. Built per-row by the view for
-/// reply messages in the live log; `None` leaves the context line inert.
-pub type ThreadClick = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
+/// the thread panel showing the whole reply chain, anchored at the click position
+/// (window coords). Built per-row by the view for reply messages in the live log;
+/// `None` leaves the context line inert.
+pub type ThreadClick = std::rc::Rc<dyn Fn(gpui::Point<gpui::Pixels>, &mut Window, &mut App)>;
 
 /// The shared shape of a row's hover-action callbacks ([`ReplyClick`],
 /// [`PinClick`]), for the chip builder.
@@ -2243,7 +2244,9 @@ fn reply_line(
             .hover(|s| s.underline())
             .on_mouse_down(
                 MouseButton::Left,
-                move |_, window: &mut Window, cx: &mut App| cb(window, cx),
+                move |ev: &gpui::MouseDownEvent, window: &mut Window, cx: &mut App| {
+                    cb(ev.position, window, cx)
+                },
             )
             .child(text)
             .into_any_element(),

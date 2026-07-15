@@ -483,6 +483,15 @@ struct LinkPreviewHover {
     hovering: bool,
 }
 
+/// The open thread panel: the id of the message whose "replying to" line was
+/// clicked (the chain is rebuilt from the buffer around it each render) and the
+/// click position in window coords, so the panel anchors above that line rather
+/// than floating in the middle of the chat.
+struct ThreadPanel {
+    seed_id: String,
+    anchor: Point<Pixels>,
+}
+
 /// Emitted by a [`ChatView`] when new *live* activity (a chat message or a
 /// public event) lands in its channel, so the app can mark the owning tab
 /// unread when it isn't the active one. Emitted from the log's own
@@ -633,10 +642,10 @@ pub(crate) struct ChatView {
     /// "replying to" bar above the input. Cleared on send or cancel.
     replying_to: Option<controller::ReplyTo>,
     /// When set, the thread panel is open showing the reply chain seeded from this
-    /// message id (opened by clicking a "replying to" line). Rebuilt from the live
-    /// buffer each render so it grows as new replies arrive. Cleared on ✕ or a
-    /// backdrop click.
-    thread_panel: Option<String>,
+    /// message id, anchored above the "replying to" line the user clicked (window
+    /// coords). Rebuilt from the live buffer each render so it grows as new replies
+    /// arrive. Cleared on ✕ or a backdrop click.
+    thread_panel: Option<ThreadPanel>,
     /// While dragging a layout divider: which one, the two adjacent shares, and
     /// the pointer position at grab time, so each move applies a delta. `None`
     /// when not resizing.
@@ -1669,10 +1678,13 @@ impl ChatView {
     }
 
     /// Opens the thread panel seeded from `msg_id` (a reply's "replying to" line
-    /// was clicked). The chain itself is rebuilt from the live buffer each render,
-    /// so the panel keeps up as new replies land.
-    fn open_thread_panel(&mut self, msg_id: &str, cx: &mut Context<Self>) {
-        self.thread_panel = Some(msg_id.to_string());
+    /// was clicked at `anchor`, window coords). The chain itself is rebuilt from
+    /// the live buffer each render, so the panel keeps up as new replies land.
+    fn open_thread_panel(&mut self, msg_id: &str, anchor: Point<Pixels>, cx: &mut Context<Self>) {
+        self.thread_panel = Some(ThreadPanel {
+            seed_id: msg_id.to_string(),
+            anchor,
+        });
         cx.notify();
     }
 
@@ -4903,11 +4915,21 @@ impl ChatView {
 
     /// The thread panel: a floating card listing the whole reply chain the clicked
     /// message belongs to, oldest at top, each row's name/`@mentions` opening the
-    /// usercard. A backdrop dims + dismisses; the header has an ✕ and a "Reply to
-    /// thread" button that starts a reply to the newest message in the chain.
-    /// `None` when the panel is closed or its seed scrolled out of the buffer.
-    fn render_thread_panel(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let seed_id = self.thread_panel.clone()?;
+    /// usercard. It's anchored just **above the "replying to" line the user
+    /// clicked** (flipping below only when it won't fit), not centered — a
+    /// full-window transparent layer catches an outside click to dismiss. The
+    /// header has an ✕ and a "Reply to thread" button that replies to the newest
+    /// message in the chain. `None` when the panel is closed or its seed scrolled
+    /// out of the buffer.
+    fn render_thread_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let (seed_id, anchor) = self
+            .thread_panel
+            .as_ref()
+            .map(|t| (t.seed_id.clone(), t.anchor))?;
         let thread = self.build_thread(&seed_id, cx)?;
         let entity = cx.entity();
 
@@ -5012,10 +5034,15 @@ impl ChatView {
                     ),
             );
 
+        // Fixed card box so its placement above the click can be computed. The
+        // list inside scrolls when the thread is taller than the body budget.
+        const CARD_W: f32 = 440.;
+        const CARD_H: f32 = 360.;
+        const GAP: f32 = 8.;
         let card = v_flex()
             .id("thread-panel")
-            .w(px(440.))
-            .max_h(px(520.))
+            .w(px(CARD_W))
+            .h(px(CARD_H))
             .bg(cx.theme().popover)
             .border_1()
             .border_color(cx.theme().border)
@@ -5034,28 +5061,52 @@ impl ChatView {
                     .children(rows),
             );
 
-        // A dimming backdrop that centers the card and dismisses on an outside
-        // click; the card swallows its own clicks so they don't dismiss.
-        let backdrop = div()
+        // Place the card above the clicked line (its bottom GAP px above the
+        // click), flipping below only when it won't fit; clamp to the viewport.
+        // Same window→overlay-local conversion as the link-preview card: this
+        // renders in the same `inset_0` layer, so it reuses `link_preview_offset`
+        // (kept warm by the always-on probe).
+        let viewport = window.viewport_size();
+        let vw = f32::from(viewport.width);
+        let vh = f32::from(viewport.height);
+        let ax = f32::from(anchor.x);
+        let ay = f32::from(anchor.y);
+        // Center horizontally on the click, clamped into the viewport.
+        let x = (ax - CARD_W / 2.).min(vw - CARD_W - 8.).max(8.);
+        // The click sits mid-line; the line is ~one chat line tall.
+        let half_line = self.font_size * 0.9;
+        let line_top = ay - half_line;
+        let line_bottom = ay + half_line;
+        let top = if line_top - GAP - CARD_H >= 8. {
+            line_top - GAP - CARD_H
+        } else {
+            (line_bottom + GAP).min(vh - CARD_H - 8.).max(8.)
+        };
+        let offset = self.link_preview_offset.get();
+        let local_x = x - f32::from(offset.x);
+        let local_top = top - f32::from(offset.y);
+
+        // A full-window transparent layer catches an outside click to dismiss; the
+        // card sits on top (its own clicks occluded so they don't dismiss).
+        let layer = div()
             .id("thread-backdrop")
             .absolute()
             .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(gpui::rgba(0x00000066))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| this.close_thread_panel(cx)),
             )
             .child(
                 div()
+                    .absolute()
+                    .left(px(local_x))
+                    .top(px(local_top))
                     .occlude()
                     .on_mouse_down(MouseButton::Left, |_, _, _| {})
                     .child(card),
             );
 
-        Some(gpui::deferred(backdrop).into_any_element())
+        Some(gpui::deferred(layer).into_any_element())
     }
 }
 
@@ -5501,7 +5552,7 @@ impl Render for ChatView {
 
         let emote_popup_overlay = self.render_emote_popup(window, cx);
         let link_preview_overlay = self.render_link_preview(window, cx);
-        let thread_panel_overlay = self.render_thread_panel(cx);
+        let thread_panel_overlay = self.render_thread_panel(window, cx);
 
         let layout_grid = self.render_layout_grid(cx);
 
@@ -5864,11 +5915,13 @@ fn reply_click_for(entity: &Entity<ChatView>, msg: &Message) -> render::ReplyCli
 fn thread_click_for(entity: &Entity<ChatView>, msg: &Message) -> render::ThreadClick {
     let entity = entity.clone();
     let msg_id = msg.id.clone();
-    std::rc::Rc::new(move |_window: &mut Window, cx: &mut App| {
-        entity.update(cx, |this, cx| {
-            this.open_thread_panel(&msg_id, cx);
-        });
-    })
+    std::rc::Rc::new(
+        move |anchor: Point<Pixels>, _window: &mut Window, cx: &mut App| {
+            entity.update(cx, |this, cx| {
+                this.open_thread_panel(&msg_id, anchor, cx);
+            });
+        },
+    )
 }
 
 /// Builds the mod-button-strip callback for one message (only called for rows
