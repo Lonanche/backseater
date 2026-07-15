@@ -946,6 +946,7 @@ fn push_text_words(
 /// `http(s)` URL becomes a normal (confirm-then-open) link; everything else is
 /// plain text. Falls back to [`push_text_words`] (plain text only) when no link
 /// handlers are supplied (e.g. the usercard's message list isn't interactive).
+#[allow(clippy::too_many_arguments)] // Render helper threading per-row handlers.
 fn push_run(
     tokens: &mut Vec<gpui::AnyElement>,
     ctx: &RenderCtx,
@@ -954,6 +955,7 @@ fn push_run(
     color: Option<u32>,
     seventv_link_click: Option<&SeventvLinkClick>,
     link_hover: Option<&LinkHover>,
+    link_preview_hover: Option<&LinkPreviewHover>,
 ) {
     // Without link handlers there's nothing interactive to build — keep it plain.
     if seventv_link_click.is_none() && link_hover.is_none() {
@@ -968,7 +970,7 @@ fn push_run(
         if let (Some(cb), Some(id)) = (seventv_link_click, seventv_emote_id(word)) {
             tokens.push(seventv_link_token(ctx, ordinal, word, id, cb.clone()));
         } else if is_url(word) {
-            push_link(tokens, ctx, ordinal, word, word, link_hover);
+            push_link(tokens, ctx, ordinal, word, word, link_hover, link_preview_hover);
         } else if word.chars().count() > LONG_WORD_CHARS {
             for piece in break_long_word(word) {
                 tokens.push(text_token(ctx, ordinal, piece, color, false, false));
@@ -1267,6 +1269,13 @@ fn lerp_color(a: u32, b: u32, t: f32) -> u32 {
 /// per-message by the view; `None` outside the live log (e.g. the usercard list).
 pub type LinkHover = std::rc::Rc<dyn Fn(&mut App)>;
 
+/// A callback run when the cursor enters (`true`) or leaves (`false`) a link,
+/// with the link's URL and the pointer position — drives the hover link-preview
+/// (fetch + tooltip). Built per-message by the view; `None` outside the live log
+/// or when previews are off.
+pub type LinkPreviewHover =
+    std::rc::Rc<dyn Fn(&str, bool, gpui::Point<gpui::Pixels>, &mut Window, &mut App)>;
+
 /// Pushes a link as one or more selectable, clickable tokens: blue, clickable
 /// (a plain click opens a confirmation dialog before navigating), and underlined
 /// while hovered. A long URL is hard-split into row-width-ish pieces so it wraps
@@ -1280,6 +1289,7 @@ fn push_link(
     url: &str,
     text: &str,
     on_hover: Option<&LinkHover>,
+    preview_hover: Option<&LinkPreviewHover>,
 ) {
     let pieces = if text.chars().count() > LONG_WORD_CHARS {
         break_long_word(text)
@@ -1303,18 +1313,24 @@ fn push_link(
         let hovered = ctx.selection.is_link_hovered(link_id);
         let hover_sel = ctx.selection.clone();
         let on_hover = on_hover.cloned();
+        let preview_hover = preview_hover.cloned();
+        let preview_url = url.clone();
         tokens.push(
             div()
                 .id(ctx.ids.token(ord))
                 .text_color(rgb(palette().link))
                 .cursor_pointer()
                 .when(hovered, |s| s.underline())
-                .on_hover(move |entered, _window, cx| {
+                .on_hover(move |entered, window, cx| {
                     let id = entered.then_some(link_id);
                     if hover_sel.set_hovered_link(id) {
                         if let Some(cb) = &on_hover {
                             cb(cx); // ask the view to repaint with the new state
                         }
+                    }
+                    // Drive the link preview (fetch + tooltip) on enter/leave.
+                    if let Some(cb) = &preview_hover {
+                        cb(&preview_url, *entered, window.mouse_position(), window, cx);
                     }
                 })
                 .on_mouse_up(MouseButton::Left, move |_, window, cx| {
@@ -1394,6 +1410,9 @@ pub struct RowHandlers {
     pub name_right_click: Option<NameRightClick>,
     pub mention_click: Option<MentionClick>,
     pub link_hover: Option<LinkHover>,
+    /// Set in the live log when link previews are on: fires on link enter/leave
+    /// to drive the hover preview tooltip.
+    pub link_preview_hover: Option<LinkPreviewHover>,
     pub emote_click: Option<EmoteClick>,
     pub seventv_link_click: Option<SeventvLinkClick>,
     pub reply_click: Option<ReplyClick>,
@@ -1450,6 +1469,7 @@ pub fn render_message(
         name_right_click,
         mention_click,
         link_hover,
+        link_preview_hover,
         emote_click,
         seventv_link_click,
         reply_click,
@@ -1544,6 +1564,7 @@ pub fn render_message(
                     color.map(Color::to_u32),
                     seventv_link_click.as_ref(),
                     link_hover.as_ref(),
+                    link_preview_hover.as_ref(),
                 );
             }
             MessageElement::Emote(emote) => {
@@ -1633,7 +1654,15 @@ pub fn render_message(
                 }
             }
             MessageElement::Link { url, text } => {
-                push_link(&mut tokens, &ctx, ordinal, url, text, link_hover.as_ref());
+                push_link(
+                    &mut tokens,
+                    &ctx,
+                    ordinal,
+                    url,
+                    text,
+                    link_hover.as_ref(),
+                    link_preview_hover.as_ref(),
+                );
             }
             MessageElement::Badge(_) => {} // Badge CDN lookup is deferred past M1.
         }

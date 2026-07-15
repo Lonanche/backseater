@@ -21,6 +21,7 @@ mod emote_cache;
 mod image_cache;
 mod mentions;
 mod popout;
+mod preview;
 mod render;
 mod selectable;
 mod session;
@@ -146,6 +147,16 @@ type FontCombobox = ComboboxState<SearchableVec<SharedString>>;
 /// The state type for a small settings enum-picker dropdown (chat-modes /
 /// streamer / mod-button mode), backed by a plain string list.
 type SettingSelect = gpui_component::select::SelectState<SearchableVec<SharedString>>;
+
+/// The four Appearance/Streamer/Mod/Link-preview enum-picker dropdowns plus their
+/// subscriptions, as returned by [`BackseaterApp::build_setting_selects`].
+type SettingSelects = (
+    Entity<SettingSelect>,
+    Entity<SettingSelect>,
+    Entity<SettingSelect>,
+    Entity<SettingSelect>,
+    Vec<Subscription>,
+);
 
 /// The first entry in the font dropdown; selecting it restores the system font
 /// (persisted as `font_family: None`).
@@ -690,6 +701,7 @@ pub(crate) struct BackseaterApp {
     settings_chat_modes: Entity<SettingSelect>,
     settings_streamer: Entity<SettingSelect>,
     settings_mod_mode: Entity<SettingSelect>,
+    settings_link_preview: Entity<SettingSelect>,
     _settings_select_subs: Vec<Subscription>,
     /// Input for the name of a new/edited theme profile (Themes category).
     /// Window-bound like the other kit inputs.
@@ -938,8 +950,13 @@ impl BackseaterApp {
             Self::subscribe_mentions_name(&settings_inputs.mentions_tab_name, cx);
         let (settings_font, settings_font_sub) =
             Self::font_combobox(settings.font_family.as_deref(), window, cx);
-        let (settings_chat_modes, settings_streamer, settings_mod_mode, settings_select_subs) =
-            Self::build_setting_selects(&settings, window, cx);
+        let (
+            settings_chat_modes,
+            settings_streamer,
+            settings_mod_mode,
+            settings_link_preview,
+            settings_select_subs,
+        ) = Self::build_setting_selects(&settings, window, cx);
         // Open the theme editor on the active custom theme (if any) so its colors
         // are editable straight away; otherwise no draft (a built-in is selected).
         let theme_draft = settings.active_custom_theme().cloned();
@@ -1016,6 +1033,7 @@ impl BackseaterApp {
             settings_chat_modes,
             settings_streamer,
             settings_mod_mode,
+            settings_link_preview,
             _settings_select_subs: settings_select_subs,
             settings_window: None,
             main_window: window.window_handle(),
@@ -1076,11 +1094,12 @@ impl BackseaterApp {
             Self::font_combobox(self.settings.font_family.as_deref(), window, cx);
         self.settings_font = font;
         self._settings_font_sub = font_sub;
-        let (chat_modes, streamer, mod_mode, select_subs) =
+        let (chat_modes, streamer, mod_mode, link_preview, select_subs) =
             Self::build_setting_selects(&self.settings, window, cx);
         self.settings_chat_modes = chat_modes;
         self.settings_streamer = streamer;
         self.settings_mod_mode = mod_mode;
+        self.settings_link_preview = link_preview;
         self._settings_select_subs = select_subs;
         // Rebind the theme editor's inputs (name + color pickers) to this window.
         let (theme_name, theme_pickers, theme_subs) =
@@ -1164,12 +1183,7 @@ impl BackseaterApp {
         settings: &Settings,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (
-        Entity<SettingSelect>,
-        Entity<SettingSelect>,
-        Entity<SettingSelect>,
-        Vec<Subscription>,
-    ) {
+    ) -> SettingSelects {
         let cm = settings::ChatModesPlacement::ALL
             .iter()
             .position(|c| *c == settings.chat_modes_placement)
@@ -1206,7 +1220,19 @@ impl BackseaterApp {
             cx,
         );
 
-        (chat_modes, streamer, mod_mode, vec![s1, s2, s3])
+        let lp = settings::LinkPreviewMode::ALL
+            .iter()
+            .position(|c| *c == settings.link_preview_mode)
+            .unwrap_or(0);
+        let (link_preview, s4) = Self::setting_select(
+            settings::LinkPreviewMode::LABELS,
+            lp,
+            |this, ix, cx| this.set_link_preview_mode(settings::LinkPreviewMode::ALL[ix], cx),
+            window,
+            cx,
+        );
+
+        (chat_modes, streamer, mod_mode, link_preview, vec![s1, s2, s3, s4])
     }
 
     /// Reseeds the three enum-picker dropdowns from the current settings when the
@@ -1240,6 +1266,13 @@ impl BackseaterApp {
                 settings::ModButtonMode::ALL
                     .iter()
                     .position(|c| *c == self.settings.mod_button_mode)
+                    .unwrap_or(0),
+            ),
+            (
+                self.settings_link_preview.clone(),
+                settings::LinkPreviewMode::ALL
+                    .iter()
+                    .position(|c| *c == self.settings.link_preview_mode)
                     .unwrap_or(0),
             ),
         ];
@@ -2799,6 +2832,15 @@ impl BackseaterApp {
                     ))
                     .child(card_divider())
                     .child(setting_row(
+                        "Link previews",
+                        Some(
+                            "Show a YouTube link's title, channel, views, and thumbnail: \
+                             off, as a hover tooltip, or (coming soon) inline in chat.",
+                        ),
+                        self.link_preview_mode_seg(),
+                    ))
+                    .child(card_divider())
+                    .child(setting_row(
                         "Pause chat on hover",
                         Some(
                             "Hold the chat still while the pointer is over it; it \
@@ -4224,6 +4266,21 @@ impl BackseaterApp {
     /// The Off / Top / Bottom dropdown picking where the chat-mode bar sits.
     fn chat_modes_placement_seg(&self) -> gpui::AnyElement {
         setting_dropdown(&self.settings_chat_modes, settings::ChatModesPlacement::LABELS)
+    }
+
+    fn link_preview_mode_seg(&self) -> gpui::AnyElement {
+        setting_dropdown(&self.settings_link_preview, settings::LinkPreviewMode::LABELS)
+    }
+
+    fn set_link_preview_mode(&mut self, mode: settings::LinkPreviewMode, cx: &mut Context<Self>) {
+        if self.settings.link_preview_mode == mode {
+            return;
+        }
+        self.settings.link_preview_mode = mode;
+        self.settings.save();
+        self.settings.apply_visibility_flags();
+        self.resync_setting_selects(cx);
+        cx.notify();
     }
 
     fn set_chat_modes_placement(

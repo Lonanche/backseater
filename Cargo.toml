@@ -8,6 +8,7 @@ members = [
     "crates/kick",
     "crates/youtube",
     "crates/emotes",
+    "crates/preview",
     "crates/app",
 ]
 
@@ -27,6 +28,7 @@ bks-twitch = { path = "crates/twitch" }
 bks-kick = { path = "crates/kick" }
 bks-youtube = { path = "crates/youtube" }
 bks-emotes = { path = "crates/emotes" }
+bks-preview = { path = "crates/preview" }
 
 anyhow = "1"
 async-trait = "0.1"

@@ -17,6 +17,7 @@ bks-twitch.workspace = true
 bks-kick.workspace = true
 bks-youtube.workspace = true
 bks-emotes.workspace = true
+bks-preview.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 anyhow.workspace = true

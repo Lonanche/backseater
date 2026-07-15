@@ -113,6 +113,24 @@ impl Render for LogView {
                 log.update(cx, |_, cx| cx.notify());
             })
         };
+        // Hovering a previewable link (YouTube today) arms/disarms the preview
+        // tooltip on the host ChatView (which renders the overlay). A no-op unless
+        // previews are in Tooltip mode — decided inside `on_link_preview_hover`.
+        let link_preview_hover: render::LinkPreviewHover = {
+            let host = host.clone();
+            std::rc::Rc::new(
+                move |url: &str,
+                      entered: bool,
+                      pos: Point<Pixels>,
+                      _window: &mut Window,
+                      cx: &mut App| {
+                    let url = url.to_string();
+                    host.update(cx, |this, cx| {
+                        this.on_link_preview_hover(&url, entered, pos, cx);
+                    });
+                },
+            )
+        };
         // Clicking an emote opens its info popup at the click position (the
         // popup renders as a ChatView overlay, so that's who gets notified).
         let emote_click: render::EmoteClick = {
@@ -262,6 +280,7 @@ impl Render for LogView {
                             name_right_click: Some(name_right_click),
                             mention_click: Some(mention_click_for(&render_entity, msg)),
                             link_hover: Some(link_hover.clone()),
+                            link_preview_hover: Some(link_preview_hover.clone()),
                             emote_click: Some(emote_click.clone()),
                             seventv_link_click: Some(seventv_link_click.clone()),
                             reply_click: Some(reply_click),

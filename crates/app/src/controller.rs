@@ -209,6 +209,13 @@ impl Controller {
         self.watch_login_changes();
     }
 
+    /// The tokio runtime handle, for spawning app-global background work that
+    /// isn't tied to this tab's channel/session (currently the link-preview
+    /// fetch, whose cache is process-wide).
+    pub fn runtime(&self) -> Handle {
+        self.rt.clone()
+    }
+
     /// Re-joins this tab's Twitch channel with the session's current auth.
     async fn reconnect_twitch(&self) {
         if self.twitch_channel.is_empty() {

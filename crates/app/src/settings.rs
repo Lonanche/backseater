@@ -104,6 +104,26 @@ impl ChatModesPlacement {
     pub const LABELS: &'static [&'static str] = &["Off", "Top", "Bottom"];
 }
 
+/// How link previews (YouTube video links today) are shown: not at all, as a
+/// hover tooltip, or (designed-for, not built yet) as an inline in-chat card.
+/// `Tooltip` by default. The `Inline` variant is persisted but currently renders
+/// like `Off` until the inline card lands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkPreviewMode {
+    Off,
+    #[default]
+    Tooltip,
+    Inline,
+}
+
+impl LinkPreviewMode {
+    /// The choices in display order (aligned with [`Self::LABELS`]).
+    pub const ALL: [Self; 3] = [Self::Off, Self::Tooltip, Self::Inline];
+    /// The labels shown in the settings picker (aligned with [`Self::ALL`]).
+    pub const LABELS: &'static [&'static str] = &["Off", "Tooltip on hover", "Inline in chat"];
+}
+
 /// How the per-message moderation buttons show: on every row the user can
 /// moderate, only while the row is hovered, or not at all. `Hover` still
 /// reserves the strip's width so message text doesn't shift as the pointer moves.
@@ -292,6 +312,10 @@ pub struct Settings {
     /// live shouldn't leak pings into the stream unless the user opts out.
     #[serde(default = "default_true")]
     pub streamer_mute_sounds: bool,
+    /// How link previews show (off / hover tooltip / inline card). Tooltip by
+    /// default; `Inline` is reserved (renders like `Off` until built).
+    #[serde(default)]
+    pub link_preview_mode: LinkPreviewMode,
     /// How the per-message moderation buttons show (always / on hover / off).
     #[serde(default)]
     pub mod_button_mode: ModButtonMode,
@@ -346,6 +370,7 @@ impl Default for Settings {
             mention_sound: false,
             muted_mentions: Vec::new(),
             streamer_mute_sounds: true,
+            link_preview_mode: LinkPreviewMode::default(),
             mod_button_mode: ModButtonMode::default(),
             mod_buttons: default_mod_buttons(),
             mod_buttons_seeded: true,
@@ -406,6 +431,7 @@ impl Settings {
         SHOW_TIMESTAMPS_MENTIONS.store(self.show_timestamps_mentions, Ordering::Relaxed);
         PAUSE_CHAT_ON_HOVER.store(self.pause_chat_on_hover, Ordering::Relaxed);
         COMPACT_CHAT.store(self.compact_chat, Ordering::Relaxed);
+        LINK_PREVIEW_MODE.store(self.link_preview_mode as u8, Ordering::Relaxed);
         let opacity = self
             .suppressed_opacity
             .clamp(*SUPPRESSED_OPACITY_RANGE.start(), *SUPPRESSED_OPACITY_RANGE.end());
@@ -479,6 +505,16 @@ static SHOW_TIMESTAMPS_EVENTS: AtomicBool = AtomicBool::new(true);
 static SHOW_TIMESTAMPS_MENTIONS: AtomicBool = AtomicBool::new(true);
 static PAUSE_CHAT_ON_HOVER: AtomicBool = AtomicBool::new(false);
 static COMPACT_CHAT: AtomicBool = AtomicBool::new(false);
+static LINK_PREVIEW_MODE: AtomicU8 = AtomicU8::new(LinkPreviewMode::Tooltip as u8);
+
+/// How link previews show (off / tooltip / inline; persisted, process-wide).
+pub fn link_preview_mode() -> LinkPreviewMode {
+    match LINK_PREVIEW_MODE.load(Ordering::Relaxed) {
+        x if x == LinkPreviewMode::Off as u8 => LinkPreviewMode::Off,
+        x if x == LinkPreviewMode::Inline as u8 => LinkPreviewMode::Inline,
+        _ => LinkPreviewMode::Tooltip,
+    }
+}
 
 /// Whether hovering the chat log pauses it (persisted, process-wide).
 pub fn pause_chat_on_hover() -> bool {
