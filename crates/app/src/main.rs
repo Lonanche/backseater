@@ -748,6 +748,10 @@ pub(crate) struct BackseaterApp {
     tab_settings_scroll: ScrollHandle,
     /// Set when a mention arrived; the global Mentions tab tails on next render.
     mentions_new: bool,
+    /// A mention arrived while the Mentions tab wasn't the active view. Drives
+    /// the bold-name unread cue on its chip (like a normal tab's `unread`);
+    /// cleared when the Mentions tab is selected.
+    mentions_unread: bool,
     /// Mention-store subscriptions: row clicks → select the source tab, and
     /// new mentions → tail + repaint the global tab.
     _mention_subs: Vec<Subscription>,
@@ -843,6 +847,10 @@ impl BackseaterApp {
             // Tail + repaint the global Mentions tab when a mention arrives.
             cx.observe(&mention_store, |this, _, cx| {
                 this.mentions_new = true;
+                // Mark the Mentions chip unread unless its feed is what's showing.
+                if !(this.settings.mentions_tab && this.mentions_tab_selected) {
+                    this.mentions_unread = true;
+                }
                 cx.notify();
             }),
         ];
@@ -999,6 +1007,7 @@ impl BackseaterApp {
             settings_scroll: ScrollHandle::new(),
             tab_settings_scroll: ScrollHandle::new(),
             mentions_new: false,
+            mentions_unread: false,
             _mention_subs,
         }
     }
@@ -4555,17 +4564,29 @@ impl BackseaterApp {
     /// closing it (right-click → Close tab) unchecks the setting; no drag, no
     /// per-tab settings.
     fn mentions_tab_chip(&self, selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        // A custom name shows verbatim; only the default keeps the "@" mark.
+        let label = SharedString::from(
+            self.settings
+                .mentions_tab_name
+                .clone()
+                .unwrap_or_else(|| "@ Mentions".to_string()),
+        );
+        // Unread bolds + un-dims the name, like a normal tab's chip; only
+        // meaningful when the Mentions feed isn't the current view.
+        let unread = self.mentions_unread && !selected;
         Self::tab_chip_base("mentions-tab", selected, cx)
             .flex_none()
-            // A custom name shows verbatim; only the default keeps the "@" mark.
-            .child(SharedString::from(
-                self.settings
-                    .mentions_tab_name
-                    .clone()
-                    .unwrap_or_else(|| "@ Mentions".to_string()),
-            ))
+            .child(if unread {
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().foreground)
+                    .child(label)
+            } else {
+                div().child(label)
+            })
             .on_click(cx.listener(|this, _, _, cx| {
                 this.mentions_tab_selected = true;
+                this.mentions_unread = false;
                 cx.notify();
             }))
             // Right-click: Open in new window / Close tab (closing unchecks the
