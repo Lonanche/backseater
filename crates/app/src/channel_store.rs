@@ -162,6 +162,12 @@ pub struct ChannelModel {
     /// Keys of rows present, so a reconnect's refetched history can't duplicate a
     /// row already shown (deduped once here, not per view).
     row_keys: HashSet<u64>,
+    /// Bumped on every structural row mutation (push/insert/pop). Lets a view
+    /// cheaply detect whether `rows` changed since it last derived something from
+    /// it — the thread-reply UI caches its reconstructed chain keyed on this so it
+    /// isn't rebuilt per keystroke. Not tied to struck/side-table edits (those
+    /// don't change row membership).
+    rows_generation: u64,
     /// Single messages struck by a deletion, keyed platform → set of msg ids.
     /// Nested (not a `(Platform, String)` tuple key) so the per-row/per-frame
     /// [`is_struck`](Self::is_struck) lookup probes the inner set with a borrowed
@@ -342,6 +348,7 @@ impl ChannelModel {
         let ix = self.rows.len();
         let msg = row_message(&row);
         self.rows.push_back(row);
+        self.rows_generation += 1;
         cx.emit(ChannelEvent::Appended { index: ix, msg });
     }
 
@@ -351,6 +358,7 @@ impl ChannelModel {
         }
         let msg = row_message(&row);
         self.rows.insert(ix, row);
+        self.rows_generation += 1;
         cx.emit(ChannelEvent::Inserted { index: ix, msg });
     }
 
@@ -359,8 +367,15 @@ impl ChannelModel {
             if let Some(key) = row_key(&row) {
                 self.row_keys.remove(&key);
             }
+            self.rows_generation += 1;
             cx.emit(ChannelEvent::RemovedFront);
         }
+    }
+
+    /// A counter bumped on every structural `rows` mutation; a view can cache a
+    /// value derived from `rows` and rebuild it only when this changes.
+    pub fn rows_generation(&self) -> u64 {
+        self.rows_generation
     }
 
     /// Records `row`'s key; `false` means an identical row is already present.
@@ -933,6 +948,7 @@ fn build_model(
             events_base: 0,
             pending_gifts: HashMap::new(),
             row_keys: HashSet::new(),
+            rows_generation: 0,
             struck_ids: HashMap::new(),
             struck_authors: HashMap::new(),
             cosmetics: HashMap::new(),

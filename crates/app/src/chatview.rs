@@ -664,6 +664,12 @@ pub(crate) struct ChatView {
     /// coords). Rebuilt from the live buffer each render so it grows as new replies
     /// arrive. Cleared on ✕ or a backdrop click.
     thread_panel: Option<ThreadPanel>,
+    /// Caches the last reconstructed reply thread so `build_thread` (called from
+    /// the reply bar + thread panel *every* render, i.e. per keystroke while
+    /// replying) doesn't re-scan the whole buffer each time. Keyed by
+    /// `(seed_id, rows_generation)` — rebuilt only when the seed or the buffer
+    /// changes. `RefCell` because `build_thread` takes `&self` (render path).
+    thread_cache: std::cell::RefCell<Option<(String, u64, crate::thread::Thread)>>,
     /// While dragging a layout divider: which one, the two adjacent shares, and
     /// the pointer position at grab time, so each move applies a delta. `None`
     /// when not resizing.
@@ -947,6 +953,7 @@ impl ChatView {
             link_preview_offset: std::rc::Rc::new(std::cell::Cell::new(Point::default())),
             replying_to: None,
             thread_panel: None,
+            thread_cache: std::cell::RefCell::new(None),
             layout_drag: None,
             grid_bounds: std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default())),
             events_list_state,
@@ -5075,16 +5082,31 @@ impl ChatView {
         Some(shell(body).into_any_element())
     }
 
-    /// Reconstructs the thread seeded from `seed_id` off the live buffer and
-    /// renders each message with the shared renderer (names/emotes/badges), the
-    /// seed subtly tinted. `None` if the panel is closed or the seed row is gone.
+    /// Reconstructs the thread seeded from `seed_id` off the live buffer, memoized
+    /// by `(seed_id, rows_generation)` so the reply bar + thread panel (which call
+    /// this every render — per keystroke while replying) don't re-scan the whole
+    /// buffer unless the seed or the rows actually changed. `None` if the seed row
+    /// is gone.
     fn build_thread(&self, seed_id: &str, cx: &App) -> Option<crate::thread::Thread> {
         let model = self.channel.read(cx);
+        let generation = model.rows_generation();
+        // Serve from cache when the seed + buffer are unchanged.
+        if let Some((cached_seed, cached_gen, thread)) = self.thread_cache.borrow().as_ref() {
+            if cached_seed == seed_id && *cached_gen == generation {
+                return Some(thread.clone());
+            }
+        }
         let messages = model.rows.iter().filter_map(|row| match row {
             Row::Message { msg } => Some(msg),
             _ => None,
         });
-        crate::thread::reconstruct(messages, seed_id)
+        let thread = crate::thread::reconstruct(messages, seed_id);
+        // Cache the result (only a successful reconstruction — a missing seed is
+        // transient and cheap to retry, and caching `None` would need its own key).
+        if let Some(t) = &thread {
+            *self.thread_cache.borrow_mut() = Some((seed_id.to_string(), generation, t.clone()));
+        }
+        thread
     }
 
     /// The thread panel: a floating card listing the whole reply chain the clicked
@@ -5092,9 +5114,9 @@ impl ChatView {
     /// usercard. It's anchored just **above the "replying to" line the user
     /// clicked** (flipping below only when it won't fit), not centered — a
     /// full-window transparent layer catches an outside click to dismiss. The
-    /// header has an ✕ and a "Reply to thread" button that replies to the newest
-    /// message in the chain. `None` when the panel is closed or its seed scrolled
-    /// out of the buffer.
+    /// header has an ✕ and a "Reply to thread" button that replies to the message
+    /// the panel was opened on (the seed). `None` when the panel is closed or its
+    /// seed scrolled out of the buffer.
     fn render_thread_panel(
         &mut self,
         window: &mut Window,

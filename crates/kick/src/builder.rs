@@ -321,9 +321,12 @@ pub fn build_message(
     let elements = parse_content(&msg.content, None);
 
     // On a reply, Kick nests the *direct* parent under `metadata.original_*` and
-    // carries the **thread root** in the top-level `thread_parent_id` (mirrors
-    // Twitch's parent-vs-thread-root split, so a whole multi-level chain groups by
-    // one root). The body has no mention prefix, so `content` is what the user typed.
+    // carries a top-level `thread_parent_id`. ⚠️ That field is NOT a stable thread
+    // root: past the first reply it only names the direct parent (verified from a
+    // live 4-msg chain), so the app-side reconstruction ignores it and walks the
+    // reliable `parent_id` links instead (see `bks_app::thread`). We still surface
+    // it as `thread_root_id` (a best-effort hint) but nothing depends on it being
+    // the true root. The body has no mention prefix, so `content` is what was typed.
     let thread_parent_id = msg.thread_parent_id.filter(|id| !id.is_empty());
     let reply = msg.metadata.and_then(|m| {
         let author = bks_core::normalize_username(&m.original_sender?.username).to_string();
@@ -334,9 +337,7 @@ pub fn build_message(
         Some(ReplyParent {
             author,
             text,
-            // Thread root from `thread_parent_id`; when it's absent (a first-level
-            // reply whose parent *is* the root, or a history entry that omits it)
-            // the direct parent id doubles as the root so the chain still links.
+            // Best-effort hint only (see above); falls back to the direct parent.
             thread_root_id: thread_parent_id.or_else(|| parent_id.clone()),
             parent_id,
         })

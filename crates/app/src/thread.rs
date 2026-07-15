@@ -21,7 +21,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A reconstructed reply thread: the ordered chain of messages sharing one thread
-/// root, oldest first. Always contains at least the seed message.
+/// root, oldest first. Always contains at least the seed message. Cheap to clone
+/// (the messages are `Arc`s), so the view caches it across renders.
+#[derive(Clone)]
 pub struct Thread {
     /// The thread's root id (the id every member's `thread_id()` shares). Read in
     /// tests; kept as the thread's identity for future callers (e.g. dedup).
