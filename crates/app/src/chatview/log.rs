@@ -51,6 +51,57 @@ pub(super) fn decorate<'a>(msg: &'a Message, model: &ChannelModel) -> std::borro
     }
 }
 
+/// Builds the inline link-preview card for a message row, or `None` when inline
+/// previews are off, the message has no previewable link, or its fetch failed.
+/// A still-loading preview renders a fixed-height skeleton (space reserved up
+/// front so the row doesn't jump when the fetch lands — see
+/// [`ChatView::arm_inline_preview`]).
+fn build_inline_preview(msg: &Message, font_size: f32) -> Option<gpui::AnyElement> {
+    if crate::settings::link_preview_mode() != crate::settings::LinkPreviewMode::Inline {
+        return None;
+    }
+    let url = crate::preview::first_previewable_url(msg)?;
+    let preview = match crate::preview::peek(&url) {
+        crate::preview::PreviewState::Ready(p) => {
+            // "channel · views · Clipped by X", each part dropped when absent.
+            let meta = [
+                p.author.clone(),
+                p.stats.clone().unwrap_or_default(),
+                p.byline.clone().unwrap_or_default(),
+            ]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+            // Streamer mode can hide the thumbnail (it can reveal what a posted
+            // link points at on stream); the rest of the card still shows.
+            let hidden = crate::settings::hide_preview_thumbnails();
+            let thumbnail_url = if hidden {
+                None
+            } else {
+                p.thumbnail_url.clone().map(SharedString::from)
+            };
+            render::InlinePreview {
+                title: SharedString::from(p.title.clone()),
+                meta: SharedString::from(meta),
+                thumbnail_url,
+                thumbnail_hidden: hidden,
+                url,
+            }
+        }
+        crate::preview::PreviewState::Loading => render::InlinePreview {
+            title: SharedString::from("Loading preview…"),
+            meta: SharedString::default(),
+            thumbnail_url: None,
+            thumbnail_hidden: false,
+            url,
+        },
+        // Failed / unsupported → no card (the reserved space collapses).
+        crate::preview::PreviewState::None => return None,
+    };
+    Some(render::inline_preview_card(preview, &msg.id, font_size))
+}
+
 pub(super) struct LogView {
     host: WeakEntity<ChatView>,
 }
@@ -112,6 +163,24 @@ impl Render for LogView {
             std::rc::Rc::new(move |cx: &mut App| {
                 log.update(cx, |_, cx| cx.notify());
             })
+        };
+        // Hovering a previewable link (YouTube today) arms/disarms the preview
+        // tooltip on the host ChatView (which renders the overlay). A no-op unless
+        // previews are in Tooltip mode — decided inside `on_link_preview_hover`.
+        let link_preview_hover: render::LinkPreviewHover = {
+            let host = host.clone();
+            std::rc::Rc::new(
+                move |url: &str,
+                      entered: bool,
+                      pos: Point<Pixels>,
+                      _window: &mut Window,
+                      cx: &mut App| {
+                    let url = url.to_string();
+                    host.update(cx, |this, cx| {
+                        this.on_link_preview_hover(&url, entered, pos, cx);
+                    });
+                },
+            )
         };
         // Clicking an emote opens its info popup at the click position (the
         // popup renders as a ChatView overlay, so that's who gets notified).
@@ -241,6 +310,10 @@ impl Render for LogView {
                         platforms: mod_platforms,
                         row_moderated: can_moderate,
                     });
+                    // The inline link-preview card (Inline mode + a previewable
+                    // link): a fixed-height skeleton reserves its space up front,
+                    // filled in when the fetch (armed on append) lands.
+                    let inline_preview = build_inline_preview(msg, font_size);
                     // Struck (ban/delete) + cosmetics come from the shared model's
                     // side-tables, not baked onto the immutable message.
                     let struck = model.is_struck(msg);
@@ -262,11 +335,13 @@ impl Render for LogView {
                             name_right_click: Some(name_right_click),
                             mention_click: Some(mention_click_for(&render_entity, msg)),
                             link_hover: Some(link_hover.clone()),
+                            link_preview_hover: Some(link_preview_hover.clone()),
                             emote_click: Some(emote_click.clone()),
                             seventv_link_click: Some(seventv_link_click.clone()),
                             reply_click: Some(reply_click),
                             pin_click,
                             mod_strip,
+                            inline_preview,
                         },
                     )
                     .into_any_element()

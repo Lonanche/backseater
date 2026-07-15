@@ -12,6 +12,7 @@ mod history;
 mod http;
 mod irc_manager;
 mod ivr;
+mod preview;
 mod pubsub;
 mod videos;
 mod viewers;
@@ -24,6 +25,7 @@ pub use eventsub_manager::{register as register_eventsub, Registration as Events
 pub use helix::{fetch_pinned_message, Chatter, Chatters, UserInfo};
 pub use history::fetch_recent;
 pub use ivr::{fetch_live_status, LiveStatus, SubAge};
+pub use preview::TwitchClipPreviewProvider;
 pub use pubsub::run as run_pubsub;
 pub use videos::fetch_last_stream;
 pub use viewers::fetch_viewer_count;

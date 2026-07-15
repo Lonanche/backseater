@@ -25,6 +25,26 @@ pub fn format_count(n: u64) -> String {
     out
 }
 
+/// Formats a count abbreviated with a K/M/B suffix (`1234` → `"1.2K"`,
+/// `1_500_000` → `"1.5M"`, `2_000_000_000` → `"2B"`) — for compact stat lines
+/// like a video's "N views". Whole thousands drop the decimal (`12_000` →
+/// `"12K"`, not `"12.0K"`). Distinct from [`format_count`], which groups with
+/// commas (`"1,234,567"`).
+pub fn format_count_compact(n: u64) -> String {
+    const UNITS: &[(u64, char)] = &[(1_000_000_000, 'B'), (1_000_000, 'M'), (1_000, 'K')];
+    for &(threshold, suffix) in UNITS {
+        if n >= threshold {
+            let value = n as f64 / threshold as f64;
+            let rounded = (value * 10.0).round() / 10.0;
+            if rounded.fract().abs() < f64::EPSILON {
+                return format!("{}{}", rounded as u64, suffix);
+            }
+            return format!("{rounded:.1}{suffix}");
+        }
+    }
+    n.to_string()
+}
+
 /// Strips a channel name to its bare form: trims surrounding whitespace and a
 /// leading `#` (as Twitch IRC uses), preserving case. Use this when you need the
 /// channel's display name; use [`channel_login`] for API/lookup keys.
@@ -85,6 +105,16 @@ mod tests {
         assert_eq!(format_count(1000), "1,000");
         assert_eq!(format_count(12345), "12,345");
         assert_eq!(format_count(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn format_count_compact_abbreviates() {
+        assert_eq!(format_count_compact(5), "5");
+        assert_eq!(format_count_compact(999), "999");
+        assert_eq!(format_count_compact(1_200), "1.2K");
+        assert_eq!(format_count_compact(12_000), "12K"); // whole → no ".0"
+        assert_eq!(format_count_compact(1_500_000), "1.5M");
+        assert_eq!(format_count_compact(2_000_000_000), "2B");
     }
 
     #[test]

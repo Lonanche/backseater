@@ -7,10 +7,12 @@
 mod api;
 mod builder;
 mod connector;
+mod preview;
 mod resolve;
 mod streams;
 
 pub use connector::YouTubeSource;
+pub use preview::YoutubePreviewProvider;
 
 // Re-exported for unit testing the resolver + renderer parser in isolation.
 pub use builder::build_item;

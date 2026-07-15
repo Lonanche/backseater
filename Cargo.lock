@@ -652,6 +652,7 @@ dependencies = [
  "bks-emotes",
  "bks-kick",
  "bks-platform",
+ "bks-preview",
  "bks-twitch",
  "bks-youtube",
  "chrono",
@@ -837,6 +838,7 @@ dependencies = [
  "async-trait",
  "bks-core",
  "bks-platform",
+ "bks-preview",
  "chrono",
  "futures-util",
  "once_cell",
@@ -864,6 +866,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bks-preview"
+version = "0.4.5"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "tracing",
+]
+
+[[package]]
 name = "bks-twitch"
 version = "0.4.5"
 dependencies = [
@@ -871,6 +882,7 @@ dependencies = [
  "async-trait",
  "bks-core",
  "bks-platform",
+ "bks-preview",
  "chrono",
  "futures-util",
  "reqwest",
@@ -891,6 +903,7 @@ dependencies = [
  "async-trait",
  "bks-core",
  "bks-platform",
+ "bks-preview",
  "chrono",
  "once_cell",
  "regex",

@@ -946,6 +946,7 @@ fn push_text_words(
 /// `http(s)` URL becomes a normal (confirm-then-open) link; everything else is
 /// plain text. Falls back to [`push_text_words`] (plain text only) when no link
 /// handlers are supplied (e.g. the usercard's message list isn't interactive).
+#[allow(clippy::too_many_arguments)] // Render helper threading per-row handlers.
 fn push_run(
     tokens: &mut Vec<gpui::AnyElement>,
     ctx: &RenderCtx,
@@ -954,6 +955,7 @@ fn push_run(
     color: Option<u32>,
     seventv_link_click: Option<&SeventvLinkClick>,
     link_hover: Option<&LinkHover>,
+    link_preview_hover: Option<&LinkPreviewHover>,
 ) {
     // Without link handlers there's nothing interactive to build — keep it plain.
     if seventv_link_click.is_none() && link_hover.is_none() {
@@ -968,7 +970,7 @@ fn push_run(
         if let (Some(cb), Some(id)) = (seventv_link_click, seventv_emote_id(word)) {
             tokens.push(seventv_link_token(ctx, ordinal, word, id, cb.clone()));
         } else if is_url(word) {
-            push_link(tokens, ctx, ordinal, word, word, link_hover);
+            push_link(tokens, ctx, ordinal, word, word, link_hover, link_preview_hover);
         } else if word.chars().count() > LONG_WORD_CHARS {
             for piece in break_long_word(word) {
                 tokens.push(text_token(ctx, ordinal, piece, color, false, false));
@@ -1267,6 +1269,13 @@ fn lerp_color(a: u32, b: u32, t: f32) -> u32 {
 /// per-message by the view; `None` outside the live log (e.g. the usercard list).
 pub type LinkHover = std::rc::Rc<dyn Fn(&mut App)>;
 
+/// A callback run when the cursor enters (`true`) or leaves (`false`) a link,
+/// with the link's URL and the pointer position — drives the hover link-preview
+/// (fetch + tooltip). Built per-message by the view; `None` outside the live log
+/// or when previews are off.
+pub type LinkPreviewHover =
+    std::rc::Rc<dyn Fn(&str, bool, gpui::Point<gpui::Pixels>, &mut Window, &mut App)>;
+
 /// Pushes a link as one or more selectable, clickable tokens: blue, clickable
 /// (a plain click opens a confirmation dialog before navigating), and underlined
 /// while hovered. A long URL is hard-split into row-width-ish pieces so it wraps
@@ -1280,6 +1289,7 @@ fn push_link(
     url: &str,
     text: &str,
     on_hover: Option<&LinkHover>,
+    preview_hover: Option<&LinkPreviewHover>,
 ) {
     let pieces = if text.chars().count() > LONG_WORD_CHARS {
         break_long_word(text)
@@ -1303,18 +1313,24 @@ fn push_link(
         let hovered = ctx.selection.is_link_hovered(link_id);
         let hover_sel = ctx.selection.clone();
         let on_hover = on_hover.cloned();
+        let preview_hover = preview_hover.cloned();
+        let preview_url = url.clone();
         tokens.push(
             div()
                 .id(ctx.ids.token(ord))
                 .text_color(rgb(palette().link))
                 .cursor_pointer()
                 .when(hovered, |s| s.underline())
-                .on_hover(move |entered, _window, cx| {
+                .on_hover(move |entered, window, cx| {
                     let id = entered.then_some(link_id);
                     if hover_sel.set_hovered_link(id) {
                         if let Some(cb) = &on_hover {
                             cb(cx); // ask the view to repaint with the new state
                         }
+                    }
+                    // Drive the link preview (fetch + tooltip) on enter/leave.
+                    if let Some(cb) = &preview_hover {
+                        cb(&preview_url, *entered, window.mouse_position(), window, cx);
                     }
                 })
                 .on_mouse_up(MouseButton::Left, move |_, window, cx| {
@@ -1394,6 +1410,9 @@ pub struct RowHandlers {
     pub name_right_click: Option<NameRightClick>,
     pub mention_click: Option<MentionClick>,
     pub link_hover: Option<LinkHover>,
+    /// Set in the live log when link previews are on: fires on link enter/leave
+    /// to drive the hover preview tooltip.
+    pub link_preview_hover: Option<LinkPreviewHover>,
     pub emote_click: Option<EmoteClick>,
     pub seventv_link_click: Option<SeventvLinkClick>,
     pub reply_click: Option<ReplyClick>,
@@ -1404,6 +1423,10 @@ pub struct RowHandlers {
     /// (the view resolves the visibility mode + hover tracking + which
     /// platforms it moderates — see [`ModStrip`]).
     pub mod_strip: Option<ModStrip>,
+    /// A pre-built inline link-preview card (built by the view from the shared
+    /// preview cache), appended under the message body. `None` when inline
+    /// previews are off or the message has no previewable link.
+    pub inline_preview: Option<gpui::AnyElement>,
 }
 
 /// Per-message display flags, set by the view from the row's state.
@@ -1450,11 +1473,13 @@ pub fn render_message(
         name_right_click,
         mention_click,
         link_hover,
+        link_preview_hover,
         emote_click,
         seventv_link_click,
         reply_click,
         pin_click,
         mod_strip,
+        inline_preview,
     } = handlers;
     let RowFlags {
         struck,
@@ -1544,6 +1569,7 @@ pub fn render_message(
                     color.map(Color::to_u32),
                     seventv_link_click.as_ref(),
                     link_hover.as_ref(),
+                    link_preview_hover.as_ref(),
                 );
             }
             MessageElement::Emote(emote) => {
@@ -1633,7 +1659,15 @@ pub fn render_message(
                 }
             }
             MessageElement::Link { url, text } => {
-                push_link(&mut tokens, &ctx, ordinal, url, text, link_hover.as_ref());
+                push_link(
+                    &mut tokens,
+                    &ctx,
+                    ordinal,
+                    url,
+                    text,
+                    link_hover.as_ref(),
+                    link_preview_hover.as_ref(),
+                );
             }
             MessageElement::Badge(_) => {} // Badge CDN lookup is deferred past M1.
         }
@@ -1866,6 +1900,115 @@ pub fn render_message(
             col.child(reply_line(reply, scale))
         })
         .child(body)
+        // The inline link-preview card (when enabled + the message has a
+        // previewable link), a compact block under the message body.
+        .children(inline_preview)
+}
+
+/// The data an inline preview card renders. Built by the view from the shared
+/// preview cache; `title` empty + all fields blank = the loading skeleton.
+pub struct InlinePreview {
+    pub title: SharedString,
+    /// The muted "channel · views · Clipped by X" line (already composed).
+    pub meta: SharedString,
+    pub thumbnail_url: Option<SharedString>,
+    /// True when the thumbnail is being withheld by streamer mode (as opposed to
+    /// the source simply not having one) — renders a 🕶 placeholder like the
+    /// usercard avatar, so it reads as intentionally hidden.
+    pub thumbnail_hidden: bool,
+    /// The clicked-through URL (opens on click, with the confirm dialog).
+    pub url: String,
+}
+
+/// The fixed height of the inline preview card (thumbnail + two text lines),
+/// reserved from the moment a previewable link appears so the row never jumps
+/// when the async fetch fills the card in. The thumbnail is 16:9 at this height.
+pub const INLINE_PREVIEW_H: f32 = 72.;
+
+/// A compact horizontal link-preview card shown under a chat message: a small
+/// 16:9 thumbnail on the left, then the title and a muted meta line. Fixed
+/// height ([`INLINE_PREVIEW_H`]) so it reserves its space up front (skeleton
+/// while loading, filled in on load — no layout jump). A plain click opens the
+/// link through the usual confirm dialog.
+pub fn inline_preview_card(preview: InlinePreview, row_id: &str, font_size: f32) -> gpui::AnyElement {
+    let scale = Scale::new(font_size);
+    let thumb_w = INLINE_PREVIEW_H * 16. / 9.;
+    let border = rgb(panel_border());
+    let mut card = h_flex()
+        // Keyed by the message id, not the URL: the same clip posted several times
+        // renders several cards, and a shared id would collide (only the first
+        // would be clickable). Message ids are unique per row.
+        .id(SharedString::from(format!("inline-preview-{row_id}")))
+        .h(px(INLINE_PREVIEW_H))
+        .max_w(px(360.))
+        .my_1()
+        .overflow_hidden()
+        .items_stretch()
+        .bg(rgb(panel_bg()))
+        .border_1()
+        .border_color(border)
+        .rounded_md()
+        .cursor_pointer();
+
+    // Thumbnail on the left. A real image when present; a 🕶 placeholder when
+    // streamer mode is hiding it; a plain block while loading / genuinely absent.
+    let thumb = div()
+        .flex_none()
+        .w(px(thumb_w))
+        .h_full()
+        .bg(rgb(panel_bg()));
+    card = card.child(match &preview.thumbnail_url {
+        Some(url) => thumb
+            .child(
+                img(url.clone())
+                    .w_full()
+                    .h_full()
+                    .object_fit(gpui::ObjectFit::Cover),
+            )
+            .into_any_element(),
+        None if preview.thumbnail_hidden => thumb
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(rgb(palette().timestamp))
+            .child("🕶")
+            .into_any_element(),
+        None => thumb.into_any_element(),
+    });
+
+    // Text column: title (up to two lines) + muted meta line.
+    let text = v_flex()
+        .flex_1()
+        .min_w_0()
+        .px_2()
+        .py_1()
+        .justify_center()
+        .gap_0p5()
+        .child(
+            div()
+                .font_weight(FontWeight::MEDIUM)
+                .text_size(px(scale.small))
+                .line_height(px(scale.small * 1.25))
+                .line_clamp(2)
+                .child(preview.title),
+        )
+        .when(!preview.meta.is_empty(), |c| {
+            c.child(
+                div()
+                    .text_size(px(scale.small * 0.92))
+                    .text_color(rgb(palette().timestamp))
+                    .overflow_hidden()
+                    .truncate()
+                    .child(preview.meta),
+            )
+        });
+    card = card.child(text);
+
+    // A plain click opens the link through the same confirm dialog as clicking
+    // the link text (a loading card is clickable too — it carries the real URL).
+    let url = preview.url;
+    card.on_click(move |_, window, cx| confirm_open_url(url.clone(), window, cx))
+        .into_any_element()
 }
 
 /// A row's left-side moderation-button strip: the user's button list in list

@@ -55,6 +55,12 @@ const EMOTE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs
 const VIEWER_ANIM_DURATION: std::time::Duration = std::time::Duration::from_millis(900);
 const VIEWER_ANIM_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// How long the pointer must rest on a link before its preview tooltip appears,
+/// and the grace after leaving before it's hidden (a quick leave-and-return
+/// keeps it up). Mirrors the tab-chip tooltip's timings.
+const LINK_PREVIEW_SHOW_DELAY: std::time::Duration = std::time::Duration::from_millis(350);
+const LINK_PREVIEW_HIDE_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Repaint cadence while a jumped-to row's flash fades (~30fps for a smooth
 /// fade), and how long the aged-out "no longer in history" note lingers.
 const FLASH_TICK: std::time::Duration = std::time::Duration::from_millis(33);
@@ -460,6 +466,23 @@ impl EmotePopup {
     }
 }
 
+/// An armed link-preview hover: the link URL whose preview tooltip is (about to
+/// be) shown, and the pointer position to anchor it near. Set when the pointer
+/// enters a previewable link and the show-delay elapses; cleared after the
+/// hide-grace once the pointer leaves. See [`ChatView::arm_link_preview`].
+struct LinkPreviewHover {
+    url: String,
+    anchor: Point<Pixels>,
+    /// Whether the tooltip card is showing yet (the show-delay elapsed). Until
+    /// then the fetch may already be running but nothing is drawn.
+    shown: bool,
+    /// Whether the pointer is currently over this link. A link renders as several
+    /// pieces (wrapping), so the pointer briefly leaves one and enters the next;
+    /// the hide-grace clears the preview only if this is still false when it
+    /// fires, so crossing a seam doesn't flicker the tooltip away.
+    hovering: bool,
+}
+
 /// Emitted by a [`ChatView`] when new *live* activity (a chat message or a
 /// public event) lands in its channel, so the app can mark the owning tab
 /// unread when it isn't the active one. Emitted from the log's own
@@ -589,6 +612,22 @@ pub(crate) struct ChatView {
     /// The open emote-info popup, if any. Opened by clicking an emote in chat;
     /// closed by clicking anywhere outside it.
     emote_popup: Option<EmotePopup>,
+    /// The link whose hover preview tooltip is armed/showing, if any. Driven by
+    /// the render layer's link `on_hover` (a show-delay before it appears, a
+    /// hide-grace after the pointer leaves). Only ever set when link previews are
+    /// in Tooltip mode.
+    link_preview: Option<LinkPreviewHover>,
+    /// Bumped on every preview arm/disarm so a delayed show/hide timer that fired
+    /// for a stale hover no-ops (same guard as the chip tooltip's generation).
+    link_preview_gen: u64,
+    /// The preview overlay layer's painted window-space origin, measured by a
+    /// canvas inside it. gpui offsets an `absolute` overlay that's a flow child
+    /// of the (non-`relative`) root by the stacked height of its flow siblings
+    /// (the status bar + chrome), so the anchor (window coords) and the overlay's
+    /// local coords differ by this; we subtract it when placing the card. Updated
+    /// each paint; the 350ms show-delay means it's already correct before the
+    /// card is visible.
+    link_preview_offset: std::rc::Rc<std::cell::Cell<Point<Pixels>>>,
     /// The message being replied to, if the user clicked a row's reply button. The
     /// next sent line threads under it (on the parent's platform); shown as a
     /// "replying to" bar above the input. Cleared on send or cancel.
@@ -862,6 +901,9 @@ impl ChatView {
             _viewer_search_sub: None,
             parent_window: window.window_handle(),
             emote_popup: None,
+            link_preview: None,
+            link_preview_gen: 0,
+            link_preview_offset: std::rc::Rc::new(std::cell::Cell::new(Point::default())),
             replying_to: None,
             layout_drag: None,
             grid_bounds: std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default())),
@@ -930,6 +972,9 @@ impl ChatView {
                 // A new row may be a mention (for our terms) — flag the mentions
                 // panel to tail + feed the all-tabs store.
                 self.note_new_row(msg.as_deref());
+                if let Some(m) = msg.as_deref() {
+                    self.arm_inline_preview(m, cx);
+                }
                 // Live activity → the app marks this tab unread if it's inactive.
                 // A historical row can also arrive via `Appended` (a backfilled
                 // message newer than everything currently buffered lands at the
@@ -951,6 +996,9 @@ impl ChatView {
                     self.list_state.splice(ix..ix, 1);
                 }
                 self.note_new_row(msg.as_deref());
+                if let Some(m) = msg.as_deref() {
+                    self.arm_inline_preview(m, cx);
+                }
             }
             ChannelEvent::RemovedFront => {
                 // Applied even while paused: the frozen view tracks the shared
@@ -2990,6 +3038,148 @@ impl ChatView {
         .detach();
     }
 
+    /// Handles a link's hover enter/leave from the render layer, driving the
+    /// preview tooltip. Only acts in Tooltip mode and for URLs a provider can
+    /// preview; everything else is a no-op (the normal link stays as-is).
+    fn on_link_preview_hover(&mut self, url: &str, entered: bool, anchor: Point<Pixels>, cx: &mut Context<Self>) {
+        if crate::settings::link_preview_mode() != crate::settings::LinkPreviewMode::Tooltip {
+            return;
+        }
+        if entered {
+            if crate::preview::is_supported(url) {
+                self.arm_link_preview(url.to_string(), anchor, cx);
+            }
+        } else {
+            self.disarm_link_preview(cx);
+        }
+    }
+
+    /// Arms a link preview: starts the cached fetch immediately (so data is ready
+    /// by the time the card shows) and, after the show-delay, reveals the tooltip
+    /// if the pointer is still on this same link.
+    fn arm_link_preview(&mut self, url: String, anchor: Point<Pixels>, cx: &mut Context<Self>) {
+        // Re-entering the same link (crossing a wrap seam) just marks it hovered
+        // again — the fetch + show-delay are already running, so don't restart.
+        if let Some(p) = self.link_preview.as_mut().filter(|p| p.url == url) {
+            p.hovering = true;
+            p.anchor = anchor;
+            return;
+        }
+        self.link_preview_gen += 1;
+        let gen = self.link_preview_gen;
+        self.link_preview = Some(LinkPreviewHover {
+            url: url.clone(),
+            anchor,
+            shown: false,
+            hovering: true,
+        });
+
+        // Start the fetch; a completion wakes this view to repaint (render peeks
+        // the cache directly, so the returned state is unused here). If already
+        // resolved no wake comes, but the show-delay below still repaints.
+        let (tx, rx) = smol::channel::bounded::<String>(1);
+        crate::preview::lookup(&url, &self.controller.runtime(), tx);
+        cx.spawn(async move |this, cx| {
+            if rx.recv().await.is_ok() {
+                let _ = this.update(cx, |this, cx| {
+                    if this.link_preview.as_ref().is_some_and(|p| p.url == url) {
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+
+        // Reveal the card after the show-delay if this arm is still current.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(LINK_PREVIEW_SHOW_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.link_preview_gen == gen {
+                    if let Some(p) = &mut this.link_preview {
+                        p.shown = true;
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Marks the preview un-hovered and, after the hide-grace, clears it unless
+    /// the pointer returned to the link meanwhile (re-checked via `hovering` at
+    /// fire time, so crossing a wrapped link's seam doesn't dismiss it).
+    fn disarm_link_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = self.link_preview.as_mut() else {
+            return;
+        };
+        p.hovering = false;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(LINK_PREVIEW_HIDE_GRACE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.link_preview.as_ref().is_some_and(|p| !p.hovering) {
+                    this.link_preview = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Kicks off the inline preview fetch for a newly-arrived message, when inline
+    /// mode is on and it has a previewable link. The card renders a fixed-height
+    /// skeleton immediately (so the row doesn't jump), then fills in when the
+    /// fetch lands — a repaint suffices on success (same height); a *failed* fetch
+    /// collapses the card, so that re-measures the log.
+    fn arm_inline_preview(&self, msg: &Message, cx: &mut Context<Self>) {
+        if crate::settings::link_preview_mode() != crate::settings::LinkPreviewMode::Inline {
+            return;
+        }
+        let Some(url) = crate::preview::first_previewable_url(msg) else {
+            return;
+        };
+        let (tx, rx) = smol::channel::bounded::<String>(1);
+        // Only spawns a fetch if the URL isn't already cached/in-flight.
+        crate::preview::lookup(&url, &self.controller.runtime(), tx);
+        cx.spawn(async move |this, cx| {
+            if let Ok(done_url) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| {
+                    // A failed fetch collapses the card (height change → re-measure);
+                    // a ready one is the same height as the skeleton (repaint only).
+                    if matches!(
+                        crate::preview::peek(&done_url),
+                        crate::preview::PreviewState::None
+                    ) {
+                        this.remeasure(cx);
+                    } else {
+                        this.refresh_log(cx);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Arms inline-preview fetches for every message currently in the buffer —
+    /// used when the user switches *to* Inline mode, so already-shown messages
+    /// with links get their cards (later messages are armed on append). Cheap
+    /// when nothing has a previewable link (URL matching only), and the cache
+    /// dedupes so a link posted many times fetches once.
+    pub(crate) fn arm_buffered_inline_previews(&self, cx: &mut Context<Self>) {
+        let msgs: Vec<std::sync::Arc<Message>> = self
+            .channel
+            .read(cx)
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Message { msg } => Some(msg.clone()),
+                _ => None,
+            })
+            .collect();
+        for msg in msgs {
+            self.arm_inline_preview(&msg, cx);
+        }
+    }
+
     /// This chatter's recent messages in the current feed (oldest first), capped
     /// to the most recent [`USERCARD_MESSAGES`]. Matched by lowercased login.
     /// Live messages only — the `historical` backlog fetched at join is skipped.
@@ -4279,10 +4469,195 @@ impl ChatView {
         row.into_any_element()
     }
 
+    /// The hover link-preview tooltip: a small card with the video thumbnail,
+    /// title, channel, and view count, anchored near the hovered link. `None`
+    /// unless a preview is armed and its show-delay elapsed; a still-loading
+    /// fetch shows a compact "Loading…" card so the hover feels responsive.
+    /// Passive (no click backdrop, non-occluding) — a tooltip dismissed by
+    /// moving off the link.
+    fn render_link_preview(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let hover = self.link_preview.as_ref()?;
+        if !hover.shown {
+            return None;
+        }
+        #[allow(clippy::type_complexity)]
+        let (title, author, stats, byline, thumbnail): (
+            SharedString,
+            SharedString,
+            SharedString,
+            SharedString,
+            Option<SharedString>,
+        ) = match crate::preview::peek(&hover.url) {
+            crate::preview::PreviewState::Ready(p) => (
+                SharedString::from(p.title.clone()),
+                SharedString::from(p.author.clone()),
+                SharedString::from(p.stats.clone().unwrap_or_default()),
+                SharedString::from(p.byline.clone().unwrap_or_default()),
+                // Streamer mode can hide the thumbnail (it can reveal what a link
+                // points at on stream); the rest of the card still shows.
+                if crate::settings::hide_preview_thumbnails() {
+                    None
+                } else {
+                    p.thumbnail_url.clone().map(SharedString::from)
+                },
+            ),
+            crate::preview::PreviewState::Loading => (
+                SharedString::from("Loading preview…"),
+                SharedString::default(),
+                SharedString::default(),
+                SharedString::default(),
+                None,
+            ),
+            // The fetch failed (or turned out unsupported) — show nothing.
+            crate::preview::PreviewState::None => return None,
+        };
+
+        let viewport = window.viewport_size();
+        const CARD_W: f32 = 240.;
+        const GAP: f32 = 10.;
+        let thumb_h = if thumbnail.is_some() { CARD_W * 9. / 16. } else { 0. };
+        // The muted meta pieces: "channel · views" and the clip's "Clipped by X".
+        let channel_views = [author, stats]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        // Decide whether the byline fits on the *same* line as channel/views: if so
+        // it joins with a "·" separator; if not it goes on its own line with no
+        // separator (nothing to separate). Static flex can't detect a wrap, so we
+        // estimate the one-line width (~5.5px per char at 11px) against the card's
+        // inner width. `meta_two_lines` then drives both the layout and the height.
+        let one_line = if channel_views.is_empty() {
+            byline.to_string()
+        } else if byline.is_empty() {
+            channel_views.clone()
+        } else {
+            format!("{channel_views} · {byline}")
+        };
+        let has_meta = !one_line.is_empty();
+        const META_INNER_W: f32 = CARD_W - 12.; // minus p_1p5 left+right
+        let meta_two_lines =
+            !channel_views.is_empty() && !byline.is_empty() && one_line.chars().count() as f32 * 5.5 > META_INNER_W;
+        // The card is top-anchored (grows downward), so the above-the-link gap
+        // depends on estimating its height. Budget two title lines; the meta is one
+        // or two lines by the decision above. An over-estimate only lifts the card
+        // slightly higher — harmless — while an under-estimate would let the real
+        // bottom overlap the link.
+        let title_h = 40.; // up to two title lines
+        let meta_h = if !has_meta {
+            0.
+        } else if meta_two_lines {
+            32.
+        } else {
+            16.
+        };
+        let children = 1 + u32::from(thumbnail.is_some()) + u32::from(has_meta);
+        let card_h = 12. // p_1p5 top+bottom
+            + 4. * children.saturating_sub(1) as f32 // gap_1 between children
+            + thumb_h
+            + title_h
+            + meta_h;
+
+        let vw = f32::from(viewport.width);
+        let vh = f32::from(viewport.height);
+        let anchor_x = f32::from(hover.anchor.x);
+        let anchor_y = f32::from(hover.anchor.y);
+        // Center the card horizontally on the pointer, clamped to the viewport.
+        let x = (anchor_x - CARD_W / 2.).min(vw - CARD_W - 8.).max(8.);
+        // The pointer sits mid-glyph, so the link occupies roughly half a chat
+        // line above and below `anchor_y`. Prefer the card above the link (its
+        // bottom GAP px above the link's top); flip below only when it won't fit.
+        let half_line = self.font_size * 0.9;
+        let link_top = anchor_y - half_line;
+        let link_bottom = anchor_y + half_line;
+        let top = if link_top - GAP - card_h >= 8. {
+            link_top - GAP - card_h
+        } else {
+            (link_bottom + GAP).min(vh - card_h - 8.).max(8.)
+        };
+        // `top`/`x` are window coords (like `anchor`), but the overlay layer's
+        // local origin sits below the window top — gpui offsets an `absolute`
+        // overlay that's a flow child of the non-`relative` root by the chrome
+        // stacked above it. Subtract that measured offset (see
+        // `link_preview_offset`) so the card lands where `anchor` says.
+        let offset = self.link_preview_offset.get();
+        let local_top = top - f32::from(offset.y);
+        let local_x = x - f32::from(offset.x);
+
+        let mut card = v_flex()
+            .absolute()
+            .left(px(local_x))
+            .top(px(local_top))
+            .w(px(CARD_W))
+            .p_1p5()
+            .gap_1()
+            .bg(cx.theme().popover)
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded_lg()
+            .shadow_lg()
+            .text_color(cx.theme().popover_foreground);
+        // The thumbnail is a static image (not animated) → plain img().
+        if let Some(thumb) = thumbnail {
+            card = card.child(
+                img(thumb)
+                    .w_full()
+                    .h(px(thumb_h))
+                    .rounded_md()
+                    .object_fit(gpui::ObjectFit::Cover),
+            );
+        }
+        card = card.child(
+            div()
+                .font_weight(FontWeight::MEDIUM)
+                .text_size(px(13.))
+                .line_height(px(16.))
+                .child(title),
+        );
+        if has_meta {
+            let muted = cx.theme().muted_foreground;
+            let meta_line = |text: SharedString| {
+                div().text_size(px(11.)).text_color(muted).child(text)
+            };
+            if meta_two_lines {
+                // Doesn't fit on one line → "channel · views" then "Clipped by X"
+                // on its own line, with no separator between them.
+                card = card.child(meta_line(SharedString::from(channel_views)));
+                card = card.child(meta_line(byline));
+            } else {
+                // Fits on one line → a single "channel · views · Clipped by X".
+                card = card.child(meta_line(SharedString::from(one_line)));
+            }
+        }
+
+        Some(gpui::deferred(div().absolute().inset_0().child(card)).into_any_element())
+    }
+
+    /// A zero-cost element that continuously records the overlay layer's
+    /// window-space origin into [`link_preview_offset`]. Rendered *unconditionally*
+    /// (see [`render`](Self::render)) so the offset is always warm — otherwise the
+    /// first preview would paint one frame at the wrong spot (offset still `(0,0)`)
+    /// before the measure landed. Matches the `inset_0` layer the card renders in.
+    fn link_preview_probe(&self) -> gpui::AnyElement {
+        let offset_cell = self.link_preview_offset.clone();
+        div()
+            .absolute()
+            .inset_0()
+            .child(
+                gpui::canvas(move |b, _, _| offset_cell.set(b.origin), |_, _, _, _| ())
+                    .absolute()
+                    .size_full(),
+            )
+            .into_any_element()
+    }
+
     /// The emote-info popup overlay when one is open, else `None`. A transparent
     /// full-window backdrop (behind the card) closes it on any outside click; the
-    /// card itself is `occlude`d so clicking it doesn't close it. The card is
-    /// anchored at the click position, clamped to stay within the window.
+    /// card itself is `occlude`d so clicking it doesn't close it.
     fn render_emote_popup(
         &self,
         window: &Window,
@@ -4875,6 +5250,7 @@ impl Render for ChatView {
         }
 
         let emote_popup_overlay = self.render_emote_popup(window, cx);
+        let link_preview_overlay = self.render_link_preview(window, cx);
 
         let layout_grid = self.render_layout_grid(cx);
 
@@ -4888,6 +5264,11 @@ impl Render for ChatView {
             .children(self.render_status_bar(cx))
             .child(layout_grid)
             .children(emote_popup_overlay)
+            // Always-on probe keeps the preview offset warm so the first tooltip
+            // paints in the right place (no one-frame flash); the card overlay
+            // only renders when a preview is showing.
+            .child(self.link_preview_probe())
+            .children(link_preview_overlay)
     }
 }
 
