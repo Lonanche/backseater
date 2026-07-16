@@ -26,11 +26,28 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
   (Appearance, off by default).
 - A mod-only "Mod card ↗" link in the Twitch usercard opens twitch.tv's moderator
   viewer card for that user, and "Open profile" is renamed "Channel".
+- Joining a Twitch channel now backfills up to 800 recent lines (Chatterino's
+  depth), including replayed subs, raids, and announcements as faded event rows,
+  with day dividers marking where a new calendar day starts. Reconnects on both
+  Twitch and Kick backfill the messages missed while disconnected.
+- The chat-mode bar now shows Kick's chat restrictions too (emote-only,
+  sub-only, slow, followers-only), updating live as moderators toggle them.
 
 ### Fixes
 
 - YouTube standard emoji now show as the emoji character instead of leaking the
   raw `:shortcut:` text.
+- Two tabs sharing the same Twitch channel — or editing a tab's Kick/YouTube
+  channel while keeping its Twitch one — no longer silently stop that channel's
+  Twitch chat.
+- Chatters who never picked a name color get their stable Twitch-assigned color
+  instead of one shared default, badges no longer vanish for the whole session
+  when a badge fetch hiccups, and 7TV name paints apply to the join backlog.
+- The events panel no longer shows a stray sub badge next to a sub's attached
+  message, and `/slow` explains Twitch's 3–120 second range instead of
+  surfacing a raw API error.
+- Smoother long sessions: the mentions and events panels no longer rescan the
+  whole chat buffer every frame.
 
 ## v0.4.5
 
