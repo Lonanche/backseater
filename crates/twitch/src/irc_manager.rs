@@ -13,9 +13,13 @@
 //! logged-in user), a **shared read client** and — when authenticated — a
 //! **shared write client**. Tabs [`register`] a `(channel, sink)` and get back an
 //! [`Registration`] guard; the manager JOINs the channel on the read socket and
-//! routes each incoming message to the owning tab's sink by `#channel`. Dropping
-//! the guard PARTs the channel. Sends and replies for a channel are handed to the
-//! write client, which also echoes our own message back (Twitch doesn't).
+//! routes each incoming message to the registered sinks by `#channel`. A channel
+//! can hold **several sinks at once** (two channel models sharing one Twitch
+//! channel under different channel-set keys, or an old connection overlapping
+//! its replacement during a tab edit) — each registration has a unique id, so a
+//! guard's drop removes exactly its own sink, and the channel is only PARTed
+//! when its last sink unregisters. Sends and replies for a channel are handed to
+//! the write client, which also echoes our own message back (Twitch doesn't).
 //!
 //! A background [`socket_task`] runs the connection(s), reconnecting with backoff.
 //! On each fresh session it re-JOINs every registered channel through a
@@ -48,11 +52,16 @@ const JOIN_RATELIMIT_COOLDOWN: std::time::Duration = std::time::Duration::from_m
 
 /// Commands the socket task reacts to.
 enum Command {
-    /// Add a channel: JOIN it (on the live session, if any) and route its
-    /// messages into `sink`.
-    Register { channel: String, sink: ChatSink },
-    /// Remove a channel: PART it and stop routing.
-    Unregister { channel: String },
+    /// Add a registration: JOIN the channel (on the live session, if any, unless
+    /// already joined) and route its messages into `sink` alongside any other
+    /// sinks the channel has.
+    Register {
+        channel: String,
+        id: u64,
+        sink: ChatSink,
+    },
+    /// Remove one registration by id; PART the channel once no sinks remain.
+    Unregister { channel: String, id: u64 },
     /// Send a message (or reply) to a channel via the write client. The read
     /// connection delivers it back as a real PRIVMSG, so no local echo is made.
     Send {
@@ -63,9 +72,12 @@ enum Command {
 }
 
 /// A live channel registration on the shared IRC connection. The channel stays
-/// joined as long as this guard lives; dropping it PARTs the channel.
+/// joined as long as this guard lives; dropping it removes this registration's
+/// sink (identified by `id` — never another registration of the same channel)
+/// and PARTs the channel once no sinks remain.
 pub struct Registration {
     channel: String,
+    id: u64,
     manager: Arc<ManagerInner>,
 }
 
@@ -73,6 +85,7 @@ impl Drop for Registration {
     fn drop(&mut self) {
         self.manager.send(Command::Unregister {
             channel: std::mem::take(&mut self.channel),
+            id: self.id,
         });
     }
 }
@@ -159,32 +172,141 @@ pub fn register(auth: Option<TwitchAuth>, channel: String, sink: ChatSink) -> Re
         }
     }
 
+    // Process-unique, so an old guard's deferred drop (its connection winding
+    // down after a rebind or tab edit) can never unregister a successor's
+    // registration of the same channel.
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     manager.send(Command::Register {
         channel: channel.clone(),
+        id,
         sink,
     });
 
     Registration {
         channel,
+        id,
         manager: manager.clone(),
     }
 }
 
-/// One channel's routing state on the shared connection.
-struct Channel {
+/// One registration's routing state: its sink plus the per-connection flags
+/// that used to live on the channel (each sink is one channel model's stream,
+/// so each needs its own `ChannelMeta`/modes handshake).
+struct SinkState {
     sink: ChatSink,
-    /// Whether we've emitted this channel's `ChannelMeta` yet (from ROOMSTATE or
-    /// the first PRIVMSG) — so a reconnect's fresh ROOMSTATE doesn't re-emit it
-    /// (which would re-fetch emotes/badges + re-run history).
+    /// Whether this sink has received the channel's `ChannelMeta` yet (from
+    /// ROOMSTATE, the first PRIVMSG, or the cached id on a late attach) — so a
+    /// reconnect's fresh ROOMSTATE doesn't re-emit it (which would re-fetch
+    /// emotes/badges + re-run history).
     channel_meta_sent: bool,
-    /// The channel's current chat-restriction modes, merged from (partial)
-    /// ROOMSTATEs so each emitted `ChatEvent::ChatModes` is a full snapshot.
-    modes: ChatModes,
-    /// Whether this session has emitted a modes snapshot yet. The first
+    /// Whether this sink has received a modes snapshot this session. The first
     /// ROOMSTATE of a session always emits (even if nothing differs from our
     /// merged state) so a mode toggled while we were disconnected can't leave
     /// the UI stale; after that only real changes emit.
     modes_synced: bool,
+}
+
+impl SinkState {
+    fn new(sink: ChatSink) -> Self {
+        Self {
+            sink,
+            channel_meta_sent: false,
+            modes_synced: false,
+        }
+    }
+}
+
+/// One channel's routing state on the shared connection: every registered sink
+/// (keyed by registration id) plus the channel-level facts they share.
+struct Channel {
+    sinks: HashMap<u64, SinkState>,
+    /// The channel's numeric room id, learned from the first ROOMSTATE/PRIVMSG
+    /// and kept across reconnects (it's stable). Lets a sink that registers onto
+    /// an *already joined* channel get its `ChannelMeta` immediately — no fresh
+    /// ROOMSTATE arrives without a re-JOIN.
+    channel_id: Option<String>,
+    /// The channel's current chat-restriction modes, merged from (partial)
+    /// ROOMSTATEs so each emitted `ChatEvent::ChatModes` is a full snapshot.
+    modes: ChatModes,
+}
+
+impl Channel {
+    fn new(id: u64, sink: ChatSink) -> Self {
+        Self {
+            sinks: HashMap::from([(id, SinkState::new(sink))]),
+            channel_id: None,
+            modes: ChatModes::default(),
+        }
+    }
+}
+
+/// Adds a registration's sink to the channel map, returning whether this
+/// *created* the channel entry (i.e. a live session must JOIN it). Shared by the
+/// in-session Register arm and the backoff-sleep command drain.
+fn add_sink(
+    channels: &mut HashMap<String, Channel>,
+    channel: String,
+    id: u64,
+    sink: ChatSink,
+) -> bool {
+    use std::collections::hash_map::Entry;
+    match channels.entry(channel) {
+        Entry::Occupied(mut e) => {
+            e.get_mut().sinks.insert(id, SinkState::new(sink));
+            false
+        }
+        Entry::Vacant(e) => {
+            e.insert(Channel::new(id, sink));
+            true
+        }
+    }
+}
+
+/// Removes a registration's sink by id, returning whether the channel entry is
+/// now gone (i.e. a live session should PART it). An unknown channel/id (a
+/// stale guard from a retired connection) is a no-op.
+fn remove_sink(channels: &mut HashMap<String, Channel>, channel: &str, id: u64) -> bool {
+    let Some(ch) = channels.get_mut(channel) else {
+        return false;
+    };
+    ch.sinks.remove(&id);
+    if ch.sinks.is_empty() {
+        channels.remove(channel);
+        true
+    } else {
+        false
+    }
+}
+
+/// Sends the channel's `ChannelMeta` to every sink that hasn't had one yet
+/// (no-op until the channel id is known).
+fn send_pending_meta(ch: &mut Channel, channel: &str) {
+    let Some(id) = &ch.channel_id else { return };
+    for s in ch.sinks.values_mut() {
+        if !s.channel_meta_sent {
+            s.channel_meta_sent = true;
+            let _ = s
+                .sink
+                .send(ChatEvent::Channel(build_channel_meta(channel, id)));
+        }
+    }
+}
+
+/// Fans one event out to every sink of a channel; the last send moves the event
+/// so the (common) single-sink case clones nothing.
+fn fan_out(ch: &Channel, event: ChatEvent) {
+    let mut event = Some(event);
+    let mut sinks = ch.sinks.values().peekable();
+    while let Some(s) = sinks.next() {
+        let payload = if sinks.peek().is_some() {
+            event.clone().expect("payload present until the last sink")
+        } else {
+            event.take().expect("payload present for the last sink")
+        };
+        let _ = s.sink.send(payload);
+    }
 }
 
 /// A leaky-bucket rate limiter for JOINs (budget tokens per cooldown
@@ -237,10 +359,12 @@ async fn socket_task(auth: Option<TwitchAuth>, mut commands: mpsc::UnboundedRece
         let started = std::time::Instant::now();
         let outcome = run_session(&auth, &mut channels, &mut commands).await;
         // A reconnect re-JOINs and re-observes ROOMSTATE, so reset the per-session
-        // flag (but keep the channels + sinks).
+        // flags (but keep the channels + sinks + cached channel ids).
         for ch in channels.values_mut() {
-            ch.channel_meta_sent = false;
-            ch.modes_synced = false;
+            for s in ch.sinks.values_mut() {
+                s.channel_meta_sent = false;
+                s.modes_synced = false;
+            }
         }
         match outcome {
             SessionOutcome::Shutdown => break, // command sender dropped — task retired
@@ -256,15 +380,17 @@ async fn socket_task(auth: Option<TwitchAuth>, mut commands: mpsc::UnboundedRece
                 // fill chat with error rows.
                 if attempt == 0 {
                     for ch in channels.values() {
-                        let _ = ch.sink.send(ChatEvent::Error(format!(
-                            "twitch error: {err:#} — reconnecting in {}s",
-                            delay.as_secs()
-                        )));
+                        for s in ch.sinks.values() {
+                            let _ = s.sink.send(ChatEvent::Error(format!(
+                                "twitch error: {err:#} — reconnecting in {}s",
+                                delay.as_secs()
+                            )));
+                        }
                     }
                 } else {
                     tracing::warn!("twitch reconnect attempt {attempt} failed: {err:#}");
                 }
-                if sleep_or_shutdown(delay, &mut commands).await {
+                if sleep_or_shutdown(delay, &mut channels, &mut commands).await {
                     break;
                 }
                 attempt += 1;
@@ -319,19 +445,31 @@ async fn run_session(
             biased;
             cmd = commands.recv() => match cmd {
                 None => return SessionOutcome::Shutdown,
-                Some(Command::Register { channel, sink }) => {
-                    channels.insert(channel.clone(), Channel {
-                        sink,
-                        channel_meta_sent: false,
-                        modes: ChatModes::default(),
-                        modes_synced: false,
-                    });
-                    if let Err(err) = join_channel(&mut read, &channel, &mut join_bucket).await {
-                        return SessionOutcome::Transient(err);
+                Some(Command::Register { channel, id, sink }) => {
+                    if add_sink(channels, channel.clone(), id, sink) {
+                        if let Err(err) = join_channel(&mut read, &channel, &mut join_bucket).await {
+                            return SessionOutcome::Transient(err);
+                        }
+                    } else if let Some(ch) = channels.get_mut(&channel) {
+                        // The channel is already joined, so no fresh ROOMSTATE
+                        // will arrive for this sink — hand it the cached
+                        // identity + modes snapshot directly (the id is stable
+                        // across sessions; on the rare attach before the first
+                        // ROOMSTATE it just waits for that like the first sink).
+                        if ch.channel_id.is_some() {
+                            send_pending_meta(ch, &channel);
+                            if let Some(s) = ch.sinks.get_mut(&id) {
+                                s.modes_synced = true;
+                                let _ = s.sink.send(ChatEvent::ChatModes {
+                                    platform: Platform::Twitch,
+                                    modes: ch.modes,
+                                });
+                            }
+                        }
                     }
                 }
-                Some(Command::Unregister { channel }) => {
-                    if channels.remove(&channel).is_some() {
+                Some(Command::Unregister { channel, id }) => {
+                    if remove_sink(channels, &channel, id) {
                         let part = format!("PART {channel}\r\n");
                         let _ = read.send_raw(part.as_str()).await;
                     }
@@ -420,58 +558,57 @@ async fn handle_read(
         tmi::Message::RoomState(rs) => {
             let key = channel_key(rs.channel());
             if let Some(ch) = channels.get_mut(&key) {
-                if !ch.channel_meta_sent {
-                    ch.channel_meta_sent = true;
-                    let _ = ch.sink.send(ChatEvent::Channel(build_channel_meta(
-                        rs.channel(),
-                        rs.channel_id(),
-                    )));
-                }
-                if merge_roomstate(&mut ch.modes, &rs) || !ch.modes_synced {
-                    ch.modes_synced = true;
-                    let _ = ch.sink.send(ChatEvent::ChatModes {
-                        platform: Platform::Twitch,
-                        modes: ch.modes,
-                    });
+                ch.channel_id = Some(rs.channel_id().to_string());
+                send_pending_meta(ch, rs.channel());
+                let changed = merge_roomstate(&mut ch.modes, &rs);
+                for s in ch.sinks.values_mut() {
+                    if changed || !s.modes_synced {
+                        s.modes_synced = true;
+                        let _ = s.sink.send(ChatEvent::ChatModes {
+                            platform: Platform::Twitch,
+                            modes: ch.modes,
+                        });
+                    }
                 }
             }
         }
         tmi::Message::Privmsg(pm) => {
             let key = channel_key(pm.channel());
             if let Some(ch) = channels.get_mut(&key) {
-                if !ch.channel_meta_sent {
-                    ch.channel_meta_sent = true;
-                    let _ = ch.sink.send(ChatEvent::Channel(build_channel_meta(
-                        pm.channel(),
-                        pm.channel_id(),
-                    )));
-                }
+                ch.channel_id = Some(pm.channel_id().to_string());
+                send_pending_meta(ch, pm.channel());
                 let first_message = msg.tag(tmi::Tag::FirstMsg) == Some("1");
                 let message = privmsg_to_message(pm.channel(), &pm, first_message);
-                let _ = ch.sink.send(ChatEvent::Message(Box::new(message)));
+                fan_out(ch, ChatEvent::Message(Box::new(message)));
             }
         }
         tmi::Message::UserState(us) => {
             if let Some(ch) = channels.get(&channel_key(us.channel())) {
                 let state = SelfState::from_userstate(&us);
-                let _ = ch.sink.send(ChatEvent::ModStatus {
-                    platform: Platform::Twitch,
-                    is_mod: state.is_moderator(),
-                    is_broadcaster: state.is_broadcaster(),
-                });
+                fan_out(
+                    ch,
+                    ChatEvent::ModStatus {
+                        platform: Platform::Twitch,
+                        is_mod: state.is_moderator(),
+                        is_broadcaster: state.is_broadcaster(),
+                    },
+                );
             }
         }
         tmi::Message::ClearChat(cc) => {
             if let Some(ch) = channels.get(&channel_key(cc.channel())) {
-                let _ = ch.sink.send(clearchat_event(&cc, false));
+                fan_out(ch, clearchat_event(&cc, false));
             }
         }
         tmi::Message::ClearMsg(cm) => {
             if let Some(ch) = channels.get(&channel_key(cm.channel())) {
-                let _ = ch.sink.send(ChatEvent::DeleteMessage {
-                    platform: Platform::Twitch,
-                    message_id: cm.target_message_id().to_string(),
-                });
+                fan_out(
+                    ch,
+                    ChatEvent::DeleteMessage {
+                        platform: Platform::Twitch,
+                        message_id: cm.target_message_id().to_string(),
+                    },
+                );
             }
         }
         tmi::Message::UserNotice(un) => {
@@ -482,7 +619,7 @@ async fn handle_read(
                     .tag(tmi::Tag::from("msg-param-value"))
                     .and_then(|v| v.parse().ok());
                 if let Some(event) = usernotice_event(&un, milestone_value) {
-                    let _ = ch.sink.send(event);
+                    fan_out(ch, event);
                 }
             }
         }
@@ -542,9 +679,7 @@ async fn send_message(
     }
     if let Err(err) = pm.send().await {
         // The user's message didn't go out — show it, don't log it.
-        let _ = ch
-            .sink
-            .send(ChatEvent::Error(format!("twitch send failed: {err}")));
+        fan_out(ch, ChatEvent::Error(format!("twitch send failed: {err}")));
     }
 }
 
@@ -583,13 +718,40 @@ fn channel_key(channel: &str) -> String {
 
 /// Sleeps for `dur` but wakes early (returning `true`) if the command channel
 /// closes meanwhile, so a retired task doesn't dawdle in a backoff sleep.
+/// Commands arriving during the sleep are **applied to the channel map**, not
+/// discarded (the old version dropped them: a tab registered during a backoff
+/// was never joined, and a dropped Unregister leaked its sink + JOIN forever) —
+/// the upcoming session JOINs everything registered, so no join happens here.
+/// A `Send` has no connection to go out on; its channel's sinks get the error.
 async fn sleep_or_shutdown(
     dur: std::time::Duration,
+    channels: &mut HashMap<String, Channel>,
     commands: &mut mpsc::UnboundedReceiver<Command>,
 ) -> bool {
-    tokio::select! {
-        _ = tokio::time::sleep(dur) => false,
-        cmd = commands.recv() => cmd.is_none(),
+    let deadline = tokio::time::Instant::now() + dur;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => return false,
+            cmd = commands.recv() => match cmd {
+                None => return true,
+                Some(Command::Register { channel, id, sink }) => {
+                    add_sink(channels, channel, id, sink);
+                }
+                Some(Command::Unregister { channel, id }) => {
+                    remove_sink(channels, &channel, id);
+                }
+                Some(Command::Send { channel, .. }) => {
+                    if let Some(ch) = channels.get(&channel_key(&channel)) {
+                        fan_out(
+                            ch,
+                            ChatEvent::Error(
+                                "twitch send failed: not connected (reconnecting)".to_string(),
+                            ),
+                        );
+                    }
+                }
+            },
+        }
     }
 }
 
@@ -653,5 +815,59 @@ mod tests {
             &roomstate("emote-only=0;followers-only=-1;r9k=0;slow=0;subs-only=0"),
         ));
         assert!(!modes.any());
+    }
+
+    #[test]
+    fn same_channel_registrations_coexist_and_unregister_independently() {
+        // Two channel models can share one Twitch channel under different
+        // channel-set keys (or overlap during a tab edit); the second register
+        // must not clobber the first's sink, and an unregister must remove only
+        // its own registration — the old channel-keyed map killed the survivor.
+        let mut channels: HashMap<String, Channel> = HashMap::new();
+        let (tx_a, mut rx_a) = mpsc::unbounded_channel();
+        let (tx_b, mut rx_b) = mpsc::unbounded_channel();
+        assert!(add_sink(&mut channels, "#chan".into(), 1, tx_a));
+        assert!(!add_sink(&mut channels, "#chan".into(), 2, tx_b));
+
+        // Both sinks receive fan-outs.
+        let ch = channels.get("#chan").unwrap();
+        fan_out(ch, ChatEvent::Notice("hi".into()));
+        assert!(matches!(rx_a.try_recv(), Ok(ChatEvent::Notice(_))));
+        assert!(matches!(rx_b.try_recv(), Ok(ChatEvent::Notice(_))));
+
+        // A stale guard's unregister (unknown id) is a no-op; removing one
+        // registration keeps the channel; removing the last one drops it.
+        assert!(!remove_sink(&mut channels, "#chan", 99));
+        assert!(!remove_sink(&mut channels, "#chan", 1));
+        assert!(channels.contains_key("#chan"));
+        assert!(remove_sink(&mut channels, "#chan", 2));
+        assert!(!channels.contains_key("#chan"));
+    }
+
+    #[test]
+    fn pending_meta_goes_only_to_sinks_that_lack_it() {
+        let (tx_a, mut rx_a) = mpsc::unbounded_channel();
+        let (tx_b, mut rx_b) = mpsc::unbounded_channel();
+        let mut ch = Channel::new(1, tx_a);
+        ch.sinks.insert(2, SinkState::new(tx_b));
+
+        // No channel id yet → nothing to send.
+        send_pending_meta(&mut ch, "#chan");
+        assert!(rx_a.try_recv().is_err());
+
+        ch.channel_id = Some("12345".to_string());
+        ch.sinks.get_mut(&1).unwrap().channel_meta_sent = true;
+        send_pending_meta(&mut ch, "#chan");
+        // Sink 1 already had its meta; only sink 2 gets one (exactly once).
+        assert!(rx_a.try_recv().is_err());
+        match rx_b.try_recv() {
+            Ok(ChatEvent::Channel(meta)) => {
+                assert_eq!(meta.id, "12345");
+                assert_eq!(meta.name, "chan");
+            }
+            other => panic!("expected ChannelMeta, got {other:?}"),
+        }
+        send_pending_meta(&mut ch, "#chan");
+        assert!(rx_b.try_recv().is_err());
     }
 }

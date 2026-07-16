@@ -45,13 +45,20 @@ impl ChatSource for KickSource {
 
         // A failed connection (network drop, Pusher hiccup) is retried with
         // capped exponential backoff instead of leaving the tab dead. The task
-        // ends when the UI drops the receiver. History is fetched only on the
-        // first attempt — a reconnect re-fetching it would duplicate the backlog.
+        // ends when the UI drops the receiver. The first attempt fetches the
+        // full history backlog; reconnects gap-fill just the disconnect window
+        // (bounded by `last_seen`, parsed as live — see `run_client`).
         tokio::spawn(async move {
             let mut attempt: u32 = 0;
+            let mut first_attempt = true;
+            // When the last chat message arrived — the `after` bound for a
+            // reconnect's gap-fill (everything since was missed).
+            let mut last_seen = chrono::Utc::now();
             loop {
                 let started = std::time::Instant::now();
-                let result = run_client(channel.clone(), tx.clone(), attempt == 0).await;
+                let result =
+                    run_client(channel.clone(), tx.clone(), first_attempt, &mut last_seen).await;
+                first_attempt = false;
                 if tx.is_closed() {
                     break; // tab gone — no retry
                 }
@@ -168,7 +175,15 @@ struct PendingSubMessage {
     user_id: u64,
     username: String,
     text: String,
+    /// When it was buffered — entries older than [`PENDING_SUB_WINDOW`] are
+    /// dropped on the next insert (an unpaired leftover would otherwise sit in
+    /// the map for the connection's lifetime).
+    at: std::time::Instant,
 }
+
+/// How long a buffered resub message waits for its paired `SubscriptionEvent`
+/// (they arrive a beat apart; a minute is generous).
+const PENDING_SUB_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// `GiftedSubscriptionsEvent` data: `gifter_username` gifted to
 /// `gifted_usernames`, having gifted `gifter_total` in the channel overall.
@@ -318,9 +333,16 @@ fn ensure_crypto_provider() {
 
 /// One connection attempt: resolve the channel, subscribe over Pusher, pump
 /// events until the socket dies (`Err`, retried by the caller) or closes/the
-/// tab is gone (`Ok`). `fetch_history` is true only on the first attempt — the
-/// backlog would duplicate if a reconnect replayed it.
-async fn run_client(channel: String, tx: ChatSink, fetch_history: bool) -> anyhow::Result<()> {
+/// tab is gone (`Ok`). The first attempt (`first_attempt`) fetches the full
+/// history backlog (faded, `historical`); reconnects instead gap-fill the
+/// disconnect window from `last_seen`, parsed as live. `last_seen` is updated
+/// as chat messages arrive so the caller can bound the next gap.
+async fn run_client(
+    channel: String,
+    tx: ChatSink,
+    first_attempt: bool,
+    last_seen: &mut chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<()> {
     ensure_crypto_provider();
 
     let info = api::fetch_channel_info(&channel)
@@ -405,16 +427,27 @@ async fn run_client(channel: String, tx: ChatSink, fetch_history: bool) -> anyho
     // DeletedEvent`.
 
     // Kick's Pusher feed sends no backlog, so fetch recent history (direct from
-    // Kick) and replay it as faded messages. Run it in its own task so the
+    // Kick) and replay it as faded messages — or, on a reconnect, gap-fill just
+    // the disconnect window as *live* messages. Run it in its own task so the
     // round-trip doesn't delay the live read loop below — the UI sorts `historical`
     // messages ahead of live ones by timestamp, so order across the two is fine.
     // The `Channel` event was already sent above (the bridge has loaded emotes).
-    if fetch_history {
+    {
         let (tx, channel) = (tx.clone(), channel.clone());
         let sub_badges = info.subscriber_badges.clone();
         let channel_id = info.channel_id;
+        // Reconnect gap-fill bound: everything since the last seen message,
+        // with a margin absorbing clock skew between Kick's message timestamps
+        // and our receive clock (the store's row-key dedupe eats the overlap).
+        let gap_after = (!first_attempt).then(|| *last_seen - chrono::Duration::seconds(30));
         tokio::spawn(async move {
-            match crate::history::fetch_recent(&channel, channel_id, &sub_badges).await {
+            let events = match gap_after {
+                None => crate::history::fetch_recent(&channel, channel_id, &sub_badges).await,
+                Some(after) => {
+                    crate::history::fetch_gap(&channel, channel_id, &sub_badges, after).await
+                }
+            };
+            match events {
                 Ok(events) => {
                     for event in events {
                         if tx.send(event).is_err() {
@@ -506,6 +539,7 @@ async fn run_client(channel: String, tx: ChatSink, fetch_history: bool) -> anyho
                     continue;
                 };
                 let message = build_message(&channel, &info.subscriber_badges, chat);
+                *last_seen = chrono::Utc::now();
                 if tx.send(ChatEvent::Message(Box::new(message))).is_err() {
                     break; // UI dropped the stream.
                 }
@@ -689,12 +723,17 @@ async fn run_client(channel: String, tx: ChatSink, fetch_history: bool) -> anyho
                     let is_sub = ev.message.action.as_deref() == Some("subscribe");
                     let text = ev.message.optional_message.unwrap_or_default();
                     if is_sub && !text.trim().is_empty() {
+                        // Drop unpaired leftovers (a `SubscriptionEvent` that
+                        // never came) so the map can't grow for the connection's
+                        // lifetime.
+                        pending_sub_messages.retain(|_, p| p.at.elapsed() < PENDING_SUB_WINDOW);
                         pending_sub_messages.insert(
                             ev.user.username.to_lowercase(),
                             PendingSubMessage {
                                 user_id: ev.user.id,
                                 username: ev.user.username,
                                 text,
+                                at: std::time::Instant::now(),
                             },
                         );
                     }
@@ -1098,6 +1137,7 @@ mod tests {
                 user_id: ev.user.id,
                 username: ev.user.username,
                 text: ev.message.optional_message.unwrap(),
+                at: std::time::Instant::now(),
             },
         );
         assert_eq!(msg.author.display_name, "Alice");

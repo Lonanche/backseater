@@ -60,19 +60,18 @@ impl MentionMatcher {
         self.match_terms(text).any(|t| t.sound)
     }
 
-    /// All terms that appear as standalone words in `text`.
+    /// All terms that appear as standalone words in `text`. Allocation-free:
+    /// this runs per visible chat row per repaint (the log tints mentions at
+    /// render), so the word split is re-walked lazily per term instead of
+    /// collected into a `Vec` — with the typical one or two terms that's
+    /// strictly cheaper. `@` is not a word char, so `@name` already splits to
+    /// `name` with no trimming; empty split segments never equal a (non-empty)
+    /// term.
     fn match_terms<'a>(&'a self, text: &'a str) -> impl Iterator<Item = &'a Term> + 'a {
-        let words: Vec<&str> = if self.terms.is_empty() {
-            Vec::new()
-        } else {
+        self.terms.iter().filter(move |term| {
             text.split(|c: char| !is_word_char(c))
-                .map(|word| word.trim_start_matches('@'))
-                .filter(|word| !word.is_empty())
-                .collect()
-        };
-        self.terms
-            .iter()
-            .filter(move |term| words.iter().any(|w| w.eq_ignore_ascii_case(&term.text)))
+                .any(|word| word.eq_ignore_ascii_case(&term.text))
+        })
     }
 }
 

@@ -69,6 +69,34 @@ impl HistoryMessage {
     }
 }
 
+/// Fetches and parses the history payload (messages newest-first + the active
+/// pin) — the shared front half of [`fetch_recent`] and [`fetch_gap`].
+async fn fetch_data(channel: &str, channel_id: u64) -> anyhow::Result<HistoryData> {
+    let slug = crate::api::slugify(channel);
+    let channel_id = if channel_id != 0 {
+        channel_id
+    } else {
+        crate::api::fetch_history_channel_id(&slug).await?
+    };
+    let body = crate::api::fetch_history_body(channel_id).await?;
+    let resp: HistoryResponse =
+        serde_json::from_str(&body).map_err(|e| anyhow::anyhow!("parsing kick history: {e}"))?;
+    Ok(resp.data)
+}
+
+/// The chat messages of a history payload, oldest-first (Kick returns them
+/// newest-first), run through the same [`build_message`] as live chat.
+fn parse_messages<'a>(
+    data: Vec<HistoryMessage>,
+    channel: &'a str,
+    sub_badges: &'a [SubscriberBadge],
+) -> impl Iterator<Item = bks_core::Message> + 'a {
+    data.into_iter()
+        .rev()
+        .filter(|m| m.kind.is_empty() || m.kind == "message" || m.kind == "reply")
+        .map(move |m| build_message(channel, sub_badges, m.into_chat()))
+}
+
 /// Fetches recent chat history directly from Kick (via the emulated client),
 /// oldest-first, converted to [`ChatEvent::Message`]s flagged `historical`.
 /// `channel_id` is the history id (the v2 `chatroom.channel_id` from channel
@@ -81,26 +109,9 @@ pub async fn fetch_recent(
     channel_id: u64,
     sub_badges: &[SubscriberBadge],
 ) -> anyhow::Result<Vec<ChatEvent>> {
-    let slug = crate::api::slugify(channel);
-    let channel_id = if channel_id != 0 {
-        channel_id
-    } else {
-        crate::api::fetch_history_channel_id(&slug).await?
-    };
-    let body = crate::api::fetch_history_body(channel_id).await?;
-    let resp: HistoryResponse =
-        serde_json::from_str(&body).map_err(|e| anyhow::anyhow!("parsing kick history: {e}"))?;
-
-    // Kick returns history newest-first; reverse to oldest-first so it replays in
-    // chronological order (matching the live feed and Twitch history).
-    let mut events: Vec<ChatEvent> = resp
-        .data
-        .messages
-        .into_iter()
-        .rev()
-        .filter(|m| m.kind.is_empty() || m.kind == "message" || m.kind == "reply")
-        .map(|m| {
-            let mut msg = build_message(channel, sub_badges, m.into_chat());
+    let data = fetch_data(channel, channel_id).await?;
+    let mut events: Vec<ChatEvent> = parse_messages(data.messages, channel, sub_badges)
+        .map(|mut msg| {
             msg.historical = true;
             ChatEvent::Message(Box::new(msg))
         })
@@ -109,7 +120,31 @@ pub async fn fetch_recent(
     // The history payload carries the channel's active pin (there's no anonymous
     // pin GET endpoint), so seed the banner from it. Not `live`, so it stays until
     // an explicit `finish_at`/unpin — its original duration start is unknown.
-    if let Some(pin) = resp.data.pinned_message {
+    if let Some(pin) = data.pinned_message {
+        events.push(crate::connector::pin_event(channel, sub_badges, pin, false));
+    }
+    Ok(events)
+}
+
+/// A reconnect's gap-fill: the same history payload, but only messages newer
+/// than `after` (the disconnect window), parsed as **live** — missed messages
+/// should feed mentions/events/unread like they arrived on time, exactly like
+/// the Twitch reconnect gap-fill. The store's row-key dedupe eats any overlap
+/// with rows already shown, so the caller passes `after` with a safety margin.
+/// The payload's pin (when present) re-seeds the banner too — a pin created
+/// while disconnected would otherwise be missed until the next full join.
+pub async fn fetch_gap(
+    channel: &str,
+    channel_id: u64,
+    sub_badges: &[SubscriberBadge],
+    after: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<Vec<ChatEvent>> {
+    let data = fetch_data(channel, channel_id).await?;
+    let mut events: Vec<ChatEvent> = parse_messages(data.messages, channel, sub_badges)
+        .filter(|msg| msg.timestamp > after)
+        .map(|msg| ChatEvent::Message(Box::new(msg)))
+        .collect();
+    if let Some(pin) = data.pinned_message {
         events.push(crate::connector::pin_event(channel, sub_badges, pin, false));
     }
     Ok(events)

@@ -541,14 +541,8 @@ impl Controller {
             if !this.require_twitch_channel() {
                 return;
             }
-            let ch = &this.twitch_channel;
-            let result = match (role, grant) {
-                (Role::Moderator, true) => actions.add_moderator(ch, &user).await,
-                (Role::Moderator, false) => actions.remove_moderator(ch, &user).await,
-                (Role::Vip, true) => actions.add_vip(ch, &user).await,
-                (Role::Vip, false) => actions.remove_vip(ch, &user).await,
-            };
-            if let Err(err) = result {
+            if let Err(err) = apply_role(&actions, &this.twitch_channel, role, grant, &user).await
+            {
                 this.notice(format!("{err:#}"));
             }
         });
@@ -973,11 +967,15 @@ impl Controller {
             "slow" => match args.first() {
                 // Twitch web's default wait time.
                 None => self.twitch_cmd(target, &cmd, TwitchCmd::Slow(Some(30))),
+                // Pre-check Helix's 3–120s range so an out-of-range value gets
+                // the usage hint instead of a raw Helix 400 error row.
                 Some(arg) => match bks_core::parse_duration(arg)
                     .and_then(|secs| u32::try_from(secs).ok())
                 {
-                    Some(secs) => self.twitch_cmd(target, &cmd, TwitchCmd::Slow(Some(secs))),
-                    None => self.notice("usage: /slow [seconds — 3 to 120]"),
+                    Some(secs) if (3..=120).contains(&secs) => {
+                        self.twitch_cmd(target, &cmd, TwitchCmd::Slow(Some(secs)))
+                    }
+                    _ => self.notice("usage: /slow [seconds — 3 to 120]"),
                 },
             },
             "slowoff" => self.twitch_cmd(target, &cmd, TwitchCmd::Slow(None)),
@@ -1088,12 +1086,7 @@ impl Controller {
                 TwitchCmd::EmoteOnly(on) => (actions.set_emote_only(ch, on).await, None),
                 TwitchCmd::UniqueChat(on) => (actions.set_unique_chat(ch, on).await, None),
                 TwitchCmd::Role { role, grant, user } => {
-                    let result = match (role, grant) {
-                        (Role::Moderator, true) => actions.add_moderator(ch, &user).await,
-                        (Role::Moderator, false) => actions.remove_moderator(ch, &user).await,
-                        (Role::Vip, true) => actions.add_vip(ch, &user).await,
-                        (Role::Vip, false) => actions.remove_vip(ch, &user).await,
-                    };
+                    let result = apply_role(&actions, ch, role, grant, &user).await;
                     let verb = match (role, grant) {
                         (Role::Moderator, true) => "modded",
                         (Role::Moderator, false) => "unmodded",
@@ -1373,6 +1366,24 @@ impl Controller {
             self.events.clone(),
             eventsub,
         ));
+    }
+}
+
+/// The Helix call for one role grant/revoke — shared by the usercard buttons
+/// ([`Controller::set_role_twitch`]) and the `/mod` command family so the two
+/// dispatch tables can't drift.
+async fn apply_role(
+    actions: &TwitchActions,
+    channel: &str,
+    role: Role,
+    grant: bool,
+    user: &str,
+) -> anyhow::Result<()> {
+    match (role, grant) {
+        (Role::Moderator, true) => actions.add_moderator(channel, user).await,
+        (Role::Moderator, false) => actions.remove_moderator(channel, user).await,
+        (Role::Vip, true) => actions.add_vip(channel, user).await,
+        (Role::Vip, false) => actions.remove_vip(channel, user).await,
     }
 }
 

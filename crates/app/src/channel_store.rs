@@ -60,6 +60,11 @@ pub struct RetainedEvent {
     /// announcement it belongs to (see [`gift_group`]). Views collapsing gift
     /// batches hide these rows and list their recipients under the summary.
     pub group: Option<u64>,
+    /// On a batch announcement: whether any per-recipient event has been grouped
+    /// under it yet. Maintained here so the events panel's expandability check is
+    /// a field read, not a scan of the whole retained buffer per visible summary
+    /// row per frame.
+    pub has_grouped_children: bool,
 }
 
 /// Identifies a channel set: the (normalized) Twitch / Kick / YouTube sources a
@@ -560,6 +565,15 @@ impl ChannelModel {
             platform,
             self.events_base + self.events.len() as u64,
         );
+        // The first grouped child marks its announcement, so the panel knows the
+        // summary row is expandable without rescanning the buffer at render.
+        if let Some(g) = group {
+            if let Some(ix) = g.checked_sub(self.events_base) {
+                if let Some(summary) = self.events.get_mut(ix as usize) {
+                    summary.has_grouped_children = true;
+                }
+            }
+        }
         let accent = details.accent;
         let actor = details.actor.clone();
         self.events.push_back(RetainedEvent {
@@ -570,6 +584,7 @@ impl ChannelModel {
             message: message.clone(),
             details,
             group,
+            has_grouped_children: false,
         });
         cx.emit(ChannelEvent::EventAppended {
             seq: self.events_base + self.events.len() as u64 - 1,

@@ -693,6 +693,15 @@ pub(crate) struct ChatView {
     /// `(seed_id, rows_generation)` — rebuilt only when the seed or the buffer
     /// changes. `RefCell` because `build_thread` takes `&self` (render path).
     thread_cache: std::cell::RefCell<Option<(String, u64, crate::thread::Thread)>>,
+    /// Caches the mentions panel's matched messages keyed by the model's
+    /// `rows_generation`, so its full-buffer scan (which runs on *every*
+    /// `ChatView` render — at animation rate while the picker is open, since a
+    /// cell tick dirties this view) only happens when the buffer actually
+    /// changed. Invalidated on a matcher change ([`set_mentions`]) and a channel
+    /// swap ([`reconnect`] — a fresh model's generation could collide).
+    /// `RefCell` because it's filled from the render path.
+    mentions_panel_cache:
+        std::cell::RefCell<Option<(u64, Vec<std::sync::Arc<Message>>)>>,
     /// While dragging a layout divider: which one, the two adjacent shares, and
     /// the pointer position at grab time, so each move applies a delta. `None`
     /// when not resizing.
@@ -991,6 +1000,7 @@ impl ChatView {
             replying_to: None,
             thread_panel: None,
             thread_cache: std::cell::RefCell::new(None),
+            mentions_panel_cache: std::cell::RefCell::new(None),
             layout_drag: None,
             grid_bounds: std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default())),
             events_list_state,
@@ -1307,6 +1317,10 @@ impl ChatView {
         // A fresh model means a fresh list — any hover-pause freeze is moot.
         self.log_paused = false;
         self.paused_needs_reset = false;
+        // Caches keyed on the old model's `rows_generation` would collide with
+        // the new model's (each model counts from 0).
+        *self.mentions_panel_cache.borrow_mut() = None;
+        *self.thread_cache.borrow_mut() = None;
         self._channel_sub = cx.subscribe(&channel, Self::on_channel_event);
         self.channel_key = key;
         self.channel = channel;
@@ -1341,6 +1355,8 @@ impl ChatView {
     /// match against this; already-shown rows keep the flag they were pushed with.
     pub(crate) fn set_mentions(&mut self, mentions: bks_core::MentionMatcher) {
         self.mentions = mentions;
+        // The mentions panel's cached matches were computed with the old terms.
+        *self.mentions_panel_cache.borrow_mut() = None;
     }
 
     /// Updates the ignore list. The log filters every row against this at render
@@ -4333,18 +4349,13 @@ impl ChatView {
                 // per-recipient rows grouped under it (Twitch). Only collapse
                 // mode hides those rows, so only it lists them here. The full
                 // recipient list is only *materialized* when the row is actually
-                // expanded — the collapsed common case only needs to know whether
-                // any recipient exists (a cheap `any`), not clone them all, so a
+                // expanded; whether any grouped child exists is a flag the store
+                // maintains as children arrive (`has_grouped_children`), so a
                 // gift-heavy panel doesn't rescan the whole buffer every frame.
                 let is_summary = ev.details.gift_count.is_some();
-                let has_grouped = |group: u64| {
-                    model
-                        .events
-                        .iter()
-                        .any(|e| e.group == Some(group) && e.details.recipient.is_some())
-                };
                 let expandable = is_summary
-                    && (!ev.details.recipients.is_empty() || (collapse && has_grouped(seq)));
+                    && (!ev.details.recipients.is_empty()
+                        || (collapse && ev.has_grouped_children));
                 let expanded = expandable && this.expanded_gifts.contains(&seq);
                 let names = expanded.then(|| {
                     let mut names = ev.details.recipients.clone();
@@ -4584,51 +4595,72 @@ impl ChatView {
             let selection = selectable::Selection::new();
             selection.begin_frame();
             let mut ordinal = 0usize;
-            // Gather + render this view's mentions (its own terms) straight out of
-            // the shared buffer. `decorate` only clones a message when its author
-            // actually has cosmetics (Cow) — the old collect-to-owned pass deep-
-            // cloned every mention-matching message on every render of this view.
             let model = self.channel.read(cx);
-            model
-                .rows
+            // The matched set is cached by `rows_generation`: this runs on every
+            // ChatView render — at animation rate while the picker is open (a
+            // cell tick dirties this view) — and re-scanning the whole ring
+            // buffer through the matcher each time was the panel's dominant
+            // cost. Chat rows and a sub/resub event's attached chatter message
+            // both count as mention sources; the join backlog stays out (a
+            // days-old mention would misread as new). Event-attached messages
+            // are interned into `Arc` once, at rebuild.
+            let generation = model.rows_generation();
+            let stale = self
+                .mentions_panel_cache
+                .borrow()
+                .as_ref()
+                .is_none_or(|(g, _)| *g != generation);
+            if stale {
+                let matched: Vec<std::sync::Arc<Message>> = model
+                    .rows
+                    .iter()
+                    .filter_map(|row| {
+                        let msg: &Message = match row {
+                            Row::Message { msg } => msg,
+                            Row::Event {
+                                message: Some(msg), ..
+                            } => msg,
+                            _ => return None,
+                        };
+                        if msg.historical || !self.mentions.matches(&msg.raw_text) {
+                            return None;
+                        }
+                        Some(match row {
+                            Row::Message { msg } => msg.clone(),
+                            _ => std::sync::Arc::new(msg.clone()),
+                        })
+                    })
+                    .collect();
+                *self.mentions_panel_cache.borrow_mut() = Some((generation, matched));
+            }
+            let cache = self.mentions_panel_cache.borrow();
+            let (_, matched) = cache.as_ref().expect("cache filled above");
+            // Struck + cosmetics resolve against the live model per render (both
+            // can change without a structural row edit); `decorate` only clones a
+            // message when its author actually has cosmetics (Cow).
+            matched
                 .iter()
-                .filter_map(|row| {
-                    // Chat rows and a sub/resub event's attached chatter message
-                    // both count as mention sources.
-                    let msg: &Message = match row {
-                        Row::Message { msg } => msg,
-                        Row::Event {
-                            message: Some(msg), ..
-                        } => msg,
-                        _ => return None,
-                    };
-                    // The join backlog stays out of the mentions panel (like the
-                    // all-tabs feed): a days-old mention would misread as new.
-                    if msg.historical || !self.mentions.matches(&msg.raw_text) {
-                        return None;
-                    }
+                .map(|msg| {
                     let struck = model.is_struck(msg);
                     let decorated = log::decorate(msg, model);
-                    Some(
-                        render::render_message(
-                            &decorated,
-                            render::RowFlags {
-                                struck,
-                                mentioned: true,
-                                hide_timestamp: !crate::settings::show_timestamps_mentions(),
-                                ..Default::default()
-                            },
-                            font_size,
-                            &selection,
-                            &mut ordinal,
-                            render::RowHandlers {
-                                name_click: Some(name_click_for(&entity, msg)),
-                                mention_click: Some(mention_click_for(&entity, msg)),
-                                ..Default::default()
-                            },
-                        )
-                        .into_any_element(),
+                    render::render_message(
+                        &decorated,
+                        render::RowFlags {
+                            struck,
+                            mentioned: true,
+                            hide_timestamp: !crate::settings::show_timestamps_mentions(),
+                            ..Default::default()
+                        },
+                        font_size,
+                        &selection,
+                        &mut ordinal,
+                        render::RowHandlers {
+                            name_click: Some(name_click_for(&entity, msg)),
+                            mention_click: Some(mention_click_for(&entity, msg)),
+                            ..Default::default()
+                        },
                     )
+                    .into_any_element()
                 })
                 .collect()
         };

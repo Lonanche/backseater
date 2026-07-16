@@ -2956,9 +2956,10 @@ pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElem
 /// its midpoint color (the full per-char gradient needs the selectable-token
 /// machinery the event row doesn't carry).
 ///
-/// `compact` (the events panel) drops the timestamp and the author's name — the
-/// event row already shows who subscribed above, so a second timestamp + name
-/// before their message is just noise; only the badges + message body remain.
+/// `compact` (the events panel) drops the timestamp, the author's badges, and
+/// the name — the event row already shows who subscribed above, so repeating
+/// their identity before the message is just noise (a badge next to a nameless
+/// line read as a stray); only the message body remains.
 fn event_message_line(
     msg: &Message,
     scale: Scale,
@@ -2986,22 +2987,25 @@ fn event_message_line(
         None => base_color,
     };
 
-    let badges: Vec<gpui::AnyElement> = msg
-        .author
-        .badges
-        .iter()
-        .enumerate()
-        .map(|(i, badge)| {
-            image_line_box(scale, scale.badge)
-                .mr_1()
-                .child(animated_img(
-                    ("event-badge", row_id.wrapping_add(i as u64)),
-                    badge.url.clone(),
-                    px(scale.badge),
-                ))
-                .into_any_element()
-        })
-        .collect();
+    let badges: Vec<gpui::AnyElement> = if compact {
+        Vec::new()
+    } else {
+        msg.author
+            .badges
+            .iter()
+            .enumerate()
+            .map(|(i, badge)| {
+                image_line_box(scale, scale.badge)
+                    .mr_1()
+                    .child(animated_img(
+                        ("event-badge", row_id.wrapping_add(i as u64)),
+                        badge.url.clone(),
+                        px(scale.badge),
+                    ))
+                    .into_any_element()
+            })
+            .collect()
+    };
 
     h_flex()
         .w_full()
