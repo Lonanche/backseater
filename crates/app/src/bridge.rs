@@ -384,12 +384,16 @@ pub async fn run_twitch(
     // and the EventSub moderator feed a third. Both are spawned once, when the
     // IRC connection hands over the channel id (via the `Channel` event) — they
     // need the numeric id to subscribe. The connector reconnects internally, so
-    // `Channel` can arrive again; history is also fetched only on the first one
-    // (a re-emit would duplicate the backlog). The guard aborts the side feeds
-    // when this connection ends, so a re-join doesn't stack duplicates.
+    // `Channel` can arrive again; the full backlog is fetched only on the first
+    // one, later ones gap-fill the disconnect window. The guard aborts the side
+    // feeds when this connection ends, so a re-join doesn't stack duplicates.
     let mut side_feeds_started = false;
     let mut side_feeds = TaskGuard::default();
     let mut history_done = false;
+    // When the last event arrived — the `after` bound for a reconnect gap-fill
+    // (`Channel` re-arriving with `history_done` set means the connector
+    // reconnected; everything since this instant was missed).
+    let mut last_seen = chrono::Utc::now();
 
     while let Some(event) = stream.recv().await {
         let forward = match event {
@@ -444,7 +448,20 @@ pub async fn run_twitch(
                     let badge_fut = load_badges(&meta.name);
                     let history_fut = async {
                         if history_done {
-                            Ok(Vec::new()) // reconnect: backlog already shown
+                            // Reconnect: gap-fill just the disconnect window
+                            // (Chatterino's `after`/`before` + limit scaling),
+                            // parsed as *live* — missed messages should feed
+                            // mentions/events/unread like they arrived on time.
+                            // The store's row-key dedupe eats any overlap. A
+                            // small jitter spreads a reconnect storm's requests
+                            // (many channels rejoin at once) off one instant.
+                            let now = chrono::Utc::now();
+                            let gap_secs =
+                                (now - last_seen).num_seconds().clamp(0, i64::MAX) as usize;
+                            let limit = ((gap_secs + 1) * 10).min(HISTORY_LIMIT);
+                            tokio::time::sleep(std::time::Duration::from_millis(jitter_ms()))
+                                .await;
+                            bks_twitch::fetch_gap(&meta.name, limit, last_seen, now).await
                         } else {
                             bks_twitch::fetch_recent(&meta.name, HISTORY_LIMIT).await
                         }
@@ -462,13 +479,20 @@ pub async fn run_twitch(
                         emotes: owned_emotes(registry.emotes(&meta.name)),
                     })
                     .await;
-                // Resolve + emit the backlog now that emotes/badges are ready,
-                // oldest-first, before any live message (the stream is drained one
-                // event at a time).
-                if !history_done {
-                    history_done = true;
-                    emit_history(&meta.name, &registry, &badges, raw_history, &tx).await;
-                }
+                // Resolve + emit the backlog (or the reconnect gap-fill) now
+                // that emotes/badges are ready, oldest-first, before any live
+                // message (the stream is drained one event at a time).
+                history_done = true;
+                last_seen = chrono::Utc::now();
+                emit_history(
+                    &meta.name,
+                    &registry,
+                    &badges,
+                    raw_history,
+                    &mut seen_cosmetics,
+                    &tx,
+                )
+                .await;
                 continue;
             }
             ChatEvent::Message(mut msg) => {
@@ -483,7 +507,18 @@ pub async fn run_twitch(
         if tx.send(forward).await.is_err() {
             break; // UI side dropped the receiver.
         }
+        last_seen = chrono::Utc::now();
     }
+}
+
+/// 0–100 ms of reconnect-fetch jitter (Chatterino does the same) without
+/// pulling in a rand dep — clock nanos are plenty random for politeness.
+fn jitter_ms() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    u64::from(nanos) % 100
 }
 
 /// Applies 3rd-party emote/badge resolution to a chat event the same way for the
@@ -579,18 +614,21 @@ fn resolve_message(msg: &mut bks_core::Message, registry: &EmoteRegistry, badges
     resolve_badges(msg, badges);
 }
 
-/// How many recent messages to pull on join.
-const HISTORY_LIMIT: usize = 40;
+/// How many recent messages to pull on join (the robotty API's max; also
+/// Chatterino's default).
+const HISTORY_LIMIT: usize = 800;
 
-/// Resolves an already-fetched recent-history backlog (emotes/badges, like live
-/// messages) and emits it oldest-first. `raw_history` is the result of
-/// [`bks_twitch::fetch_recent`], fetched in parallel with emotes/badges by the
-/// caller; a fetch failure is logged and skipped (the log just opens empty).
+/// Resolves an already-fetched recent-history backlog or reconnect gap-fill
+/// (emotes/badges, like live messages) and emits it oldest-first. `raw_history`
+/// is the result of [`bks_twitch::fetch_recent`]/[`bks_twitch::fetch_gap`],
+/// fetched in parallel with emotes/badges by the caller; a fetch failure is
+/// logged and skipped (the log just opens empty).
 async fn emit_history(
     channel: &str,
     registry: &EmoteRegistry,
     badges: &BadgeMap,
     raw_history: anyhow::Result<Vec<ChatEvent>>,
+    seen_cosmetics: &mut std::collections::HashSet<String>,
     tx: &Sink,
 ) {
     let events = match raw_history {
@@ -605,6 +643,13 @@ async fn emit_history(
         // a historical sub event's attached message gets the same treatment;
         // clear-chat rows pass through unchanged.
         let event = resolve_chat_event(registry, badges, event);
+        // 7TV cosmetics too — the backlog used to skip them, so a painted
+        // chatter's history rendered plain until they spoke live. Per-user
+        // process cache + the connection's `seen` set keep this to at most one
+        // lookup per distinct backlog author.
+        if let ChatEvent::Message(msg) = &event {
+            spawn_cosmetics(seen_cosmetics, msg, tx);
+        }
         if tx.send(event).await.is_err() {
             break; // UI side dropped the receiver.
         }
@@ -671,13 +716,25 @@ fn spawn_eventsub(auth: EventsubAuth, broadcaster_id: String, tx: Sink, guard: &
 
 /// Fetches the channel's badge image map (no auth); empty on failure.
 async fn load_badges(channel: &str) -> BadgeMap {
-    match bks_twitch::fetch_badges(channel).await {
-        Ok(map) => map,
-        Err(err) => {
-            tracing::warn!("failed to load Twitch badges for {channel}: {err:#}");
-            BadgeMap::default()
+    // Retry before giving up: one failed GQL fetch used to leave the whole
+    // connection badge-less (`resolve_badges` strips every badge against an
+    // empty map, and nothing re-fetched until a reconnect) — the intermittent
+    // "history/chat shows no badges" bug.
+    let mut delay = std::time::Duration::from_millis(500);
+    for attempt in 0..3 {
+        match bks_twitch::fetch_badges(channel).await {
+            Ok(map) => return map,
+            Err(err) if attempt < 2 => {
+                tracing::debug!("Twitch badge load for {channel} failed, retrying: {err:#}");
+                tokio::time::sleep(delay).await;
+                delay *= 4;
+            }
+            Err(err) => {
+                tracing::warn!("failed to load Twitch badges for {channel}: {err:#}");
+            }
         }
     }
+    BadgeMap::default()
 }
 
 /// Fills in each badge's image URL from the map (the connector leaves it empty,

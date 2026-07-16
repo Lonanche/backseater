@@ -100,15 +100,37 @@ pub enum ChannelEvent {
     Appended {
         index: usize,
         msg: Option<std::sync::Arc<Message>>,
+        /// The row replays the join backlog (a historical message *or* event) —
+        /// it must never flash the tab. Carried on the event because a
+        /// historical event without an attached message has `msg: None`,
+        /// indistinguishable from a live notice row.
+        historical: bool,
+        /// The model's [`rows_generation`](ChannelModel::rows_generation) right
+        /// after this mutation. ⚠️ Structural events carry it because gpui
+        /// queues `cx.emit` and delivers the queue to subscribers that
+        /// register *between emit and flush* — a view that seeds its
+        /// `ListState` from the current rows and then subscribes receives
+        /// replays of the very events its seed already covered, inflating the
+        /// list with phantom trailing items (2× items over rows at startup —
+        /// the invisible-day-divider bug). Views record the generation they
+        /// seeded at and skip anything at or below it.
+        generation: u64,
     },
-    /// A row was inserted at `index` (history backfill placement). Same
-    /// stale-index caveat as [`Appended`](Self::Appended).
+    /// A row was inserted at `index` (history backfill placement — insertion
+    /// only ever happens for historical rows, so unlike
+    /// [`Appended`](Self::Appended) it carries no `historical` flag). Same
+    /// stale-index caveat as `Appended`, same replay guard via `generation`.
     Inserted {
         index: usize,
         msg: Option<std::sync::Arc<Message>>,
+        /// See [`Appended`](Self::Appended)`::generation`.
+        generation: u64,
     },
     /// The front row was dropped (ring-buffer trim past `MAX_ROWS`).
-    RemovedFront,
+    RemovedFront {
+        /// See [`Appended`](Self::Appended)`::generation`.
+        generation: u64,
+    },
     /// A retained event was appended to the [`events`](ChannelModel::events)
     /// buffer, identified by its stable sequence number (see
     /// [`events_base`](ChannelModel::events_base)) — carried because subscribers
@@ -347,9 +369,15 @@ impl ChannelModel {
         }
         let ix = self.rows.len();
         let msg = row_message(&row);
+        let historical = row_historical(&row);
         self.rows.push_back(row);
         self.rows_generation += 1;
-        cx.emit(ChannelEvent::Appended { index: ix, msg });
+        cx.emit(ChannelEvent::Appended {
+            index: ix,
+            msg,
+            historical,
+            generation: self.rows_generation,
+        });
     }
 
     fn row_insert(&mut self, ix: usize, row: Row, cx: &mut Context<Self>) {
@@ -359,7 +387,11 @@ impl ChannelModel {
         let msg = row_message(&row);
         self.rows.insert(ix, row);
         self.rows_generation += 1;
-        cx.emit(ChannelEvent::Inserted { index: ix, msg });
+        cx.emit(ChannelEvent::Inserted {
+            index: ix,
+            msg,
+            generation: self.rows_generation,
+        });
     }
 
     fn row_pop_front(&mut self, cx: &mut Context<Self>) {
@@ -368,7 +400,9 @@ impl ChannelModel {
                 self.row_keys.remove(&key);
             }
             self.rows_generation += 1;
-            cx.emit(ChannelEvent::RemovedFront);
+            cx.emit(ChannelEvent::RemovedFront {
+                generation: self.rows_generation,
+            });
         }
     }
 
@@ -376,6 +410,32 @@ impl ChannelModel {
     /// value derived from `rows` and rebuild it only when this changes.
     pub fn rows_generation(&self) -> u64 {
         self.rows_generation
+    }
+
+    /// The sequence number the *next* retained event will get (`events_base` +
+    /// current length) — the seed value for a view's `EventAppended` replay
+    /// watermark (see [`ChannelEvent::Appended`]'s `generation` doc).
+    pub fn next_event_seq(&self) -> u64 {
+        self.events_base + self.events.len() as u64
+    }
+
+    /// Where a historical row with timestamp `ts` belongs in `rows` — like
+    /// [`history_insert_index`], with an O(1) fast path for the dominant case:
+    /// the join backlog arrives oldest-first, so each row lands *after* the
+    /// current last row. When that last row is historical and not newer, no
+    /// earlier anchor can exist either (historical rows always insert ahead of
+    /// live messages/events, so a historical tail row means no live anchors
+    /// anywhere), skipping the front scan that made an 800-line backlog O(n²).
+    fn historical_insert_ix(&self, ts: DateTime<Utc>) -> Option<usize> {
+        match self.rows.back() {
+            Some(Row::Message { msg }) if msg.historical && msg.timestamp <= ts => None,
+            Some(Row::Event {
+                historical: true,
+                timestamp,
+                ..
+            }) if *timestamp <= ts => None,
+            _ => history_insert_index(self.rows.iter(), ts),
+        }
     }
 
     /// Records `row`'s key; `false` means an identical row is already present.
@@ -450,10 +510,92 @@ impl ChannelModel {
             self.row_push_back(Row::Message { msg }, cx);
             return;
         }
-        match history_insert_index(self.rows.iter(), msg.timestamp) {
+        match self.historical_insert_ix(msg.timestamp) {
             Some(i) => self.row_insert(i, Row::Message { msg }, cx),
             None => self.row_push_back(Row::Message { msg }, cx),
         }
+    }
+
+    /// A live (non-historical) public event: pairs a channel-point reward with
+    /// its IRC message, retains the event for the events panel, and appends the
+    /// inline log row. (The historical branch in [`push`](Self::push) bypasses
+    /// all of this — a backlog replay only gets a sorted log row.)
+    #[allow(clippy::too_many_arguments)]
+    fn push_live_event(
+        &mut self,
+        platform: Platform,
+        kind: EventKind,
+        text: String,
+        timestamp: DateTime<Utc>,
+        mut message: Option<Box<Message>>,
+        details: bks_platform::EventDetails,
+        cx: &mut Context<Self>,
+    ) {
+        // A channel-point reward's message arrives separately over IRC. If
+        // it's already waiting, attach it so it renders under this header;
+        // otherwise remember that the event showed first, so the message
+        // (arriving shortly) renders as a normal row below it.
+        if kind == EventKind::Reward {
+            if let Some(name) = details.actor.as_deref() {
+                let key = name.to_lowercase();
+                let want = details.redeem_input.as_deref();
+                if let Some(reward_msg) = self.take_pending_reward_msg(&key, want) {
+                    message = Some(reward_msg);
+                } else {
+                    // Drop entries whose message never arrived so the map
+                    // can't grow unbounded (a text reward should always
+                    // emit a message, but be defensive).
+                    self.recent_reward_events
+                        .retain(|_, at| at.elapsed() < REWARD_PAIR_WINDOW);
+                    self.recent_reward_events
+                        .insert(key, std::time::Instant::now());
+                }
+            }
+        }
+        // Retain the event in its own buffer (survives chat-ring trimming)
+        // for the events panel, then also push the inline log row.
+        let group = gift_group(
+            &mut self.pending_gifts,
+            &details,
+            platform,
+            self.events_base + self.events.len() as u64,
+        );
+        let accent = details.accent;
+        let actor = details.actor.clone();
+        self.events.push_back(RetainedEvent {
+            platform,
+            kind,
+            text: text.clone(),
+            timestamp,
+            message: message.clone(),
+            details,
+            group,
+        });
+        cx.emit(ChannelEvent::EventAppended {
+            seq: self.events_base + self.events.len() as u64 - 1,
+        });
+        let mut trimmed = false;
+        while self.events.len() > MAX_EVENTS {
+            self.events.pop_front();
+            self.events_base += 1;
+            trimmed = true;
+        }
+        if trimmed {
+            cx.emit(ChannelEvent::EventsTrimmed);
+        }
+        self.row_push_back(
+            Row::Event {
+                platform,
+                kind,
+                text,
+                timestamp,
+                message,
+                accent,
+                actor,
+                historical: false,
+            },
+            cx,
+        );
     }
 
     /// Fades the target's chat *up to the ban moment* (a ban/timeout strikes their
@@ -573,73 +715,43 @@ impl ChannelModel {
                 kind,
                 text,
                 timestamp,
-                mut message,
+                message,
                 details,
             } => {
-                // A channel-point reward's message arrives separately over IRC. If
-                // it's already waiting, attach it so it renders under this header;
-                // otherwise remember that the event showed first, so the message
-                // (arriving shortly) renders as a normal row below it.
-                if kind == EventKind::Reward {
-                    if let Some(name) = details.actor.as_deref() {
-                        let key = name.to_lowercase();
-                        let want = details.redeem_input.as_deref();
-                        if let Some(reward_msg) = self.take_pending_reward_msg(&key, want) {
-                            message = Some(reward_msg);
-                        } else {
-                            // Drop entries whose message never arrived so the map
-                            // can't grow unbounded (a text reward should always
-                            // emit a message, but be defensive).
-                            self.recent_reward_events
-                                .retain(|_, at| at.elapsed() < REWARD_PAIR_WINDOW);
-                            self.recent_reward_events
-                                .insert(key, std::time::Instant::now());
-                        }
-                    }
+                // An exact replay of a buffered event (a reconnect gap-fill
+                // overlapping rows still shown) is skipped up front: letting it
+                // reach the retained-events push and only then having
+                // `row_push_back`'s dedupe drop the log row would double the
+                // events-panel entry.
+                if self
+                    .row_keys
+                    .contains(&crate::chatview::event_row_key(platform, &timestamp, &text))
+                {
+                    return;
                 }
-                // Retain the event in its own buffer (survives chat-ring trimming)
-                // for the events panel, then also push the inline log row.
-                let group = gift_group(
-                    &mut self.pending_gifts,
-                    &details,
-                    platform,
-                    self.events_base + self.events.len() as u64,
-                );
-                let accent = details.accent;
-                let actor = details.actor.clone();
-                self.events.push_back(RetainedEvent {
-                    platform,
-                    kind,
-                    text: text.clone(),
-                    timestamp,
-                    message: message.clone(),
-                    details,
-                    group,
-                });
-                cx.emit(ChannelEvent::EventAppended {
-                    seq: self.events_base + self.events.len() as u64 - 1,
-                });
-                let mut trimmed = false;
-                while self.events.len() > MAX_EVENTS {
-                    self.events.pop_front();
-                    self.events_base += 1;
-                    trimmed = true;
-                }
-                if trimmed {
-                    cx.emit(ChannelEvent::EventsTrimmed);
-                }
-                self.row_push_back(
-                    Row::Event {
+                // A backlog replay: timestamp-sorted into the log like a
+                // historical message (faded at render), but deliberately NOT
+                // retained for the events panel — it predates the session, and
+                // the panel would misread it as live activity. Gift grouping
+                // and reward pairing are live/panel concerns, skipped with it.
+                if details.historical {
+                    let row = Row::Event {
                         platform,
                         kind,
                         text,
                         timestamp,
                         message,
-                        accent,
-                        actor,
-                    },
-                    cx,
-                );
+                        accent: details.accent,
+                        actor: details.actor,
+                        historical: true,
+                    };
+                    match self.historical_insert_ix(timestamp) {
+                        Some(i) => self.row_insert(i, row, cx),
+                        None => self.row_push_back(row, cx),
+                    }
+                } else {
+                    self.push_live_event(platform, kind, text, timestamp, message, details, cx);
+                }
             }
             ChatEvent::ClearChat {
                 platform,
@@ -872,6 +984,16 @@ fn row_message(row: &Row) -> Option<std::sync::Arc<Message>> {
             message: Some(msg), ..
         } => Some(std::sync::Arc::new((**msg).clone())),
         _ => None,
+    }
+}
+
+/// Whether a new row replays the join backlog (rides the row's
+/// `Appended`/`Inserted` event — see [`ChannelEvent::Appended`]).
+fn row_historical(row: &Row) -> bool {
+    match row {
+        Row::Message { msg } => msg.historical,
+        Row::Event { historical, .. } => *historical,
+        _ => false,
     }
 }
 

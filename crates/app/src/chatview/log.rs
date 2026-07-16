@@ -51,6 +51,82 @@ pub(super) fn decorate<'a>(msg: &'a Message, model: &ChannelModel) -> std::borro
     }
 }
 
+/// A row's local calendar date, when it has one (messages and events carry a
+/// timestamp; system/error/live notices don't and inherit their neighbors').
+pub(super) fn row_date(row: &Row) -> Option<chrono::NaiveDate> {
+    let ts = match row {
+        Row::Message { msg } => msg.timestamp,
+        Row::Event { timestamp, .. } => *timestamp,
+        _ => return None,
+    };
+    Some(ts.with_timezone(&chrono::Local).date_naive())
+}
+
+/// The divider band's label ("Wednesday, July 16, 2026") — one formatter so the
+/// leading dividers and the trailing band can never drift apart.
+fn day_label(date: chrono::NaiveDate) -> String {
+    date.format("%A, %B %-d, %Y").to_string()
+}
+
+/// The day-divider label for the row at `ix`, when it's the first row of a new
+/// local calendar day: its date differs from the previous dated row's (scanning
+/// back over undated notice rows), or — for the buffer's first dated row — from
+/// `today` (today's chat needs no header; an older backlog announces its day).
+/// `today` is the view's creation date, like the trailing band's — a live clock
+/// here would let midnight flip a row's divider without a re-measure (stale
+/// cached height), and would cost a clock read per visible row per frame.
+/// Render-derived instead of a buffer row so `rows`/`ListState` lockstep,
+/// sorted history insertion, and trimming stay untouched.
+fn day_divider_label(
+    model: &ChannelModel,
+    ix: usize,
+    row: &Row,
+    today: chrono::NaiveDate,
+) -> Option<String> {
+    let date = row_date(row)?;
+    let prev = model.rows.iter().take(ix).rev().find_map(row_date);
+    is_new_day(prev, date, today).then(|| day_label(date))
+}
+
+/// The divider rule, separated for testing: a dated row opens a new day when
+/// the previous dated row was another day — or, with nothing dated above it,
+/// when it isn't from today (today's live chat needs no header; a backlog
+/// reaching back announces its day).
+fn is_new_day(
+    prev: Option<chrono::NaiveDate>,
+    date: chrono::NaiveDate,
+    today: chrono::NaiveDate,
+) -> bool {
+    match prev {
+        Some(prev) => prev != date,
+        None => date != today,
+    }
+}
+
+/// The trailing "new day started" band under the log's final row: when the
+/// newest dated row is from a local day *before* `today`, the calendar has
+/// moved on with no message yet — a restarted app whose whole backlog is
+/// yesterday's says so immediately instead of waiting for the next message to
+/// carry a leading divider. `today` is the date captured when this view was
+/// created (NOT a live clock read): the band is deliberately a launch-time
+/// affordance, so a session running past midnight doesn't grow one under a
+/// row whose cached height never accounted for it. The first message of the
+/// new day replaces it (its leading divider takes over — the `Appended`
+/// handler re-measures the previously-last row so the stale band can't
+/// linger).
+/// `item_count` scopes the scan to the rows this *view* shows (a hover-paused
+/// view is frozen at a prefix of the model; the band sits under its frozen last
+/// row, so it must be computed from that row, not the model's newest).
+pub(super) fn trailing_day_label(
+    model: &ChannelModel,
+    item_count: usize,
+    today: chrono::NaiveDate,
+) -> Option<String> {
+    let last = model.rows.iter().take(item_count).rev().find_map(row_date)?;
+    (last < today).then(|| day_label(today))
+}
+
+
 /// Builds the inline link-preview card for a message row, or `None` when inline
 /// previews are off, the message has no previewable link, or its fetch failed.
 /// A still-loading preview renders a fixed-height skeleton (space reserved up
@@ -104,11 +180,17 @@ fn build_inline_preview(msg: &Message, font_size: f32) -> Option<gpui::AnyElemen
 
 pub(super) struct LogView {
     host: WeakEntity<ChatView>,
+    /// The local date this view was created — the reference "today" for the
+    /// trailing new-day band (see [`trailing_day_label`]).
+    today: chrono::NaiveDate,
 }
 
 impl LogView {
     pub(super) fn new(host: WeakEntity<ChatView>) -> Self {
-        Self { host }
+        Self {
+            host,
+            today: chrono::Local::now().date_naive(),
+        }
     }
 }
 
@@ -229,6 +311,16 @@ impl Render for LogView {
 
         let render_entity = host.clone();
         let render_model = model.clone();
+        // The final row is spotted by this list's own count (not
+        // `model.rows.len()`), so a hover-paused view keeps the trailing day
+        // band on *its* frozen last row while the model grows past it. Read
+        // ONCE here, before the list element runs: the item closure executes
+        // while the list holds its state RefCell mutably, so calling
+        // `item_count()` from inside it panics ("already mutably borrowed").
+        // The value can't go stale mid-layout — every splice path calls
+        // `refresh_log`, re-rendering this view before the next layout.
+        let item_count = list_state.item_count();
+        let session_today = self.today;
         let chat_list = list(list_state.clone(), move |ix, _window, cx: &mut App| {
             let this = render_entity.read(cx);
             let model = render_model.read(cx);
@@ -239,6 +331,32 @@ impl Render for LogView {
             // so a selection's endpoints stay valid as the visible window
             // shifts; the stride leaves room for every token in a row.
             let mut ordinal = ix * ORDINAL_STRIDE;
+            // The first row of a new local calendar day carries a date band
+            // above itself (render-derived — no divider rows in the buffer);
+            // the view's final row also carries a trailing "new day started"
+            // band when the calendar has moved past the newest message.
+            let divider = day_divider_label(model, ix, row, session_today);
+            let trailing = (ix + 1 == item_count)
+                .then(|| trailing_day_label(model, item_count, session_today))
+                .flatten();
+            // A divider-only stand-in for rows that render nothing themselves:
+            // without it, hiding the day's first (or last) row would hide the
+            // day band(s).
+            let divider_only = |divider: &Option<String>, trailing: &Option<String>| {
+                if divider.is_none() && trailing.is_none() {
+                    return div().into_any_element();
+                }
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .when_some(divider.as_deref(), |w, label| {
+                        w.child(render::render_day_divider(label, font_size))
+                    })
+                    .when_some(trailing.as_deref(), |w, label| {
+                        w.child(render::render_day_divider(label, font_size))
+                    })
+                    .into_any_element()
+            };
             // Special rows carry a `(tint, accent bar)` pair the wrapper below
             // paints full-bleed across the log's width; the row content itself
             // renders bare (see `RowFlags::external_highlight` / the renderers'
@@ -259,7 +377,7 @@ impl Render for LogView {
                     // list stays index-aligned with the shared model; mention tint
                     // is this view's terms.
                     if this.ignore.matches_message(msg) {
-                        return div().into_any_element();
+                        return divider_only(&divider, &trailing);
                     }
                     let mentioned = this.mentions.matches(&msg.raw_text);
                     flash = this.flash_strength_for(msg.platform, &msg.id);
@@ -359,11 +477,14 @@ impl Render for LogView {
                     render::render_error(text, font_size, &this.selection, &mut ordinal)
                         .into_any_element()
                 }
-                Row::Event { .. } if hide_events_in_log => return div().into_any_element(),
+                Row::Event { .. } if hide_events_in_log => {
+                    return divider_only(&divider, &trailing)
+                }
                 Row::Event {
                     platform,
                     kind,
                     text,
+                    timestamp,
                     message,
                     accent,
                     actor,
@@ -375,7 +496,8 @@ impl Render for LogView {
                         *platform,
                         *kind,
                         text,
-                        None,
+                        // Event rows share the chat log's timestamp toggle.
+                        crate::settings::show_timestamps_chat().then_some(*timestamp),
                         message.as_deref(),
                         *accent,
                         actor.as_deref(),
@@ -431,10 +553,23 @@ impl Render for LogView {
             // full width, edge-to-edge under the thumb. `pr` is applied per row
             // (not on the list, where `Auto` sizing would clip rather than
             // reflow).
+            // A historical (backlog-replayed) event fades like a historical
+            // chat line; the fade sits on the tinted box so the day band above
+            // it stays full-strength. (Message rows fade inside their renderer.)
+            let event_faded = matches!(
+                row,
+                Row::Event {
+                    historical: true,
+                    ..
+                }
+            );
             let wrapper = div()
                 .w_full()
                 .min_w_0()
                 .pb_1()
+                .when_some(divider, |w, label| {
+                    w.child(render::render_day_divider(&label, font_size))
+                })
                 .child(
                     div()
                         .w_full()
@@ -443,6 +578,7 @@ impl Render for LogView {
                         .pr(px(SCROLLBAR_WIDTH))
                         .border_l_2()
                         .border_color(gpui::transparent_black())
+                        .when(event_faded, |row| row.opacity(render::HISTORY_OPACITY))
                         .map(|row| match (highlight, flash) {
                             // Flashing (jumped-to) row: the flash tint is blended
                             // over whatever base the row has (a highlight's tint
@@ -468,7 +604,12 @@ impl Render for LogView {
                             (None, None) => row.hover(|s| s.bg(render::row_hover())),
                         })
                         .child(inner),
-                );
+                )
+                // The trailing "new day started" band sits under the final
+                // row's content, outside its tint/fade.
+                .when_some(trailing, |w, label| {
+                    w.child(render::render_day_divider(&label, font_size))
+                });
             // "On hover" mod-button mode: this row shows/hides its strip by
             // hover, tracked on the view (`hover_strip_row`) so the next log
             // render adds/removes the strip — never a same-frame style switch.
@@ -753,5 +894,28 @@ impl LogView {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_new_day;
+    use chrono::NaiveDate;
+
+    fn d(day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 7, day).unwrap()
+    }
+
+    #[test]
+    fn divider_opens_when_the_date_changes() {
+        assert!(is_new_day(Some(d(15)), d(16), d(16)));
+        assert!(!is_new_day(Some(d(16)), d(16), d(16)));
+    }
+
+    #[test]
+    fn first_dated_row_announces_only_a_past_day() {
+        // A backlog reaching into yesterday gets a header; today's chat doesn't.
+        assert!(is_new_day(None, d(15), d(16)));
+        assert!(!is_new_day(None, d(16), d(16)));
     }
 }

@@ -604,11 +604,33 @@ which spawns **one tokio task per non-empty platform**, all feeding that tab's *
   the loaded emotes/badges and emitted oldest-first.
 - Kick: `KickSource::join` → `ChatEvent`s forwarded as-is (Kick emotes are already inline-parsed);
   Kick history is fetched in its own spawned task (doesn't block the live read loop). Both platforms'
-  history is `historical`-flagged and interleaved by timestamp in the UI (`ChannelModel::insert_message`),
-  so they appear merged regardless of which lands first. History backfills **chat only**: replayed
-  USERNOTICEs (subs/raids) are dropped and a replayed CLEARCHAT is a `historical` fade (strikes the
-  backlog, **no notice row**) — event/notice rows show no timestamp in the log, so a days-old timeout
-  or sub would misread as having just happened on every launch (`twitch/src/history.rs`).
+  history is `historical`-flagged and interleaved by timestamp in the UI (`ChannelModel::insert_message`
+  for chat, the store's historical-event branch for events), so they appear merged regardless of which
+  lands first. Twitch pulls **800** lines (robotty's max; Chatterino's default —
+  `bridge.rs::HISTORY_LIMIT`) and backfills chat **and public events**: a replayed USERNOTICE
+  (sub/raid/announcement) becomes a `historical`-flagged `ChatEvent::Event`
+  (`EventDetails.historical` → `Row::Event.historical`) — timestamp-sorted into the backlog, faded
+  at render, and kept **out of the events + mentions panels** (it predates the session); a replayed
+  CLEARCHAT is a `historical` fade (strikes the backlog, **no notice row**). Log event rows always
+  show their HH:MM time (that used to be the reason USERNOTICE was dropped), and the log draws a
+  **day divider** ("Wednesday, July 16, 2026") above the first row of each new *local* calendar day —
+  render-derived from the row's neighbors (`chatview/log.rs::day_divider_label`), NOT a buffer row,
+  so `rows`/`ListState` lockstep, sorted insertion, and trimming are untouched; the view's
+  `Inserted`/`RemovedFront` arms re-measure the one neighbor row whose divider can change hands.
+  When the whole backlog predates the launch day (restart after midnight), a **trailing "new day"
+  band** under the final row announces today immediately (`log.rs::trailing_day_label`, keyed to
+  the LogView's creation date — deliberately NOT a live clock, so a session crossing midnight
+  can't grow a band into a cached row height; the first live append re-measures the old last row
+  and its leading divider takes over). On
+  an IRC reconnect the re-arriving `Channel` meta **gap-fills** the disconnect window
+  (`bks_twitch::fetch_gap` — the API's `after`/`before` params + Chatterino's limit scaling +
+  jitter) parsed as **live**, so missed messages/events DO feed the events panel/mentions/unread;
+  the store's `row_keys` dedupe (probed up front via `chatview::event_row_key` so the events panel
+  can't double) eats the overlap (`twitch/src/history.rs`). Backlog parity fixes that came with
+  this: colorless chatters get Twitch's stable per-user default name color
+  (`render::fallback_name_color`, Chatterino's `getRandomColor`) instead of one flat palette
+  default, `load_badges` retries before giving up (one failed GQL fetch used to strip the whole
+  connection's badges), and `emit_history` resolves 7TV cosmetics like live chat.
 Both → the channel's **smol channel** (GPUI-friendly) → the shared `ChannelModel` drains it in
 `cx.spawn` (coalescing a burst: `recv()` then `try_recv()` the rest, one notify per burst), pushes
 into its ring buffer and emits granular `ChannelEvent`s; each observing `ChatView` reconciles its

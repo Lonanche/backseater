@@ -504,6 +504,44 @@ fn blend(color: u32, target: u32, t: f32) -> u32 {
         | mix(color, target)
 }
 
+/// Twitch's 15 default username colors — what twitch.tv assigns a chatter who
+/// never picked one. Used as the colorless-name fallback, seeded per user
+/// (Chatterino's `getRandomColor`), so every colorless chatter keeps a stable
+/// identity color instead of all sharing the palette's single default (which
+/// stays in use for chrome accents). [`readable_color`] then fixes contrast.
+const TWITCH_NAME_COLORS: [u32; 15] = [
+    0xff0000, // Red
+    0x0000ff, // Blue
+    0x00ff00, // Green
+    0xb22222, // FireBrick
+    0xff7f50, // Coral
+    0x9acd32, // YellowGreen
+    0xff4500, // OrangeRed
+    0x2e8b57, // SeaGreen
+    0xdaa520, // GoldenRod
+    0xd2691e, // Chocolate
+    0x5f9ea0, // CadetBlue
+    0x1e90ff, // DodgerBlue
+    0xff69b4, // HotPink
+    0x8a2be2, // BlueViolet
+    0x00ff7f, // SpringGreen
+];
+
+/// The stable per-user color for a chatter with no color set: seeded by the
+/// numeric user id (like Chatterino/twitch.tv), falling back to a character sum
+/// of the id or login for platforms with non-numeric ids.
+fn fallback_name_color(author: &bks_core::Author) -> u32 {
+    let seed = author.user_id.parse::<u64>().unwrap_or_else(|_| {
+        let src = if author.user_id.is_empty() {
+            &author.login
+        } else {
+            &author.user_id
+        };
+        src.chars().map(|c| c as u64).sum()
+    });
+    TWITCH_NAME_COLORS[(seed % TWITCH_NAME_COLORS.len() as u64) as usize]
+}
+
 /// Returns `color` adjusted just enough to clear [`MIN_NAME_CONTRAST`] against the
 /// chat background, so usernames stay readable while keeping their hue (BTTV
 /// "Readable Colors"). On a dark background a too-dark name is lightened toward
@@ -742,7 +780,7 @@ const STRUCK_OPACITY: f32 = 0.45;
 const LONG_WORD_CHARS: usize = 24;
 
 /// Opacity for backfilled chat-history rows, so they read as older than live chat.
-const HISTORY_OPACITY: f32 = 0.6;
+pub(crate) const HISTORY_OPACITY: f32 = 0.6;
 
 /// Negative right margin (px) applied to each word token that ends in whitespace,
 /// to tighten the visible inter-word gap. Words carry their own trailing space
@@ -1503,7 +1541,7 @@ pub fn render_message(
         msg.author
             .color
             .map(Color::to_u32)
-            .unwrap_or_else(|| palette().default_name),
+            .unwrap_or_else(|| fallback_name_color(&msg.author)),
     );
     // Show the time in the user's local timezone (the stored timestamp is UTC).
     let time = msg
@@ -2265,6 +2303,38 @@ pub fn render_system(text: &str, font_size: f32) -> impl IntoElement {
         .child(SharedString::from(text.to_string()))
 }
 
+/// A full-width date band drawn above the first row of each new local calendar
+/// day ("Wednesday, July 16, 2026" between hairlines) — Chatterino inserts a
+/// system row for this; ours is render-derived from the row's neighbors (see
+/// the log's item closure), so it needs no buffer row of its own. The hairlines
+/// derive from the palette's secondary-text tone at low alpha, so custom themes
+/// re-tint them automatically.
+pub fn render_day_divider(label: &str, font_size: f32) -> impl IntoElement {
+    let scale = Scale::new(font_size);
+    let p = palette();
+    let hairline = || {
+        div()
+            .flex_1()
+            .h(px(1.0))
+            .bg(gpui::rgba((p.timestamp << 8) | 0x55))
+    };
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .items_center()
+        .gap_2()
+        .py_1()
+        .child(hairline())
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(scale.small))
+                .text_color(rgb(p.timestamp))
+                .child(SharedString::from(label.to_string())),
+        )
+        .child(hairline())
+}
+
 /// A user-facing error: a red-tinted row whose text is drag-selectable (built from
 /// the same per-word [`SelectableText`] tokens as chat bodies, so it wraps and
 /// copies), with a small "⧉ copy" affordance that writes the full text to the
@@ -2906,7 +2976,7 @@ fn event_message_line(
         msg.author
             .color
             .map(Color::to_u32)
-            .unwrap_or(p.default_name),
+            .unwrap_or_else(|| fallback_name_color(&msg.author)),
     );
     let name_color = match msg.author.paint.as_ref().map(|paint| &paint.kind) {
         Some(PaintKind::Solid(c)) => *c,
@@ -3098,7 +3168,7 @@ pub fn render_thread_line(
         msg.author
             .color
             .map(Color::to_u32)
-            .unwrap_or_else(|| palette().default_name),
+            .unwrap_or_else(|| fallback_name_color(&msg.author)),
     );
     let name_text = SharedString::from(format!("{}:", msg.author.display_name));
     let name = div()

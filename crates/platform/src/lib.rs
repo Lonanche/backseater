@@ -113,6 +113,11 @@ pub struct EventDetails {
     /// disambiguating when one user redeems more than once at a time. `None` for
     /// non-reward events and rewards without text.
     pub redeem_input: Option<String>,
+    /// Replayed from the join backlog (like [`Message::historical`]): shown as a
+    /// faded, timestamp-sorted log row but kept out of the events panel — the
+    /// event happened before this session. Lives here (not on
+    /// [`ChatEvent::Event`]) so live construction sites stay untouched.
+    pub historical: bool,
 }
 
 /// A channel's active chat-restriction modes, platform-agnostic. Always a

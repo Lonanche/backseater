@@ -23,7 +23,7 @@ pub use connector::{TwitchAuth, TwitchSource};
 pub use eventsub::EventsubAuth;
 pub use eventsub_manager::{register as register_eventsub, Registration as EventsubRegistration};
 pub use helix::{fetch_pinned_message, Chatter, Chatters, UserInfo};
-pub use history::fetch_recent;
+pub use history::{fetch_gap, fetch_recent};
 pub use ivr::{fetch_live_status, LiveStatus, SubAge};
 pub use preview::TwitchClipPreviewProvider;
 pub use pubsub::run as run_pubsub;

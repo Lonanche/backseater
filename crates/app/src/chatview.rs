@@ -166,6 +166,10 @@ pub(crate) enum Row {
         /// connector supplied one, so the log can make the leading name (e.g.
         /// the person redeeming / subscribing) clickable to open their usercard.
         actor: Option<String>,
+        /// Replayed from the join backlog (`EventDetails::historical`): sorted
+        /// into the log by timestamp, rendered faded, never flashes the tab —
+        /// like [`Message::historical`].
+        historical: bool,
     },
     /// A stream going live or offline, shown as a highlighted notice row (green
     /// on live, muted on offline) with the platform icon.
@@ -263,29 +267,43 @@ pub(crate) struct LiveInfo {
 /// key (system/error/live notices), which are never deduplicated.
 pub(crate) fn row_key(row: &Row) -> Option<u64> {
     use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
     match row {
         Row::Message { msg, .. } if !msg.id.is_empty() => {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
             (0u8, msg.platform, &msg.id).hash(&mut h);
+            Some(h.finish())
         }
         Row::Event {
             platform,
             text,
             timestamp,
             ..
-        } => {
-            (1u8, *platform, timestamp, text).hash(&mut h);
-        }
-        _ => return None,
+        } => Some(event_row_key(*platform, timestamp, text)),
+        _ => None,
     }
-    Some(h.finish())
 }
 
-/// Where a backfilled history message with timestamp `ts` belongs among existing
-/// `rows`: the index of the first row that is a live message or a *later*
-/// historical message (so history stays timestamp-sorted and ahead of live chat),
-/// or `None` to append. Non-message rows are skipped. Free-standing (not a method)
-/// so the ordering can be unit-tested without a GPUI `ChatView`.
+/// [`row_key`]'s event arm, callable before a `Row::Event` is built — the store
+/// probes it up front so a replayed duplicate can be skipped *entirely* (pushing
+/// it into the events panel and only then having `row_push_back` silently drop
+/// the log row would double the panel entry).
+pub(crate) fn event_row_key(
+    platform: bks_core::Platform,
+    timestamp: &chrono::DateTime<chrono::Utc>,
+    text: &str,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (1u8, platform, timestamp, text).hash(&mut h);
+    h.finish()
+}
+
+/// Where a backfilled history row (message or event) with timestamp `ts` belongs
+/// among existing `rows`: the index of the first row that is live or a *later*
+/// historical row (so history stays timestamp-sorted and ahead of live chat), or
+/// `None` to append. Rows without a timestamp (system/error/live notices) are
+/// skipped. Free-standing (not a method) so the ordering can be unit-tested
+/// without a GPUI `ChatView`.
 pub(crate) fn history_insert_index<'a>(
     rows: impl Iterator<Item = &'a Row>,
     ts: chrono::DateTime<chrono::Utc>,
@@ -293,6 +311,11 @@ pub(crate) fn history_insert_index<'a>(
     rows.enumerate()
         .find(|(_, row)| match row {
             Row::Message { msg, .. } => !msg.historical || msg.timestamp > ts,
+            Row::Event {
+                historical,
+                timestamp,
+                ..
+            } => !historical || *timestamp > ts,
             _ => false,
         })
         .map(|(i, _)| i)
@@ -765,6 +788,16 @@ pub(crate) struct ChatView {
     /// (`list_state.reset`) would snap the frozen view to the live bottom, so
     /// it's deferred to the unpause.
     paused_needs_reset: bool,
+    /// The model `rows_generation` this view's `list_state` seed covered.
+    /// ⚠️ Replay guard: gpui delivers queued `cx.emit`s to subscribers created
+    /// between emit and flush, so right after seeding, this view can receive
+    /// the very events its seed already included — each would splice a phantom
+    /// list item (the 2×-items / invisible-day-divider bug). Structural events
+    /// at or below this generation are skipped; applied ones advance it.
+    applied_rows_generation: u64,
+    /// Same replay guard for the events panel: the next event sequence number
+    /// this view expects (its seed covered everything below).
+    applied_event_seq: u64,
     /// Set once the personal Twitch emotes have been fetched, so we only hit
     /// Helix the first time the picker opens (not on every toggle).
     emotes_fetched: bool,
@@ -853,7 +886,10 @@ impl ChatView {
         // Seed list_state to the model's current rows (an attach to an already-live
         // channel starts with a full buffer), then reconcile each change onto our
         // OWN list_state (the shared model can't touch per-view scroll state).
+        // The generation/seq watermarks make the subscription skip queued events
+        // the seed already covered (see `applied_rows_generation`).
         list_state.reset(channel.read(cx).len());
+        let applied_rows_generation = channel.read(cx).rows_generation();
         let _channel_sub = cx.subscribe(&channel, Self::on_channel_event);
 
         // The events panel is virtualized like the log; seed it with the shared
@@ -863,6 +899,7 @@ impl ChatView {
         let events_shown =
             filtered_event_seqs(channel.read(cx), config.event_kinds, config.collapse_gift_subs);
         events_list_state.reset(events_shown.len());
+        let applied_event_seq = channel.read(cx).next_event_seq();
 
         // The placeholder is kept current by `composer_placeholder` on render
         // ("Send a message to Twitch + Kick", a login hint when logged out).
@@ -981,6 +1018,8 @@ impl ChatView {
             log_hovered: false,
             log_paused: false,
             paused_needs_reset: false,
+            applied_rows_generation,
+            applied_event_seq,
             emotes_fetched: false,
             sent_history: Vec::new(),
             history_index: None,
@@ -1010,8 +1049,31 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) {
         use crate::channel_store::ChannelEvent;
+        // Replay guard: gpui flushes queued emits to subscribers created between
+        // emit and flush, so a freshly-seeded view can receive the events its
+        // seed already covered — applying them would splice phantom items (see
+        // `applied_rows_generation`). Skip them; advance the watermark otherwise.
+        if let ChannelEvent::Appended { generation, .. }
+        | ChannelEvent::Inserted { generation, .. }
+        | ChannelEvent::RemovedFront { generation } = event
+        {
+            if *generation <= self.applied_rows_generation {
+                tracing::debug!(
+                    "splice[{:?}]: replay-skip gen={generation} watermark={}",
+                    cx.entity().entity_id(),
+                    self.applied_rows_generation
+                );
+                return;
+            }
+            self.applied_rows_generation = *generation;
+        }
         match event {
-            ChannelEvent::Appended { index, msg } => {
+            ChannelEvent::Appended {
+                index,
+                msg,
+                historical,
+                ..
+            } => {
                 // Engage hover-pause lazily too (not just on hover-enter): the
                 // user may have scrolled back to the bottom while hovering.
                 self.maybe_pause_log(cx);
@@ -1019,7 +1081,40 @@ impl ChatView {
                 // unpause splices the missing tail back in); the view keeps
                 // showing `rows[0..item_count]`, whose indices stay valid.
                 if !self.log_paused {
-                    self.list_state.splice(*index..*index, 1);
+                    // Lockstep self-heal: an unpaused view mirrors
+                    // `rows[0..len]`, so a genuine append always lands at the
+                    // end — `index == item_count`. Any mismatch means the list
+                    // drifted (phantom or missing items); resync wholesale
+                    // instead of splicing relative to a wrong baseline.
+                    if *index != self.list_state.item_count() {
+                        tracing::debug!(
+                            "splice[{:?}]: resync — append idx={index} but count={}",
+                            cx.entity().entity_id(),
+                            self.list_state.item_count()
+                        );
+                        self.resync_log_to_model(cx);
+                    } else {
+                        self.list_state.splice(*index..*index, 1);
+                        // If the previously-last row drew the trailing "new day
+                        // started" band (a backlog older than the launch day),
+                        // this append replaces it with a leading divider on the
+                        // new row — re-measure the old last row so the band's
+                        // height can't linger in the cache.
+                        if *index > 0 {
+                            let stale_band = self
+                                .channel
+                                .read(cx)
+                                .rows
+                                .iter()
+                                .take(*index)
+                                .rev()
+                                .find_map(log::row_date)
+                                .is_some_and(|d| d < chrono::Local::now().date_naive());
+                            if stale_band {
+                                self.list_state.splice(*index - 1..*index, 1);
+                            }
+                        }
+                    }
                 }
                 // A new row may be a mention (for our terms) — flag the mentions
                 // panel to tail + feed the all-tabs store.
@@ -1029,16 +1124,16 @@ impl ChatView {
                 }
                 // Live activity → the app marks this tab unread if it's inactive.
                 // A historical row can also arrive via `Appended` (a backfilled
-                // message newer than everything currently buffered lands at the
-                // end, not through `Inserted`), so gate on `historical` rather
-                // than the event variant — the join backlog must never mark a tab
-                // unread. A non-message row (`None`: a live notice/error) is
-                // genuinely new, so it signals.
-                if msg.as_deref().is_none_or(|m| !m.historical) {
+                // row newer than everything currently buffered lands at the end,
+                // not through `Inserted`), so gate on the row's `historical`
+                // flag rather than the event variant — the join backlog must
+                // never mark a tab unread. A non-historical row (live chat, an
+                // event, a notice/error) is genuinely new, so it signals.
+                if !*historical {
                     cx.emit(TabActivity);
                 }
             }
-            ChannelEvent::Inserted { index, msg } => {
+            ChannelEvent::Inserted { index, msg, .. } => {
                 // History backfill sorts into place. While paused, an insert
                 // inside the frozen prefix must apply (it shifts the rows the
                 // frozen indices map to); one landing past it belongs to the
@@ -1046,19 +1141,35 @@ impl ChatView {
                 if !self.log_paused || *index <= self.list_state.item_count() {
                     let ix = (*index).min(self.list_state.item_count());
                     self.list_state.splice(ix..ix, 1);
+                    // The insert may hand a day-divider band over to (or
+                    // introduce one under) the next *dated* row — which can sit
+                    // past undated notice rows — so re-measure through it.
+                    self.remeasure_through_next_dated(ix + 1, cx);
                 }
                 self.note_new_row(msg.as_deref());
                 if let Some(m) = msg.as_deref() {
                     self.arm_inline_preview(m, cx);
                 }
             }
-            ChannelEvent::RemovedFront => {
+            ChannelEvent::RemovedFront { .. } => {
                 // Applied even while paused: the frozen view tracks the shared
                 // buffer's front so `rows[ix]` lookups can't skew, and the
                 // trimmed rows are far above a bottom-anchored viewport.
                 self.list_state.splice(0..1, 0);
+                // The trim may have removed the buffer's first dated row, so
+                // the *new* first dated row's divider status can flip —
+                // re-measure from the front through it (it can sit past
+                // undated notice rows).
+                self.remeasure_through_next_dated(0, cx);
             }
             ChannelEvent::EventAppended { seq } => {
+                // Same replay guard as the row events: the seed already listed
+                // everything below the watermark, so a queued replay would
+                // duplicate the panel row.
+                if *seq < self.applied_event_seq {
+                    return;
+                }
+                self.applied_event_seq = *seq + 1;
                 // Filter-passing events append to this view's events panel.
                 // Looked up by stable sequence number: `None` means a burst
                 // already trimmed it past MAX_EVENTS — nothing to show.
@@ -1090,7 +1201,14 @@ impl ChatView {
                     // shows in-place changes like strikes).
                     self.paused_needs_reset = true;
                 } else {
-                    self.list_state.reset(self.channel.read(cx).len());
+                    // Re-measure at the VIEW's current count — NOT the model's
+                    // len. A `Changed` can interleave a delivery burst (a ban
+                    // fade or cosmetics landing mid-history-load), when the
+                    // model is already ahead of the still-queued row events;
+                    // resetting to its len jumped this list past them, and each
+                    // pending append then spliced a phantom trailing item (the
+                    // invisible-day-divider bug's second head).
+                    self.list_state.reset(self.list_state.item_count());
                 }
                 // Pins may have changed: drop dismissals whose pin is gone
                 // (unpinned/replaced/expired) so the restore chip only ever
@@ -1154,13 +1272,15 @@ impl ChatView {
         let Some(msg) = msg else {
             return;
         };
-        if self.mentions.matches(&msg.raw_text) {
-            self.mentions_new = true;
-            if !msg.historical {
-                let sound = self.mentions.sound_for(&msg.raw_text);
-                self.pending_mentions.push((msg.clone(), sound));
-            }
+        // The join backlog stays out of the mentions panel and the all-tabs
+        // feed, so it must not light the unread indicator either — it used to,
+        // leaving a lit dot over an empty panel on every launch.
+        if msg.historical || !self.mentions.matches(&msg.raw_text) {
+            return;
         }
+        self.mentions_new = true;
+        let sound = self.mentions.sound_for(&msg.raw_text);
+        self.pending_mentions.push((msg.clone(), sound));
     }
 
     /// Reconnects this tab to `config`'s channels — used when a platform is *added
@@ -1187,10 +1307,13 @@ impl ChatView {
         // A fresh model means a fresh list — any hover-pause freeze is moot.
         self.log_paused = false;
         self.paused_needs_reset = false;
-        self.list_state.reset(channel.read(cx).len());
         self._channel_sub = cx.subscribe(&channel, Self::on_channel_event);
         self.channel_key = key;
         self.channel = channel;
+        // Seed the list from the new model + re-arm the replay guards (its
+        // queued emits may include events this seed already covers); the event
+        // watermark is re-armed by `rebuild_events_shown` below.
+        self.resync_log_to_model(cx);
         // The native-emote sets are per-channel (the viewed channel's locked
         // set + its follower emotes) — refetch them for the new one.
         self.refresh_personal_emotes(cx);
@@ -1208,6 +1331,10 @@ impl ChatView {
             self.config.collapse_gift_subs,
         );
         self.events_list_state.reset(self.events_shown.len());
+        // The rebuild snapshots the buffer wholesale, so re-arm the replay
+        // watermark — a queued `EventAppended` the snapshot already includes
+        // would otherwise append its seq a second time.
+        self.applied_event_seq = self.channel.read(cx).next_event_seq();
     }
 
     /// Updates the mention terms used to tint incoming messages. New messages
@@ -1228,7 +1355,7 @@ impl ChatView {
         if self.log_paused {
             self.paused_needs_reset = true;
         } else {
-            self.list_state.reset(self.channel.read(cx).len());
+            self.resync_log_to_model(cx);
         }
     }
 
@@ -1301,6 +1428,42 @@ impl ChatView {
         self.log_view.update(cx, |_, cx| cx.notify());
     }
 
+    /// Resets the log list to mirror the model's rows wholesale AND re-arms the
+    /// replay watermark. The reset covers the model's *current* state, so any
+    /// structural events still queued behind it (gpui flushes emits late) must
+    /// be skipped — without the re-arm each would splice a phantom item on top
+    /// of rows the reset already counted. ⚠️ Every reset-to-model-len goes
+    /// through here; only [`ChannelEvent::Changed`]'s in-place re-measure keeps
+    /// the view's own count (see its comment).
+    fn resync_log_to_model(&mut self, cx: &mut Context<Self>) {
+        let model = self.channel.read(cx);
+        let (len, generation) = (model.len(), model.rows_generation());
+        self.list_state.reset(len);
+        self.applied_rows_generation = generation;
+    }
+
+    /// Re-measures the rows from `from` up to and *including* the next dated
+    /// row. A structural change just above `from` can move a day-divider band
+    /// owned by the next dated row — which may sit past undated notice rows
+    /// (Live/system), so re-measuring only the immediate neighbor left the
+    /// divider clipped inside that row's stale cached height (the "divider
+    /// missing until something re-measures" bug, seen in chats with a "went
+    /// live" row between the backlog and today's chat).
+    fn remeasure_through_next_dated(&mut self, from: usize, cx: &mut Context<Self>) {
+        let count = self.list_state.item_count();
+        if from >= count {
+            return;
+        }
+        let mut end = from;
+        for row in self.channel.read(cx).rows.iter().skip(from).take(count - from) {
+            end += 1;
+            if log::row_date(row).is_some() {
+                break;
+            }
+        }
+        self.list_state.splice(from..end, end - from);
+    }
+
     /// The log wrapper's hover tracking (the pause-on-hover feature). Entering
     /// engages the pause when eligible; leaving resumes — back to the newest
     /// message if the view was still following the tail, staying put if the
@@ -1343,14 +1506,19 @@ impl ChatView {
         let len = self.channel.read(cx).len();
         if self.paused_needs_reset {
             self.paused_needs_reset = false;
-            self.list_state.reset(len);
+            self.resync_log_to_model(cx);
         } else {
             let shown = self.list_state.item_count();
             if len > shown {
                 self.list_state.splice(shown..shown, len - shown);
+                // The frozen last row may have drawn the trailing new-day band
+                // — re-measure it now that rows follow it.
+                if shown > 0 {
+                    self.list_state.splice(shown - 1..shown, 1);
+                }
             } else if len < shown {
                 // Shouldn't happen (trims apply while paused) — resync anyway.
-                self.list_state.reset(len);
+                self.resync_log_to_model(cx);
             }
         }
         self.refresh_log(cx);
@@ -1370,7 +1538,7 @@ impl ChatView {
         // The reset below syncs any hover-pause-withheld tail in, so the
         // deferred re-measure (if one was pending) just happened.
         self.paused_needs_reset = false;
-        self.list_state.reset(self.channel.read(cx).len());
+        self.resync_log_to_model(cx);
         self.events_list_state.reset(self.events_shown.len());
         self.refresh_log(cx);
         cx.notify();
@@ -4434,7 +4602,9 @@ impl ChatView {
                         } => msg,
                         _ => return None,
                     };
-                    if !self.mentions.matches(&msg.raw_text) {
+                    // The join backlog stays out of the mentions panel (like the
+                    // all-tabs feed): a days-old mention would misread as new.
+                    if msg.historical || !self.mentions.matches(&msg.raw_text) {
                         return None;
                     }
                     let struck = model.is_struck(msg);
@@ -6365,6 +6535,59 @@ mod tests {
         insert(&mut rows, 30, true);
         // History sorts among itself and sits before the live message.
         assert_eq!(timestamps(&rows), vec![30, 50, 100]);
+    }
+
+    fn event_row(secs: i64, historical: bool) -> Row {
+        Row::Event {
+            platform: Platform::Twitch,
+            kind: bks_platform::EventKind::Sub,
+            text: format!("e{secs}"),
+            timestamp: Utc.timestamp_opt(secs, 0).unwrap(),
+            message: None,
+            accent: None,
+            actor: None,
+            historical,
+        }
+    }
+
+    #[test]
+    fn historical_events_interleave_with_history_messages() {
+        // A replayed sub (USERNOTICE from the backlog) sorts among historical
+        // chat by timestamp — both as an insertion anchor and when placed.
+        let mut rows = VecDeque::new();
+        for s in [10, 30, 50] {
+            insert(&mut rows, s, true);
+        }
+        let ev_ts = Utc.timestamp_opt(20, 0).unwrap();
+        match history_insert_index(rows.iter(), ev_ts) {
+            Some(i) => rows.insert(i, event_row(20, true)),
+            None => rows.push_back(event_row(20, true)),
+        }
+        // A later history message from the other platform sorts *past* the
+        // historical event (the event anchors the scan like a message).
+        insert(&mut rows, 25, true);
+        let kinds: Vec<i64> = rows
+            .iter()
+            .map(|r| match r {
+                Row::Message { msg, .. } => msg.timestamp.timestamp(),
+                Row::Event { timestamp, .. } => timestamp.timestamp(),
+                _ => -1,
+            })
+            .collect();
+        assert_eq!(kinds, vec![10, 20, 25, 30, 50]);
+    }
+
+    #[test]
+    fn live_events_are_never_an_insertion_anchor() {
+        // A live event (pushed at the end) behaves like a live message: history
+        // inserts ahead of it, never after.
+        let mut rows = VecDeque::new();
+        rows.push_back(event_row(100, false));
+        insert(&mut rows, 50, true);
+        match rows.front() {
+            Some(Row::Message { msg }) => assert_eq!(msg.timestamp.timestamp(), 50),
+            _ => panic!("history should sort ahead of a live event"),
+        }
     }
 
     #[test]
