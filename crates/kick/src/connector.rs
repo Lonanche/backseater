@@ -9,7 +9,9 @@
 use anyhow::Context;
 use async_trait::async_trait;
 use bks_core::{plural, Message, Platform};
-use bks_platform::{ChannelMeta, ChatEvent, ChatSink, ChatSource, ChatStream, EventDetails, EventKind};
+use bks_platform::{
+    ChannelMeta, ChatEvent, ChatModes, ChatSink, ChatSource, ChatStream, EventDetails, EventKind,
+};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::mpsc;
@@ -242,6 +244,65 @@ struct MessageDeletedEvent {
 #[derive(Deserialize)]
 struct MessageRef {
     id: String,
+}
+
+/// `ChatroomUpdatedEvent` data: the channel's chat-restriction modes changed.
+/// Always a full snapshot (every mode is present), so it maps straight onto a
+/// [`ChatModes`] with no per-channel merge state (unlike Twitch's delta
+/// ROOMSTATE). `slow_mode.message_interval` is in seconds; `followers_mode`/
+/// `account_age` `min_duration` is in minutes. `account_age` (min account age)
+/// has no [`ChatModes`] slot and is ignored.
+#[derive(Deserialize)]
+struct ChatroomUpdatedEvent {
+    #[serde(default)]
+    emotes_mode: ModeToggle,
+    #[serde(default)]
+    subscribers_mode: ModeToggle,
+    #[serde(default)]
+    slow_mode: SlowMode,
+    #[serde(default)]
+    followers_mode: FollowersMode,
+}
+
+#[derive(Deserialize, Default)]
+struct ModeToggle {
+    #[serde(default)]
+    enabled: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct SlowMode {
+    #[serde(default)]
+    enabled: bool,
+    /// Seconds between one user's messages.
+    #[serde(default)]
+    message_interval: u64,
+}
+
+#[derive(Deserialize, Default)]
+struct FollowersMode {
+    #[serde(default)]
+    enabled: bool,
+    /// Minimum follow age in minutes.
+    #[serde(default)]
+    min_duration: u64,
+}
+
+impl ChatroomUpdatedEvent {
+    fn to_modes(&self) -> ChatModes {
+        use std::time::Duration;
+        ChatModes {
+            emote_only: self.emotes_mode.enabled,
+            subscribers_only: self.subscribers_mode.enabled,
+            followers_only: self
+                .followers_mode
+                .enabled
+                .then(|| Duration::from_secs(self.followers_mode.min_duration * 60)),
+            slow: (self.slow_mode.enabled && self.slow_mode.message_interval > 0)
+                .then(|| Duration::from_secs(self.slow_mode.message_interval)),
+            unique: false,
+        }
+    }
 }
 
 /// Installs rustls's `ring` crypto provider exactly once. Required because the
@@ -637,6 +698,16 @@ async fn run_client(channel: String, tx: ChatSink, fetch_history: bool) -> anyho
                             },
                         );
                     }
+                }
+            }
+            // Chat-restriction modes changed (emote-only/sub-only/slow/followers).
+            // A full snapshot; the store dedupes the no-op case.
+            "ChatroomUpdatedEvent" => {
+                if let Ok(ev) = serde_json::from_str::<ChatroomUpdatedEvent>(&envelope.data) {
+                    let _ = tx.send(ChatEvent::ChatModes {
+                        platform: Platform::Kick,
+                        modes: ev.to_modes(),
+                    });
                 }
             }
             // Deliberately ignored.
