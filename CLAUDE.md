@@ -250,6 +250,37 @@ platform = implement one trait + one message builder, with zero UI changes**.
   narrow" footer. The search `InputState` is **window-bound** (created against the viewer-list
   window when it opens, like the settings inputs); list state lives on `ChatView`
   (`viewer_list`/`viewer_list_window`), module `crates/app/src/viewerlist.rs`.
+- **Chat search (Ctrl+R — bare Ctrl/Cmd only, Shift/Alt chords pass through)**: a child OS
+  window per view listing the tab's buffered chat history with a live search box
+  (case-insensitive substring of message text / login / display name; matching in
+  `crates/app/src/search.rs` on the shared `bks_core::contains_ci`, whose ASCII-needle path is
+  allocation-free since it runs per buffered message on every rebuild — the viewer list filters
+  through it too; the normalized query is cached on `ChatView.search_query` per keystroke, not
+  re-derived per frame). Results are rendered **exactly like chat rows**
+  (`render::render_message` on the chat-log background — badges, emotes, cosmetics via
+  `log::decorate`, strike/fade, mention tint, this view's ignore/suppress applied; throwaway
+  selection context like the usercard list, default `RowHandlers` so the whole row is the click
+  target) in **chat order, newest at the bottom**, and the list is **virtualized** like the log
+  (`search_list_state`, Bottom + Tail — a plain scroll column laid out and kept animating every
+  off-screen row, which made the window sluggish; no display cap needed, the whole matched set
+  is listed). `search_results`/`search_list_state` stay in lockstep via
+  `ChatView::sync_search_results`, keyed by `(rows_generation, query)` so the per-notify body
+  re-render is a no-op (an ignore-list edit changes membership without moving either key, so
+  `set_ignore` clears `search_synced`): a query change rebuilds wholesale + re-snaps to the bottom
+  (`set_follow_mode(Tail)` re-engages = scrolls to the end), a buffer change is mirrored as
+  end-splices when the old results survive as a contiguous run (`Arc::ptr_eq` diff — steady
+  state: front trims + back appends; Tail keeps it glued without yanking a scrolled-up reader),
+  anything else (mid-buffer backfill insert) resets wholesale. A fresh `ListState` per open
+  (`fresh_search_list_state`) starts at the bottom; images route through the app-wide
+  `LruImageCache` (`gpui::image_cache` wrap) so the sweep sees them; results are cleared on
+  window close. Clicking a result jumps the log to that message reusing the mention-jump reveal
+  + flash (`jump_to_message` — aged-out rows get the same transient note), activates the view's
+  own `parent_window` (so a popout's search brings the popout forward), and emits
+  `chatview::ActivateRequested`, which the app answers by re-selecting the owning tab
+  (`subscribe_tab_activate`) in case the user switched tabs meanwhile. Ctrl+R is a bubble
+  `on_key_down` on the `ChatView` root (works from composer or log focus, and in popouts); the
+  search `InputState` is window-bound like the viewer list's and focused on open so Ctrl+R →
+  type Just Works. Only `Row::Message` rows are searched — event/system rows aren't jumpable.
 - **Live status bar + viewer counts**: a slim bar at the top of each chat view (above the pin
   banners; popouts get it too) shows, per live platform of the tab, its icon + channel name + a
   live dot + the concurrent viewer count (`ChatView::render_status_bar`; hidden when nothing is

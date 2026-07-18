@@ -59,14 +59,15 @@ pub const MAX_SHOWN: usize = 500;
 
 /// The chatters matching `query` (case-insensitive substring of login or
 /// display name; an empty query matches all), in the stored (sorted) order.
+/// Matching is the shared allocation-free [`bks_core::contains_ci`].
 pub fn filter<'a>(chatters: &'a [Chatter], query: &str) -> Vec<&'a Chatter> {
     let query = query.trim().to_lowercase();
     chatters
         .iter()
         .filter(|c| {
             query.is_empty()
-                || c.user_login.contains(&query)
-                || c.user_name.to_lowercase().contains(&query)
+                || bks_core::contains_ci(&c.user_login, &query)
+                || bks_core::contains_ci(&c.user_name, &query)
         })
         .collect()
 }

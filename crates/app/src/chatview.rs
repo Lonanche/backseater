@@ -30,7 +30,7 @@ use crate::image_cache::LruImageCache;
 use crate::session::Session;
 use crate::tabs::{self, TabConfig};
 use crate::{
-    child_window, commands, controller, render, selectable, usercard, viewerlist,
+    child_window, commands, controller, render, search, selectable, usercard, viewerlist,
     USERCARD_MESSAGES,
 };
 use log::LogView;
@@ -130,6 +130,17 @@ const VIEWERLIST_WINDOW_SIZE: gpui::Size<Pixels> = gpui::Size {
 /// Smallest the viewer-list window can be resized to.
 const VIEWERLIST_MIN_SIZE: gpui::Size<Pixels> = gpui::Size {
     width: px(240.),
+    height: px(280.),
+};
+
+/// Default size of the chat-search child window (Ctrl+R).
+const SEARCH_WINDOW_SIZE: gpui::Size<Pixels> = gpui::Size {
+    width: px(560.),
+    height: px(620.),
+};
+/// Smallest the search window can be resized to.
+const SEARCH_MIN_SIZE: gpui::Size<Pixels> = gpui::Size {
+    width: px(300.),
     height: px(280.),
 };
 
@@ -553,6 +564,15 @@ pub(crate) struct TabWentLive {
 
 impl gpui::EventEmitter<TabWentLive> for ChatView {}
 
+/// Emitted when a clicked search-result row needs this view's tab brought to
+/// the front (the user may have switched tabs since opening the search
+/// window); the app answers by re-selecting the owning tab. Activating the
+/// hosting OS window is the view's own job (`parent_window`), so a popout's
+/// search works without the app's help.
+pub(crate) struct ActivateRequested;
+
+impl gpui::EventEmitter<ActivateRequested> for ChatView {}
+
 /// One tab's chat feed + input. Owns its connection via [`Controller`].
 pub(crate) struct ChatView {
     /// The shared channel model: the canonical row
@@ -656,6 +676,31 @@ pub(crate) struct ChatView {
     /// (`None` while no window is up); the subscription is replaced with it.
     viewer_search: Option<Entity<InputState>>,
     _viewer_search_sub: Option<gpui::Subscription>,
+    /// The child OS window hosting this view's chat search (Ctrl+R), when open.
+    /// Re-opening refocuses it instead of opening more.
+    search_window: Option<gpui::AnyWindowHandle>,
+    /// Search box filtering the chat history in the search window. Window-bound
+    /// like all kit inputs, so it's created against the search window when that
+    /// opens (`None` while no window is up).
+    search_input: Option<Entity<InputState>>,
+    _search_input_sub: Option<gpui::Subscription>,
+    /// The current normalized search query, cached on each input change — the
+    /// search body renders on every host notify (including animation ticks),
+    /// so it must not re-read + re-lowercase the input per frame.
+    search_query: String,
+    /// The search window's virtualized result list (Bottom + Tail like the
+    /// log/events panel): only on-screen rows are built per frame. Must stay
+    /// in lockstep with `search_results` (same rule as `rows`/`list_state`);
+    /// recreated fresh on each window open so it starts at the bottom.
+    search_list_state: ListState,
+    /// The matched messages the search list shows, in chat order (oldest
+    /// first). `Arc` clones out of the shared buffer, rebuilt/spliced by
+    /// `sync_search_results`; cleared when the window closes.
+    search_results: Vec<std::sync::Arc<Message>>,
+    /// The `(rows_generation, normalized query)` the results were last built
+    /// against — `sync_search_results` is a no-op until either moves. `None`
+    /// forces a rebuild (fresh open).
+    search_synced: Option<(u64, String)>,
     /// The main window this tab renders in — the usercard window positions
     /// itself near it.
     parent_window: gpui::AnyWindowHandle,
@@ -944,13 +989,16 @@ impl ChatView {
             cx.notify();
         });
 
-        // A closed (or rebuilt) tab takes its usercard + viewer-list windows
-        // with it.
+        // A closed (or rebuilt) tab takes its usercard + viewer-list + search
+        // windows with it.
         cx.on_release(|this: &mut Self, cx: &mut App| {
             if let Some(handle) = this.usercard_window.take() {
                 let _ = handle.update(cx, |_, window, _| window.remove_window());
             }
             if let Some(handle) = this.viewer_list_window.take() {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            }
+            if let Some(handle) = this.search_window.take() {
                 let _ = handle.update(cx, |_, window, _| window.remove_window());
             }
         })
@@ -992,6 +1040,13 @@ impl ChatView {
             viewer_list_window: None,
             viewer_search: None,
             _viewer_search_sub: None,
+            search_window: None,
+            search_input: None,
+            _search_input_sub: None,
+            search_query: String::new(),
+            search_list_state: fresh_search_list_state(),
+            search_results: Vec::new(),
+            search_synced: None,
             parent_window: window.window_handle(),
             emote_popup: None,
             link_preview: None,
@@ -1366,6 +1421,11 @@ impl ChatView {
     /// hidden. The caller still repaints the log afterward.
     pub(crate) fn set_ignore(&mut self, ignore: bks_core::IgnoreList, cx: &mut Context<Self>) {
         self.ignore = ignore;
+        // The search window's result membership is filtered by this list, but
+        // its sync is keyed on (rows_generation, query) — neither moves on an
+        // ignore edit, so force the rebuild or an open window keeps listing
+        // newly-ignored users until the next buffered message.
+        self.search_synced = None;
         // Reset unless paused: a paused view must not re-measure (that snaps the
         // frozen view to the live bottom) — unpause_log resets when it resumes.
         if self.log_paused {
@@ -2436,6 +2496,14 @@ impl ChatView {
         msg_id: &str,
         cx: &mut Context<Self>,
     ) {
+        // The index below comes from the full model, but a hover-paused list
+        // only holds `rows[0..item_count]` — a search/mention click on a
+        // withheld message would reveal an index the frozen list doesn't
+        // have. Normally the pointer already left the log (which unpauses);
+        // this flushes any pause that survived.
+        if self.log_paused {
+            self.unpause_log(cx);
+        }
         let index = self.channel.read(cx).rows.iter().position(|row| {
             matches!(row, Row::Message { msg } if msg.platform == platform && msg.id == msg_id)
         });
@@ -3317,6 +3385,312 @@ impl ChatView {
             body = body.child(Input::new(search));
         }
         body.child(content).into_any_element()
+    }
+
+    /// Opens (or refocuses) this view's chat-search window (Ctrl+R). Deferred
+    /// like the viewer list: opening a window draws it synchronously,
+    /// re-entering this entity for the body.
+    pub(crate) fn open_search(&mut self, cx: &mut Context<Self>) {
+        let view = cx.entity();
+        cx.spawn(async move |_, cx| {
+            cx.update(|cx| Self::show_search_window(view, cx));
+        })
+        .detach();
+    }
+
+    /// Opens the child OS window hosting this tab's chat search, or refocuses
+    /// an already-open one (putting the caret back in the search box). Runs
+    /// from a plain `App` context (see the spawn in [`open_search`]). The
+    /// search input is created against this window — kit inputs are
+    /// window-bound (same rule as the viewer-list search).
+    fn show_search_window(view: Entity<Self>, cx: &mut App) {
+        let title = format!("Search - {}", view.read(cx).config.display_name());
+        if let Some(handle) = view.read(cx).search_window {
+            if child_window::focus_existing(handle, Some(&title), cx) {
+                let _ = handle.update(cx, |_, window, cx| {
+                    view.update(cx, |this, cx| {
+                        if let Some(input) = &this.search_input {
+                            input.update(cx, |state, cx| state.focus(window, cx));
+                        }
+                    });
+                });
+                return;
+            }
+            // The window closed under us — fall through and open a fresh one.
+        }
+
+        let opened = child_window::open_centered(
+            &title,
+            SEARCH_WINDOW_SIZE,
+            SEARCH_MIN_SIZE,
+            view.read(cx).parent_window,
+            view.clone(),
+            |this, cx| this.search_body(cx),
+            cx,
+        );
+        let Ok((handle, content)) = opened else {
+            return;
+        };
+        let _ = handle.update(cx, |_, window, cx| {
+            view.update(cx, |this, cx| {
+                let input =
+                    cx.new(|cx| InputState::new(window, cx).placeholder("Search messages…"));
+                // Focus the box so Ctrl+R → type works without a click.
+                input.update(cx, |state, cx| state.focus(window, cx));
+                this._search_input_sub =
+                    Some(cx.subscribe_in(&input, window, Self::on_search_input_event));
+                this.search_input = Some(input);
+                this.search_window = Some(handle);
+                // A fresh list state per open starts at the bottom (a Bottom-
+                // aligned list with no scroll history shows its newest rows)
+                // and tailing; `search_synced = None` forces the first body
+                // render to rebuild the results. The input starts empty.
+                this.search_query = String::new();
+                this.search_list_state = fresh_search_list_state();
+                this.search_results = Vec::new();
+                this.search_synced = None;
+                // The user closing the window (OS ✕) releases its content view;
+                // drop the state then — unless a newer window replaced it.
+                cx.observe_release(&content, move |this, _, cx| {
+                    if this.search_window == Some(handle) {
+                        this.search_window = None;
+                        this.search_input = None;
+                        this._search_input_sub = None;
+                        // Free the retained Arc clones; the next open rebuilds.
+                        this.search_results = Vec::new();
+                        this.search_synced = None;
+                    }
+                    cx.notify();
+                })
+                .detach();
+                cx.notify();
+            });
+        });
+    }
+
+    /// Re-filters the search results as the user types: caches the normalized
+    /// query here — once per keystroke, not per frame in the body — and lets
+    /// the next body render rebuild + re-snap (`search_synced` is keyed on it).
+    fn on_search_input_event(
+        &mut self,
+        state: &Entity<InputState>,
+        event: &InputEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let InputEvent::Change = event {
+            self.search_query = search::normalize(&state.read(cx).value());
+            cx.notify();
+        }
+    }
+
+    /// Reconciles the search window's results + virtualized list with the
+    /// shared buffer. Keyed by `(rows_generation, query)`, so it's a no-op —
+    /// the common case, since the body re-renders on every host notify —
+    /// until either moves (an ignore-list edit also changes membership without
+    /// moving either key, so `set_ignore` clears `search_synced` directly). A query change rebuilds wholesale and re-snaps to
+    /// the newest match (any reading position is meaningless then); a buffer
+    /// change is mirrored as end-splices when the old results survive as a
+    /// contiguous run (the steady state: trims at the front, appends at the
+    /// back — `FollowMode::Tail` then keeps the list glued to the bottom
+    /// without yanking a user who scrolled up), falling back to a wholesale
+    /// re-measure for anything else (a historical backfill insert landing
+    /// mid-buffer).
+    fn sync_search_results(&mut self, cx: &mut Context<Self>) {
+        let generation = self.channel.read(cx).rows_generation();
+        if self
+            .search_synced
+            .as_ref()
+            .is_some_and(|(g, q)| *g == generation && *q == self.search_query)
+        {
+            return;
+        }
+        let query_changed = self
+            .search_synced
+            .as_ref()
+            .is_none_or(|(_, q)| *q != self.search_query);
+        // Rows this view ignores stay hidden here too, like the log.
+        let new: Vec<std::sync::Arc<Message>> = {
+            let model = self.channel.read(cx);
+            search::filter(model.rows.iter(), &self.search_query)
+                .into_iter()
+                .filter(|msg| !self.ignore.matches_message(msg))
+                .cloned()
+                .collect()
+        };
+        if query_changed {
+            self.search_list_state.reset(new.len());
+            self.search_list_state.set_follow_mode(FollowMode::Tail);
+        } else {
+            // Where does the old run start inside the new one? Front trims drop
+            // old leading items; appends extend past the old end. `Arc::ptr_eq`
+            // works because both sets clone the same buffer `Arc`s.
+            let old = &self.search_results;
+            let front_drop = match new.first() {
+                Some(first) => old
+                    .iter()
+                    .position(|m| std::sync::Arc::ptr_eq(m, first))
+                    .unwrap_or(old.len()),
+                None => old.len(),
+            };
+            let kept = old.len() - front_drop;
+            let is_end_delta = kept <= new.len()
+                && old[front_drop..]
+                    .iter()
+                    .zip(new.iter())
+                    .all(|(a, b)| std::sync::Arc::ptr_eq(a, b));
+            if is_end_delta {
+                if front_drop > 0 {
+                    self.search_list_state.splice(0..front_drop, 0);
+                }
+                if new.len() > kept {
+                    self.search_list_state.splice(kept..kept, new.len() - kept);
+                }
+            } else {
+                self.search_list_state.reset(new.len());
+            }
+        }
+        self.search_results = new;
+        self.search_synced = Some((generation, self.search_query.clone()));
+    }
+
+    /// The search window's content: a match-count header, the search box, and
+    /// the matched rows rendered exactly like chat rows (badges, emotes,
+    /// cosmetics, strike/fade — `render::render_message`), in chat order with
+    /// the newest at the bottom. The list is **virtualized** like the log and
+    /// events panel (only on-screen rows are built per frame — a plain scroll
+    /// column laid out, and kept animating, every off-screen row too, which
+    /// made the window sluggish): `search_list_state` + `search_results` stay
+    /// in lockstep via [`sync_search_results`]. It opens at the bottom, tails
+    /// new arrivals natively (`FollowMode::Tail`), and re-snaps on a query
+    /// change. Clicking a row jumps the chat log to that message (same reveal
+    /// + flash as a clicked mention) and brings the chat window forward.
+    fn search_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        self.sync_search_results(cx);
+
+        let total = self.search_results.len();
+        let unit = bks_core::plural(total as u64, "message", "messages");
+        let header_text = if self.search_query.is_empty() {
+            // Just the shown count — "in history" would overstate it: rows the
+            // view ignores are (correctly) excluded, like in the log.
+            format!("{total} {unit}")
+        } else {
+            format!("{total} matching {unit}")
+        };
+        let header = div()
+            .text_size(px(13.))
+            .text_color(cx.theme().muted_foreground)
+            .child(SharedString::from(header_text));
+
+        let results: gpui::AnyElement = if total == 0 {
+            div()
+                .flex_1()
+                .min_h_0()
+                .pt_2()
+                .text_size(px(13.))
+                .text_color(cx.theme().muted_foreground)
+                .child(SharedString::from("No matching messages"))
+                .into_any_element()
+        } else {
+            let font_size = self.font_size;
+            let view = cx.entity();
+            // One throwaway selection context shared by all rows (they aren't
+            // part of any drag-select), built once per body render — not per
+            // visible row per frame (it's an Rc allocation).
+            let selection = selectable::Selection::new();
+            selection.begin_frame();
+            let search_list = gpui::list(
+                self.search_list_state.clone(),
+                move |ix, _window, cx: &mut gpui::App| {
+                    let this = view.read(cx);
+                    let model = this.channel.read(cx);
+                    let Some(msg) = this.search_results.get(ix) else {
+                        return div().into_any_element();
+                    };
+                    // Struck (ban/delete) + cosmetics resolve against the live
+                    // model per build, same as the log's rows.
+                    let struck = model.is_struck(msg);
+                    let mentioned = this.mentions.matches(&msg.raw_text);
+                    let suppressed = this.suppress.matches_message(msg);
+                    let decorated = log::decorate(msg, model);
+                    // Ordinals only need ordering, so the row index strides
+                    // them like the log.
+                    let mut ordinal = ix * crate::ORDINAL_STRIDE;
+                    let row = render::render_message(
+                        &decorated,
+                        render::RowFlags {
+                            struck,
+                            mentioned,
+                            hide_timestamp: !crate::settings::show_timestamps_chat(),
+                            suppressed,
+                            ..Default::default()
+                        },
+                        font_size,
+                        &selection,
+                        &mut ordinal,
+                        render::RowHandlers::default(),
+                    );
+                    // An Arc bump (not an id-String clone) identifies the row
+                    // for the click; capturing `ix` instead would mis-target
+                    // after a splice between paint and click.
+                    let msg = msg.clone();
+                    let entity = view.clone();
+                    div()
+                        .id(("search-hit", ix))
+                        .w_full()
+                        .min_w_0()
+                        .px(px(6.0))
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(render::row_hover()))
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.jump_to_message(msg.platform, &msg.id, cx);
+                                // Bring the chat window forward so the jump is
+                                // seen; the app re-selects this tab
+                                // (`ActivateRequested`) in case the user
+                                // switched tabs meanwhile.
+                                let _ = this
+                                    .parent_window
+                                    .update(cx, |_, window, _| window.activate_window());
+                                cx.emit(ActivateRequested);
+                            });
+                        })
+                        .child(row)
+                        .into_any_element()
+                },
+            )
+            .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
+            .size_full();
+
+            // On the chat log's (lighter) background so the rows read exactly
+            // like the log; images route through the app-wide LRU cache so the
+            // sweep sees them (same as the log's rows). Overlay scrollbar only
+            // while scrolled off the bottom, like the log's.
+            div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .rounded_md()
+                .bg(gpui::rgb(render::chat_bg()))
+                .py_1()
+                .text_size(px(font_size))
+                .child(
+                    gpui::image_cache(self.image_cache.clone())
+                        .size_full()
+                        .child(search_list),
+                )
+                .when(!self.search_list_state.is_following_tail(), |d| {
+                    d.vertical_scrollbar(&self.search_list_state)
+                })
+                .into_any_element()
+        };
+
+        let mut body = v_flex().h_full().gap_2().child(header);
+        if let Some(input) = &self.search_input {
+            body = body.child(Input::new(input));
+        }
+        body.child(results).into_any_element()
     }
 
     /// Opens the emote popup for a clicked 7TV link: shows a loading placeholder
@@ -5998,6 +6372,22 @@ impl Render for ChatView {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            // Ctrl+R opens this tab's chat-search window. A bubble listener on
+            // the root sees the keystroke from wherever focus sits (the
+            // composer input, the log, ...).
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {
+                let ks = &ev.keystroke;
+                // Bare Ctrl/Cmd+R only — Ctrl+Shift/Alt+R are other chords
+                // (browser-refresh muscle memory) and must not be swallowed.
+                if ks.key == "r"
+                    && (ks.modifiers.control || ks.modifiers.platform)
+                    && !ks.modifiers.shift
+                    && !ks.modifiers.alt
+                {
+                    this.open_search(cx);
+                    cx.stop_propagation();
+                }
+            }))
             // Live viewer-count status bar above the panels; pinned messages
             // float *inside* the chat log (see `render_pin_overlay`) and the
             // composer sits inside the chat panel (see `render_composer`).
@@ -6248,6 +6638,15 @@ fn filtered_event_seqs(
 /// position alone so they can read history. `offset.y` grows more negative as
 /// you scroll down, reaching `-max_offset.y` at the bottom (a small epsilon
 /// absorbs rounding).
+/// A fresh Bottom-aligned, tail-following list state for the search window's
+/// virtualized results — one per window open, so it starts glued to the newest
+/// row (a Bottom list with no scroll history shows its end) like the log.
+fn fresh_search_list_state() -> ListState {
+    let state = ListState::new(0, ListAlignment::Bottom, px(200.));
+    state.set_follow_mode(FollowMode::Tail);
+    state
+}
+
 pub(crate) fn tail_panel(new_flag: &mut bool, scroll: &gpui::ScrollHandle) {
     if std::mem::take(new_flag) {
         let offset = scroll.offset().y;

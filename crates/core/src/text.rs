@@ -45,6 +45,33 @@ pub fn format_count_compact(n: u64) -> String {
     n.to_string()
 }
 
+/// Case-insensitive substring test against an **already-lowercased** needle,
+/// allocation-free on the (overwhelmingly common) ASCII-needle path. Used by
+/// the live search filters (chat search, viewer list), which run it per
+/// buffered row on every rebuild — so it must not allocate per call.
+pub fn contains_ci(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true; // and `windows(0)` below would panic
+    }
+    if needle.is_ascii() {
+        // The length shortcut is only valid here: ASCII case-folding never
+        // changes byte length, but Unicode lowercasing can grow the haystack
+        // (İ → i + combining dot), so the general path must not take it.
+        if needle.len() > haystack.len() {
+            return false;
+        }
+        // Byte windows are safe here: non-ASCII bytes never compare equal to
+        // ASCII ones under `eq_ignore_ascii_case`, so UTF-8 boundaries can't
+        // produce a false match.
+        haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+    } else {
+        haystack.to_lowercase().contains(needle)
+    }
+}
+
 /// Strips a channel name to its bare form: trims surrounding whitespace and a
 /// leading `#` (as Twitch IRC uses), preserving case. Use this when you need the
 /// channel's display name; use [`channel_login`] for API/lookup keys.
@@ -85,6 +112,22 @@ mod tests {
         assert_eq!(plural(1, "month", "months"), "month");
         assert_eq!(plural(0, "month", "months"), "months");
         assert_eq!(plural(2, "month", "months"), "months");
+    }
+
+    #[test]
+    fn contains_ci_matches_case_insensitively() {
+        // ASCII needle (the allocation-free path), mixed-case both sides,
+        // including a multibyte haystack.
+        assert!(contains_ci("Hello WORLD", "world"));
+        assert!(contains_ci("ボブ says KAPPA", "kappa"));
+        assert!(!contains_ci("ボブ says KAPPA", "kappaz"));
+        assert!(!contains_ci("short", "longer-than-haystack"));
+        // Non-ASCII needle falls back to the lowercasing path; the contract is
+        // a pre-lowercased needle, so derive it the way callers do.
+        assert!(contains_ci("says ボブ", "ボ"));
+        assert!(contains_ci("İSTANBUL", &"İSTANBUL".to_lowercase()));
+        // Empty needle matches anything.
+        assert!(contains_ci("anything", ""));
     }
 
     #[test]

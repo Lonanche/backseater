@@ -551,6 +551,17 @@ fn readable_color(color: u32) -> u32 {
     readable_color_on(color, chat_bg())
 }
 
+/// The display color for an author's name: their set color (or the stable
+/// per-user fallback), contrast-fixed against the chat background.
+pub(crate) fn author_name_color(author: &bks_core::Author) -> u32 {
+    readable_color(
+        author
+            .color
+            .map(Color::to_u32)
+            .unwrap_or_else(|| fallback_name_color(author)),
+    )
+}
+
 /// [`readable_color`] against an explicit background, so the algorithm is testable
 /// independent of the active theme. The adjust direction (toward white on a dark
 /// bg, toward black on a light bg) is chosen from the background's luminance.
@@ -1537,12 +1548,7 @@ pub fn render_message(
         suppressed,
     } = flags;
     let scale = Scale::new(font_size);
-    let name_color = readable_color(
-        msg.author
-            .color
-            .map(Color::to_u32)
-            .unwrap_or_else(|| fallback_name_color(&msg.author)),
-    );
+    let name_color = author_name_color(&msg.author);
     // Show the time in the user's local timezone (the stored timestamp is UTC).
     let time = msg
         .timestamp
@@ -2973,12 +2979,7 @@ fn event_message_line(
         .with_timezone(&chrono::Local)
         .format("%H:%M")
         .to_string();
-    let base_color = readable_color(
-        msg.author
-            .color
-            .map(Color::to_u32)
-            .unwrap_or_else(|| fallback_name_color(&msg.author)),
-    );
+    let base_color = author_name_color(&msg.author);
     let name_color = match msg.author.paint.as_ref().map(|paint| &paint.kind) {
         Some(PaintKind::Solid(c)) => *c,
         Some(PaintKind::Linear { stops, .. }) | Some(PaintKind::Radial { stops }) => {
@@ -3168,12 +3169,7 @@ pub fn render_thread_line(
     name_click: Option<NameClick>,
 ) -> impl IntoElement {
     let scale = Scale::new(font_size);
-    let name_color = readable_color(
-        msg.author
-            .color
-            .map(Color::to_u32)
-            .unwrap_or_else(|| fallback_name_color(&msg.author)),
-    );
+    let name_color = author_name_color(&msg.author);
     let name_text = SharedString::from(format!("{}:", msg.author.display_name));
     let name = div()
         .flex_none()

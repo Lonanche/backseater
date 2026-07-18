@@ -23,6 +23,7 @@ mod mentions;
 mod popout;
 mod preview;
 mod render;
+mod search;
 mod selectable;
 mod session;
 mod settings;
@@ -558,6 +559,9 @@ struct TabEntry {
     _activity_sub: gpui::Subscription,
     /// Keeps the [`TabWentLive`] subscription alive for this tab's lifetime.
     _live_sub: gpui::Subscription,
+    /// Keeps the [`ActivateRequested`](chatview::ActivateRequested)
+    /// subscription (search-result click → re-select this tab) alive.
+    _activate_sub: gpui::Subscription,
 }
 
 /// Compiles mention terms into a matcher with the per-term mute flags applied
@@ -1361,6 +1365,7 @@ impl BackseaterApp {
         });
         let _activity_sub = Self::subscribe_tab_activity(&view, id, cx);
         let _live_sub = Self::subscribe_tab_live(&view, id, cx);
+        let _activate_sub = Self::subscribe_tab_activate(&view, id, cx);
         TabEntry {
             id,
             config,
@@ -1369,6 +1374,7 @@ impl BackseaterApp {
             flash_start: None,
             _activity_sub,
             _live_sub,
+            _activate_sub,
         }
     }
 
@@ -1395,6 +1401,27 @@ impl BackseaterApp {
                 cx.notify();
             }
         })
+    }
+
+    /// Subscribes to a tab view's `ActivateRequested` (a clicked chat-search
+    /// result) so the owning tab is re-selected before the jump is seen, in
+    /// case the user switched tabs after opening the search window. Same
+    /// stable-`id` keying as [`subscribe_tab_activity`]; `select_tab` also
+    /// leaves the mentions feed if it's showing.
+    fn subscribe_tab_activate(
+        view: &Entity<ChatView>,
+        id: u64,
+        cx: &mut Context<Self>,
+    ) -> gpui::Subscription {
+        cx.subscribe(
+            view,
+            move |this, _view, _ev: &chatview::ActivateRequested, cx| {
+                let Some(ix) = this.tabs.iter().position(|t| t.id == id) else {
+                    return;
+                };
+                this.select_tab(ix, cx);
+            },
+        )
     }
 
     /// Subscribes to a tab view's [`TabWentLive`] so a channel going live
@@ -2064,6 +2091,7 @@ impl BackseaterApp {
             };
             let _activity_sub = Self::subscribe_tab_activity(&view, id, cx);
             let _live_sub = Self::subscribe_tab_live(&view, id, cx);
+            let _activate_sub = Self::subscribe_tab_activate(&view, id, cx);
             self.tabs[ix] = TabEntry {
                 id,
                 config,
@@ -2072,6 +2100,7 @@ impl BackseaterApp {
                 flash_start: None,
                 _activity_sub,
                 _live_sub,
+                _activate_sub,
             };
         } else {
             self.tabs[ix].config = config;
