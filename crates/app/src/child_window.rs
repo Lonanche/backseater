@@ -152,7 +152,34 @@ pub struct ChildWindow<H: Render> {
     /// Bare windows hand the body the full window; padded ones wrap it in the
     /// shared scrolling panel surface.
     bare: bool,
+    /// This view's own window, so the Escape observer (fired for keystrokes in
+    /// *any* window) only closes it for keystrokes dispatched here.
+    window: AnyWindowHandle,
+    _esc_close: Option<Subscription>,
     _observe_host: Subscription,
+}
+
+impl<H: Render> ChildWindow<H> {
+    /// Makes Escape close this window. A keystroke observer, NOT an element
+    /// key listener: with nothing focused in the window (the settings panel
+    /// until an input is clicked), gpui dispatches keys to the dispatch-tree
+    /// root only, so a listener on our root div never sees them. The observer
+    /// fires after dispatch with the resolved action — `Some` when something
+    /// consumed the key (an open dropdown/menu cancelling itself, the kit
+    /// input eating it for IME/completion state), which is skipped so a
+    /// second press then closes the window.
+    pub fn close_on_escape(&mut self, cx: &mut gpui::Context<Self>) {
+        let target = self.window;
+        self._esc_close = Some(cx.observe_keystrokes(move |_, ev, window, _| {
+            if window.window_handle() == target
+                && ev.keystroke.key == "escape"
+                && !ev.keystroke.modifiers.modified()
+                && ev.action.is_none()
+            {
+                window.remove_window();
+            }
+        }));
+    }
 }
 
 impl<H: Render> Render for ChildWindow<H> {
@@ -264,6 +291,8 @@ fn open_impl<H: Render>(
                     host: host.downgrade(),
                     body: Box::new(body),
                     bare,
+                    window: window.window_handle(),
+                    _esc_close: None,
                     _observe_host: cx.observe(&host, |_, _, cx| cx.notify()),
                 }
             });

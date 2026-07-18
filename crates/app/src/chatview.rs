@@ -3230,6 +3230,7 @@ impl ChatView {
         let Ok((handle, content)) = opened else {
             return;
         };
+        content.update(cx, |w, cx| w.close_on_escape(cx));
         let _ = handle.update(cx, |_, window, cx| {
             view.update(cx, |this, cx| {
                 let search =
@@ -3431,6 +3432,7 @@ impl ChatView {
         let Ok((handle, content)) = opened else {
             return;
         };
+        content.update(cx, |w, cx| w.close_on_escape(cx));
         let _ = handle.update(cx, |_, window, cx| {
             view.update(cx, |this, cx| {
                 let input =
