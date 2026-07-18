@@ -3,6 +3,27 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.5.5
+
+### Features
+
+- Suspicious-user marks (Twitch "Low Trust", visible to moderators): messages
+  from monitored or restricted chatters get a distinct row tint and a
+  MONITORED / RESTRICTED tag, including Twitch's extra context like "likely
+  ban evader · banned in 2 shared channels". Restricted users' messages —
+  which Twitch withholds from normal chat — now appear in your feed as marked
+  rows, and a mod changing someone's treatment posts a notice.
+- New mod commands `/monitor`, `/restrict`, and `/unmonitor` (alias
+  `/unrestrict`) set or remove a user's suspicious-user treatment; they also
+  work as custom mod-button commands.
+- These need new Twitch permissions, so log out and back in once to enable
+  them; until then chat keeps working and the marks just stay off.
+
+### Changes
+
+- The chat-search shortcut moved from Ctrl+R to Ctrl+F, and now also works
+  while the cursor is in the message box.
+
 ## v0.5.0
 
 ### Features
