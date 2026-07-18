@@ -32,6 +32,11 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
   Twitch and Kick backfill the messages missed while disconnected.
 - The chat-mode bar now shows Kick's chat restrictions too (emote-only,
   sub-only, slow, followers-only), updating live as moderators toggle them.
+- Chat search: press Ctrl+R (or right-click a tab → Search) to search that
+  tab's buffered chat history in its own window. Results look like real chat
+  rows (badges, emotes, name colors) and narrow as you type; clicking one
+  jumps the chat log to that message and flashes it.
+- Pressing Escape closes the search, settings, and viewer-list windows.
 
 ### Fixes
 
@@ -48,6 +53,9 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
   surfacing a raw API error.
 - Smoother long sessions: the mentions and events panels no longer rescan the
   whole chat buffer every frame.
+- Switching tabs (and opening the app or a popout window) now focuses the
+  message box, so typing and shortcuts like Ctrl+R work immediately without
+  clicking into the view first.
 
 ## v0.4.5
 
