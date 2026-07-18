@@ -730,6 +730,12 @@ pub(crate) struct ChatView {
     /// each paint; the 350ms show-delay means it's already correct before the
     /// card is visible.
     link_preview_offset: std::rc::Rc<std::cell::Cell<Point<Pixels>>>,
+    /// The rendered height of the pinned-message cards floating over the log's
+    /// top edge (0 when none show), canvas-measured each frame like
+    /// [`link_preview_offset`]. A mention/search jump that reveals a row at the
+    /// viewport's top scrolls this much further so the row isn't hidden under
+    /// the cards.
+    pin_overlay_height: std::rc::Rc<std::cell::Cell<Pixels>>,
     /// The message being replied to, if the user clicked a row's reply button. The
     /// next sent line threads under it (on the parent's platform); shown as a
     /// "replying to" bar above the input. Cleared on send or cancel.
@@ -1059,6 +1065,7 @@ impl ChatView {
             link_preview: None,
             link_preview_gen: 0,
             link_preview_offset: std::rc::Rc::new(std::cell::Cell::new(Point::default())),
+            pin_overlay_height: std::rc::Rc::new(std::cell::Cell::new(px(0.))),
             replying_to: None,
             thread_panel: None,
             thread_cache: std::cell::RefCell::new(None),
@@ -2526,7 +2533,31 @@ impl ChatView {
                 if self.list_state.is_following_tail() {
                     self.list_state.scroll_by(px(-1.));
                 }
+                // The pinned-message cards float over the log's top edge, so a
+                // reveal must keep the target below them. Two occlusion cases:
+                // a target at/above the current scroll top gets revealed flush
+                // with the viewport's top (note it before revealing — the
+                // target is usually unmeasured then, so its bounds are
+                // unknowable); a target already on-screen inside the covered
+                // strip isn't moved by the reveal at all, but being on-screen
+                // it has measured bounds (reflecting the just-set scroll) to
+                // compute the exact shortfall from. Clamped at the buffer top —
+                // best effort there, like the web clients.
+                let lands_at_top = ix <= self.list_state.logical_scroll_top().item_ix;
                 self.list_state.scroll_to_reveal_item(ix);
+                let pin_headroom = self.pin_overlay_height.get();
+                if pin_headroom > px(0.) {
+                    if lands_at_top {
+                        self.list_state.scroll_by(-pin_headroom - px(4.));
+                    } else if let Some(bounds) = self.list_state.bounds_for_item(ix) {
+                        let covered = self.list_state.viewport_bounds().top() + pin_headroom
+                            + px(4.)
+                            - bounds.top();
+                        if covered > px(0.) {
+                            self.list_state.scroll_by(-covered);
+                        }
+                    }
+                }
                 self.flash = Some(FlashTarget {
                     platform,
                     msg_id: msg_id.to_string(),
@@ -2625,6 +2656,7 @@ impl ChatView {
     fn render_pin_overlay(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         // No pins is the common case (every frame) — skip the deep message clone.
         if self.channel.read(cx).pins.is_empty() {
+            self.pin_overlay_height.set(px(0.));
             return None;
         }
         // Clone the shared model's pins so we don't hold a model borrow across the
@@ -2656,11 +2688,22 @@ impl ChatView {
             cards.push(self.render_pin_banner(platform, pin, cx));
         }
         if cards.is_empty() && collapsed == 0 {
+            self.pin_overlay_height.set(px(0.));
             return None;
         }
         // Full-bleed banners pinned to the chat's top edge; the collapsed-pin
-        // chip floats at the top-right below them.
-        let mut col = v_flex().absolute().top_0().left_0().right_0().children(cards);
+        // chip floats at the top-right below them. The cards stack (not the
+        // small right-aligned chip) is what occludes rows, so only its height
+        // is canvas-measured into `pin_overlay_height` for the jump offset —
+        // all-collapsed measures 0.
+        let height_cell = self.pin_overlay_height.clone();
+        let mut col = v_flex().absolute().top_0().left_0().right_0().child(
+            v_flex().relative().children(cards).child(
+                gpui::canvas(move |b, _, _| height_cell.set(b.size.height), |_, _, _, _| ())
+                    .absolute()
+                    .size_full(),
+            ),
+        );
         if collapsed > 0 {
             col = col.child(
                 h_flex().justify_end().pt_1().pr_2().child(
