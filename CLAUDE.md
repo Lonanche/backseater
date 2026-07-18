@@ -268,7 +268,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
   narrow" footer. The search `InputState` is **window-bound** (created against the viewer-list
   window when it opens, like the settings inputs); list state lives on `ChatView`
   (`viewer_list`/`viewer_list_window`), module `crates/app/src/viewerlist.rs`.
-- **Chat search (Ctrl+R — bare Ctrl/Cmd only, Shift/Alt chords pass through)**: a child OS
+- **Chat search (Ctrl+F — bare Ctrl/Cmd only, Shift/Alt chords pass through)**: a child OS
   window per view listing the tab's buffered chat history with a live search box
   (case-insensitive substring of message text / login / display name; matching in
   `crates/app/src/search.rs` on the shared `bks_core::contains_ci`, whose ASCII-needle path is
@@ -295,9 +295,9 @@ platform = implement one trait + one message builder, with zero UI changes**.
   + flash (`jump_to_message` — aged-out rows get the same transient note), activates the view's
   own `parent_window` (so a popout's search brings the popout forward), and emits
   `chatview::ActivateRequested`, which the app answers by re-selecting the owning tab
-  (`subscribe_tab_activate`) in case the user switched tabs meanwhile. Ctrl+R is a bubble
+  (`subscribe_tab_activate`) in case the user switched tabs meanwhile. Ctrl+F is a bubble
   `on_key_down` on the `ChatView` root (works from composer or log focus, and in popouts); the
-  search `InputState` is window-bound like the viewer list's and focused on open so Ctrl+R →
+  search `InputState` is window-bound like the viewer list's and focused on open so Ctrl+F →
   type Just Works. Only `Row::Message` rows are searched — event/system rows aren't jumpable.
 - **Live status bar + viewer counts**: a slim bar at the top of each chat view (above the pin
   banners; popouts get it too) shows, per live platform of the tab, its icon + channel name + a

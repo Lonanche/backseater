@@ -1017,7 +1017,7 @@ impl BackseaterApp {
         updater::set_beta_updates(settings.beta_updates);
         let _update_watch = Self::spawn_update_watch(cx);
 
-        // Focus the restored active tab's composer so Ctrl+R / typing work
+        // Focus the restored active tab's composer so Ctrl+F / typing work
         // right from launch (key events only dispatch along the focus path).
         if let Some(tab) = tabs.get(active) {
             tab.view.update(cx, |v, cx| v.focus_composer(window, cx));
@@ -1687,7 +1687,7 @@ impl BackseaterApp {
             self.mentions_tab_selected = false;
             self.tabs[ix].unread = false;
             tabs::save_active(self.active);
-            // Focus the now-active tab's composer so typing / Ctrl+R work
+            // Focus the now-active tab's composer so typing / Ctrl+F work
             // without clicking into the view first (the old tab's focused
             // input is no longer rendered, leaving keys dispatching nowhere).
             // Deferred: callers run inside the main window's own listeners.
@@ -5301,7 +5301,7 @@ impl BackseaterApp {
                                 .separator()
                                 .item(
                                     // Nothing to search until the tab has a channel.
-                                    PopupMenuItem::new("Search (Ctrl+R)")
+                                    PopupMenuItem::new("Search (Ctrl+F)")
                                         .icon(IconName::Search)
                                         .disabled(!has_channel)
                                         .on_click(move |_, _, cx| {

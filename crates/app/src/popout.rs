@@ -129,7 +129,7 @@ pub fn open(
                     cx,
                 )
             });
-            // Focus the composer so typing / Ctrl+R work without a click first.
+            // Focus the composer so typing / Ctrl+F work without a click first.
             view.update(cx, |v, cx| v.focus_composer(window, cx));
             let popout = cx.new(|_| PopoutWindow { view });
             content = Some(popout.clone());

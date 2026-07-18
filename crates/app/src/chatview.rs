@@ -133,7 +133,7 @@ const VIEWERLIST_MIN_SIZE: gpui::Size<Pixels> = gpui::Size {
     height: px(280.),
 };
 
-/// Default size of the chat-search child window (Ctrl+R).
+/// Default size of the chat-search child window (Ctrl+F).
 const SEARCH_WINDOW_SIZE: gpui::Size<Pixels> = gpui::Size {
     width: px(560.),
     height: px(620.),
@@ -683,7 +683,7 @@ pub(crate) struct ChatView {
     /// (`None` while no window is up); the subscription is replaced with it.
     viewer_search: Option<Entity<InputState>>,
     _viewer_search_sub: Option<gpui::Subscription>,
-    /// The child OS window hosting this view's chat search (Ctrl+R), when open.
+    /// The child OS window hosting this view's chat search (Ctrl+F), when open.
     /// Re-opening refocuses it instead of opening more.
     search_window: Option<gpui::AnyWindowHandle>,
     /// Search box filtering the chat history in the search window. Window-bound
@@ -3395,7 +3395,7 @@ impl ChatView {
         body.child(content).into_any_element()
     }
 
-    /// Opens (or refocuses) this view's chat-search window (Ctrl+R). Deferred
+    /// Opens (or refocuses) this view's chat-search window (Ctrl+F). Deferred
     /// like the viewer list: opening a window draws it synchronously,
     /// re-entering this entity for the body.
     pub(crate) fn open_search(&mut self, cx: &mut Context<Self>) {
@@ -3408,7 +3408,7 @@ impl ChatView {
 
     /// Focuses the composer input. Called when this view becomes the active
     /// tab (and when its window opens): gpui only dispatches key events along
-    /// the focus path, so with nothing focused the root's Ctrl+R listener
+    /// the focus path, so with nothing focused the root's Ctrl+F listener
     /// never fires until the user clicks inside the view.
     pub(crate) fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |state, cx| state.focus(window, cx));
@@ -3452,7 +3452,7 @@ impl ChatView {
             view.update(cx, |this, cx| {
                 let input =
                     cx.new(|cx| InputState::new(window, cx).placeholder("Search messages…"));
-                // Focus the box so Ctrl+R → type works without a click.
+                // Focus the box so Ctrl+F → type works without a click.
                 input.update(cx, |state, cx| state.focus(window, cx));
                 this._search_input_sub =
                     Some(cx.subscribe_in(&input, window, Self::on_search_input_event));
@@ -6394,14 +6394,28 @@ impl Render for ChatView {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            // Ctrl+R opens this tab's chat-search window. A bubble listener on
-            // the root sees the keystroke from wherever focus sits (the
-            // composer input, the log, ...).
+            // Ctrl+F opens this tab's chat-search window, via two routes.
+            // With focus in the composer, the kit Input binds ctrl-f/cmd-f to
+            // its `Search` action and its handler *consumes* it even for a
+            // non-searchable single-line input (the early return doesn't
+            // propagate), so — like the popup keys — a capture-phase listener
+            // on this ancestor takes it before the input can (actions dispatch
+            // before raw KeyDown listeners, so an `on_key_down` never fires
+            // there).
+            .capture_action(cx.listener(
+                |this, _: &gpui_component::input::Search, _window, cx| {
+                    this.open_search(cx);
+                    cx.stop_propagation();
+                },
+            ))
+            // With focus anywhere else (the log, ...) no input context is on
+            // the focus path, the action binding doesn't apply, and the raw
+            // keystroke reaches this bubble listener instead.
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {
                 let ks = &ev.keystroke;
-                // Bare Ctrl/Cmd+R only — Ctrl+Shift/Alt+R are other chords
-                // (browser-refresh muscle memory) and must not be swallowed.
-                if ks.key == "r"
+                // Bare Ctrl/Cmd+F only — Ctrl+Shift/Alt+F are other chords
+                // and must not be swallowed.
+                if ks.key == "f"
                     && (ks.modifiers.control || ks.modifiers.platform)
                     && !ks.modifiers.shift
                     && !ks.modifiers.alt
