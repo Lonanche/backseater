@@ -3399,6 +3399,14 @@ impl ChatView {
         .detach();
     }
 
+    /// Focuses the composer input. Called when this view becomes the active
+    /// tab (and when its window opens): gpui only dispatches key events along
+    /// the focus path, so with nothing focused the root's Ctrl+R listener
+    /// never fires until the user clicks inside the view.
+    pub(crate) fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |state, cx| state.focus(window, cx));
+    }
+
     /// Opens the child OS window hosting this tab's chat search, or refocuses
     /// an already-open one (putting the caret back in the search box). Runs
     /// from a plain `App` context (see the spawn in [`open_search`]). The

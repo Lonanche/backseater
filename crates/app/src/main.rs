@@ -1017,6 +1017,12 @@ impl BackseaterApp {
         updater::set_beta_updates(settings.beta_updates);
         let _update_watch = Self::spawn_update_watch(cx);
 
+        // Focus the restored active tab's composer so Ctrl+R / typing work
+        // right from launch (key events only dispatch along the focus path).
+        if let Some(tab) = tabs.get(active) {
+            tab.view.update(cx, |v, cx| v.focus_composer(window, cx));
+        }
+
         Self {
             session,
             tabs,
@@ -1681,6 +1687,17 @@ impl BackseaterApp {
             self.mentions_tab_selected = false;
             self.tabs[ix].unread = false;
             tabs::save_active(self.active);
+            // Focus the now-active tab's composer so typing / Ctrl+R work
+            // without clicking into the view first (the old tab's focused
+            // input is no longer rendered, leaving keys dispatching nowhere).
+            // Deferred: callers run inside the main window's own listeners.
+            let view = self.tabs[ix].view.clone();
+            let main_window = self.main_window;
+            cx.defer(move |cx| {
+                let _ = main_window.update(cx, |_, window, cx| {
+                    view.update(cx, |v, cx| v.focus_composer(window, cx));
+                });
+            });
             cx.notify();
         }
     }
@@ -5267,6 +5284,7 @@ impl BackseaterApp {
                         let app = cx.entity().downgrade();
                         move |menu, _window, _cx| {
                             let for_settings = app.clone();
+                            let for_search = app.clone();
                             let for_popout = app.clone();
                             let for_close = app.clone();
                             // A comfortable width so the items don't feel cramped.
@@ -5277,6 +5295,28 @@ impl BackseaterApp {
                                         .on_click(move |_, _, cx| {
                                             for_settings
                                                 .update(cx, |this, cx| this.open_settings(ix, cx))
+                                                .ok();
+                                        }),
+                                )
+                                .separator()
+                                .item(
+                                    // Nothing to search until the tab has a channel.
+                                    PopupMenuItem::new("Search (Ctrl+R)")
+                                        .icon(IconName::Search)
+                                        .disabled(!has_channel)
+                                        .on_click(move |_, _, cx| {
+                                            for_search
+                                                .update(cx, |this, cx| {
+                                                    let view = this
+                                                        .tabs
+                                                        .get(ix)
+                                                        .map(|t| t.view.clone());
+                                                    if let Some(view) = view {
+                                                        view.update(cx, |v, cx| {
+                                                            v.open_search(cx)
+                                                        });
+                                                    }
+                                                })
                                                 .ok();
                                         }),
                                 )
