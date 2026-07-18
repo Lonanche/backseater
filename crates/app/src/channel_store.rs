@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use bks_core::{Message, Platform};
 use chrono::{DateTime, Utc};
-use bks_platform::ChatEvent;
+use bks_platform::{ChatEvent, SuspiciousStatus};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, EventEmitter, Global, Task, WeakEntity};
 
@@ -65,6 +65,16 @@ pub struct RetainedEvent {
     /// a field read, not a scan of the whole retained buffer per visible summary
     /// row per frame.
     pub has_grouped_children: bool,
+}
+
+/// One message's suspicious-user (monitored/restricted) mark, kept in the
+/// model's side-table and rendered as a tinted row + corner pill.
+#[derive(Clone)]
+pub struct SuspiciousMark {
+    pub status: SuspiciousStatus,
+    /// Ready-made extra context ("likely ban evader · banned in 2 shared
+    /// channels"); empty when the platform sent none.
+    pub detail: String,
 }
 
 /// Identifies a channel set: the (normalized) Twitch / Kick / YouTube sources a
@@ -208,6 +218,12 @@ pub struct ChannelModel {
     /// leak onto future chat). Nested for the same borrowed-`&str` lookup as
     /// `struck_ids`.
     struck_authors: HashMap<Platform, HashMap<String, DateTime<Utc>>>,
+    /// Suspicious-user (Twitch "Low Trust") marks keyed platform → (msg id →
+    /// mark), resolved at render like `struck_ids` (nested for the same
+    /// borrowed-`&str` probe). Entries are pruned with their row on ring trim;
+    /// only delivered while the user moderates the channel, so the map stays
+    /// tiny.
+    suspicious_ids: HashMap<Platform, HashMap<String, SuspiciousMark>>,
     /// Resolved 7TV cosmetics keyed platform → (user_id → cosmetics), applied at
     /// render time. Nested so the per-row lookup borrows `user_id` as `&str`
     /// (cosmetics resolve for most active chatters, so this ran per visible row
@@ -349,6 +365,15 @@ impl ChannelModel {
         cutoff.is_some_and(|&cutoff| msg.timestamp <= cutoff)
     }
 
+    /// The suspicious-user mark on a message, if any (resolved at render time
+    /// like [`is_struck`](Self::is_struck)).
+    pub fn suspicious_for(&self, msg: &Message) -> Option<&SuspiciousMark> {
+        if self.suspicious_ids.is_empty() || msg.id.is_empty() {
+            return None;
+        }
+        self.suspicious_ids.get(&msg.platform)?.get(msg.id.as_str())
+    }
+
     /// The cosmetics resolved for a chatter, if any (applied at render time).
     pub fn cosmetics_for(&self, platform: Platform, user_id: &str) -> Option<&bks_emotes::Cosmetics> {
         // Per visible row per frame; the nested map borrows `user_id` as `&str`
@@ -403,6 +428,13 @@ impl ChannelModel {
         if let Some(row) = self.rows.pop_front() {
             if let Some(key) = row_key(&row) {
                 self.row_keys.remove(&key);
+            }
+            // A trimmed row's suspicious mark goes with it (the side-table
+            // otherwise only grows).
+            if let Row::Message { msg } = &row {
+                if let Some(ids) = self.suspicious_ids.get_mut(&msg.platform) {
+                    ids.remove(msg.id.as_str());
+                }
             }
             self.rows_generation += 1;
             cx.emit(ChannelEvent::RemovedFront {
@@ -817,6 +849,37 @@ impl ChannelModel {
                 moderator,
                 ..
             } => self.resolve_automod(&message_id, status, moderator, cx),
+            ChatEvent::Suspicious {
+                platform,
+                status,
+                detail,
+                message,
+            } => {
+                // Record the mark first so the row renders marked from its very
+                // first layout when the normal copy hasn't arrived yet.
+                self.suspicious_ids
+                    .entry(platform)
+                    .or_default()
+                    .insert(message.id.clone(), SuspiciousMark { status, detail });
+                let already_shown = !message.id.is_empty()
+                    && self
+                        .row_keys
+                        .contains(&crate::chatview::message_row_key(platform, &message.id));
+                if already_shown {
+                    // The monitored user's copy is already in the log — the mark
+                    // adds the corner pill (a height change), so re-measure.
+                    cx.emit(ChannelEvent::Changed);
+                } else if status == SuspiciousStatus::Restricted {
+                    // A restricted user's message is withheld from the normal
+                    // read connection — this carried copy is the only one.
+                    // (`row_keys` dedupes if Twitch ever starts echoing it.)
+                    if !crate::settings::global_ignored(&message) {
+                        self.insert_message(message.into(), cx);
+                    }
+                }
+                // A monitored copy not yet buffered arrives via the read
+                // connection moments later and renders marked from the start.
+            }
             ChatEvent::ModStatus {
                 platform,
                 is_mod,
@@ -1088,6 +1151,7 @@ fn build_model(
             rows_generation: 0,
             struck_ids: HashMap::new(),
             struck_authors: HashMap::new(),
+            suspicious_ids: HashMap::new(),
             cosmetics: HashMap::new(),
             pins: HashMap::new(),
             live_status: HashMap::new(),

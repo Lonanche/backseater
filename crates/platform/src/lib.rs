@@ -262,6 +262,21 @@ pub enum ChatEvent {
         /// Who resolved it (display name); empty when it expired.
         moderator: String,
     },
+    /// A message from a user under the platform's suspicious-user treatment
+    /// (Twitch's "Low Trust" monitored/restricted flags) — only delivered while
+    /// the logged-in user moderates the channel. A *monitored* user's message
+    /// also arrives on the normal read connection, so the UI marks that copy in
+    /// place by `message.id`; a *restricted* user's message is withheld from
+    /// normal chat and this carried copy is the only one — the UI inserts it as
+    /// a (marked) chat row. `detail` is a ready-made human string with the
+    /// platform's extra context ("likely ban evader · banned in 2 shared
+    /// channels"), empty when there is none.
+    Suspicious {
+        platform: Platform,
+        status: SuspiciousStatus,
+        detail: String,
+        message: Box<Message>,
+    },
     /// Channel identity, emitted once the connection is live (before or with the
     /// first message). Lets consumers fetch per-channel resources keyed on the
     /// platform id without that id leaking into the UI.
@@ -333,6 +348,15 @@ pub enum ChatEvent {
         platform: Platform,
         count: Option<u64>,
     },
+}
+
+/// The treatment level of a platform's suspicious-user marking (Twitch's "Low
+/// Trust" feature): a monitored user chats normally while mods see the flag; a
+/// restricted user's messages are withheld from everyone but mods.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SuspiciousStatus {
+    Monitored,
+    Restricted,
 }
 
 /// How a held AutoMod message was resolved.

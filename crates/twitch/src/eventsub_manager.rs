@@ -12,8 +12,8 @@
 //! [`register`] a `(broadcaster_id, sink)` and get back a [`Registration`] guard;
 //! the manager creates that channel's subscriptions on the shared session and
 //! routes each incoming notification to the right tab's sink by
-//! `broadcaster_user_id`. One socket holds up to 300 subscriptions (~100 channels
-//! at 3 subs each), far above any realistic tab count. Dropping the guard removes
+//! `broadcaster_user_id`. One socket holds up to 300 subscriptions (~60 channels
+//! at 5 subs each), far above any realistic tab count. Dropping the guard removes
 //! the channel and best-effort deletes its subscriptions so the slot frees up.
 //!
 //! A single background task runs the socket, reconnecting with backoff. On each
@@ -403,6 +403,17 @@ async fn subscribe_channel(
     if auth.wants_automod() {
         for sub_type in ["automod.message.hold", "automod.message.update"] {
             match subscribe(client, auth, session_id, broadcaster_id, sub_type, "2").await? {
+                SubResult::Created(id) => sub_ids.push(id),
+                SubResult::Declined => {}
+            }
+        }
+    }
+    if auth.wants_suspicious() {
+        for sub_type in [
+            "channel.suspicious_user.message",
+            "channel.suspicious_user.update",
+        ] {
+            match subscribe(client, auth, session_id, broadcaster_id, sub_type, "1").await? {
                 SubResult::Created(id) => sub_ids.push(id),
                 SubResult::Declined => {}
             }

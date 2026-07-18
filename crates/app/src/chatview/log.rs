@@ -381,7 +381,15 @@ impl Render for LogView {
                     }
                     let mentioned = this.mentions.matches(&msg.raw_text);
                     flash = this.flash_strength_for(msg.platform, &msg.id);
-                    highlight = if mentioned {
+                    // A suspicious-user (monitored/restricted) mark outranks the
+                    // other tints — it's mod-safety information.
+                    let suspicious = model.suspicious_for(msg).map(|m| render::SuspiciousTag {
+                        restricted: m.status == bks_platform::SuspiciousStatus::Restricted,
+                        detail: m.detail.clone(),
+                    });
+                    highlight = if suspicious.is_some() {
+                        Some(render::highlight_suspicious())
+                    } else if mentioned {
                         Some(render::highlight_mention())
                     } else if msg.first_message {
                         Some(render::highlight_first_message())
@@ -450,6 +458,7 @@ impl Render for LogView {
                             external_highlight: true,
                             hide_timestamp: !crate::settings::show_timestamps_chat(),
                             suppressed: this.suppress.matches_message(msg),
+                            suspicious,
                         },
                         font_size,
                         &this.selection,

@@ -14,7 +14,7 @@ use serde::Deserialize;
 const HELIX: &str = "https://api.twitch.tv/helix";
 /// Twitch emote CDN template; `{id}` is the emote id. Matches the size used for
 /// native emotes elsewhere (dark theme, 2x).
-const EMOTE_CDN: &str = "https://static-cdn.jtvnw.net/emoticons/v2";
+pub(crate) const EMOTE_CDN: &str = "https://static-cdn.jtvnw.net/emoticons/v2";
 
 /// An authenticated Helix client scoped to the logged-in moderator.
 pub struct Helix {

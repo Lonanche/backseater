@@ -65,6 +65,10 @@ pub(crate) struct Palette {
     automod_text: u32,
     automod_allow: u32,
     automod_deny: u32,
+    /// Suspicious-user (monitored/restricted) row tint + label — one pair for
+    /// both statuses (the pill text distinguishes them).
+    suspicious_bg: u32,
+    suspicious_label: u32,
     /// The tab strip background (behind the chips).
     tab_bar_bg: u32,
     /// Unselected-tab chip background (a recessed tone; the active tab is filled
@@ -107,6 +111,8 @@ const DARK: Palette = Palette {
     automod_text: 0xe8b366,
     automod_allow: 0x57d98a,
     automod_deny: 0xf28b8b,
+    suspicious_bg: 0x2e1a12,
+    suspicious_label: 0xe8946a,
     tab_bar_bg: 0x1b1b1f,
     tab_inactive_bg: 0x2a2a30,
     panel_bg: 0x222228,
@@ -141,6 +147,8 @@ const LIGHT: Palette = Palette {
     automod_text: 0x9a6209,
     automod_allow: 0x188038,
     automod_deny: 0xc22e2e,
+    suspicious_bg: 0xfdeade,
+    suspicious_label: 0xa8501c,
     tab_bar_bg: 0xe9e9ec,
     tab_inactive_bg: 0xdadadf,
     panel_bg: 0xffffff,
@@ -261,6 +269,8 @@ impl Palette {
             automod_text: base.automod_text,
             automod_allow: base.automod_allow,
             automod_deny: base.automod_deny,
+            suspicious_bg: base.suspicious_bg,
+            suspicious_label: base.suspicious_label,
             tab_bar_bg: shade(0.5),
             tab_inactive_bg: shade(0.25),
             panel_bg: lift(0.12),
@@ -451,6 +461,14 @@ pub(crate) fn highlight_error() -> (u32, u32) {
 pub(crate) fn highlight_automod() -> (u32, u32) {
     let p = palette();
     (p.automod_bg, p.automod_text)
+}
+
+/// The `(background tint, accent bar/label)` for a suspicious-user
+/// (monitored/restricted) message — one pair for both statuses; the corner
+/// pill's text tells them apart.
+pub(crate) fn highlight_suspicious() -> (u32, u32) {
+    let p = palette();
+    (p.suspicious_bg, p.suspicious_label)
 }
 
 /// A hairline border tone for floating chrome (hover-action pill, overlays):
@@ -1487,8 +1505,19 @@ pub struct RowHandlers {
     pub inline_preview: Option<gpui::AnyElement>,
 }
 
+/// A message's suspicious-user (Twitch "Low Trust") marking, shown as the
+/// row's corner pill: "MONITORED" / "RESTRICTED", with the platform's extra
+/// context appended when present ("RESTRICTED · likely ban evader").
+#[derive(Clone)]
+pub struct SuspiciousTag {
+    pub restricted: bool,
+    /// Extra context ("likely ban evader · banned in 2 shared channels");
+    /// empty for none.
+    pub detail: String,
+}
+
 /// Per-message display flags, set by the view from the row's state.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct RowFlags {
     /// The author was banned/timed-out or the message deleted: strike + fade it.
     pub struck: bool,
@@ -1507,6 +1536,10 @@ pub struct RowFlags {
     /// opacity (kept visible/readable, but easy to skip). Distinct from `struck`
     /// (which also strikes through) and `historical` (a lighter fade).
     pub suppressed: bool,
+    /// The author is under suspicious-user treatment (mod-only info): the row
+    /// gets the suspicious tint + a corner pill naming the status. Takes
+    /// precedence over the first-message/highlighted pills.
+    pub suspicious: Option<SuspiciousTag>,
 }
 
 /// One chat message as a wrapping row: platform · time · name · tokens. When
@@ -1546,6 +1579,7 @@ pub fn render_message(
         external_highlight,
         hide_timestamp,
         suppressed,
+        suspicious,
     } = flags;
     let scale = Scale::new(font_size);
     let name_color = author_name_color(&msg.author);
@@ -1806,10 +1840,23 @@ pub fn render_message(
     // the top-right corner (Twitch-style). Wrap the body so the label sits beside
     // it without being caught in the body's flex-wrap. First-message wins if a row
     // is somehow both.
-    let corner_label = if msg.first_message {
-        Some(("FIRST MESSAGE", palette().first_message_label))
+    let is_suspicious = suspicious.is_some();
+    let corner_label: Option<(SharedString, u32)> = if let Some(tag) = suspicious {
+        let status = if tag.restricted {
+            "RESTRICTED"
+        } else {
+            "MONITORED"
+        };
+        let text = if tag.detail.is_empty() {
+            status.to_string()
+        } else {
+            format!("{status} · {}", tag.detail)
+        };
+        Some((text.into(), palette().suspicious_label))
+    } else if msg.first_message {
+        Some(("FIRST MESSAGE".into(), palette().first_message_label))
     } else if msg.highlighted {
-        Some(("HIGHLIGHTED", palette().highlighted_label))
+        Some(("HIGHLIGHTED".into(), palette().highlighted_label))
     } else {
         None
     };
@@ -1903,6 +1950,8 @@ pub fn render_message(
     // instead (`external_highlight`).
     let row_accent = if external_highlight {
         None
+    } else if is_suspicious {
+        Some(highlight_suspicious())
     } else if mentioned {
         Some(highlight_mention())
     } else if msg.first_message {

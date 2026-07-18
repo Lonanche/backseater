@@ -8,7 +8,10 @@
 //! rows like the Kick connector's ("mod timed out user for 10m: reason").
 //! `automod.message.hold`/`.update` (v2) additionally surface messages AutoMod
 //! held for review as [`ChatEvent::AutoModHeld`]/[`AutoModResolved`] so the UI
-//! can offer Allow/Deny.
+//! can offer Allow/Deny. `channel.suspicious_user.message`/`.update` (v1)
+//! surface Twitch's "Low Trust" feature: a monitored/restricted user's message
+//! arrives as [`ChatEvent::Suspicious`] (the UI marks/inserts it), a treatment
+//! change as a plain notice.
 //!
 //! Flow: connect to `wss://eventsub.wss.twitch.tv/ws`, read the welcome frame's
 //! session id, then create the subscriptions over Helix
@@ -19,7 +22,7 @@
 
 use anyhow::{bail, Context};
 use bks_core::Platform;
-use bks_platform::{AutoModStatus, ChatEvent};
+use bks_platform::{AutoModStatus, ChatEvent, SuspiciousStatus};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
@@ -44,7 +47,7 @@ impl EventsubAuth {
     /// means don't even connect (an old token from before the scopes were added
     /// — a fresh `/login` picks them up).
     pub fn feed_available(&self) -> bool {
-        can_moderate_feed(&self.scopes) || can_automod(&self.scopes)
+        can_moderate_feed(&self.scopes) || can_automod(&self.scopes) || can_suspicious(&self.scopes)
     }
 
     /// Whether the token carries the `channel.moderate` scope set.
@@ -55,6 +58,11 @@ impl EventsubAuth {
     /// Whether the token carries the AutoMod scope.
     pub(crate) fn wants_automod(&self) -> bool {
         can_automod(&self.scopes)
+    }
+
+    /// Whether the token carries the suspicious-user (Low Trust) scope.
+    pub(crate) fn wants_suspicious(&self) -> bool {
+        can_suspicious(&self.scopes)
     }
 }
 
@@ -87,6 +95,12 @@ fn can_moderate_feed(scopes: &[String]) -> bool {
 /// `moderator:manage:automod`.
 fn can_automod(scopes: &[String]) -> bool {
     scopes.iter().any(|s| s == "moderator:manage:automod")
+}
+
+/// `channel.suspicious_user.message`/`.update` need
+/// `moderator:read:suspicious_users`.
+fn can_suspicious(scopes: &[String]) -> bool {
+    scopes.iter().any(|s| s == "moderator:read:suspicious_users")
 }
 
 /// The envelope every EventSub WebSocket frame shares.
@@ -202,6 +216,11 @@ pub(crate) fn notification_events(
             .collect(),
         "automod.message.hold" => automod_held(event).into_iter().collect(),
         "automod.message.update" => automod_resolved(event).into_iter().collect(),
+        "channel.suspicious_user.message" => suspicious_message(event, now).into_iter().collect(),
+        "channel.suspicious_user.update" => suspicious_update(event)
+            .map(ChatEvent::Notice)
+            .into_iter()
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -445,6 +464,143 @@ fn automod_resolved(event: &Value) -> Option<ChatEvent> {
     })
 }
 
+/// A `channel.suspicious_user.message` (v1) notification → [`ChatEvent::Suspicious`].
+/// The payload carries the whole message (id + text + native-emote fragments),
+/// rebuilt here into a [`bks_core::Message`] — for a *restricted* user this copy
+/// is the only one that exists (Twitch withholds their chat from the normal read
+/// connection); for a *monitored* user it just marks the IRC copy.
+fn suspicious_message(event: &Value, now: DateTime<Utc>) -> Option<ChatEvent> {
+    let status = match event["low_trust_status"].as_str()? {
+        "restricted" => SuspiciousStatus::Restricted,
+        "active_monitoring" => SuspiciousStatus::Monitored,
+        other => {
+            tracing::debug!("suspicious_user.message with unhandled status {other}");
+            return None;
+        }
+    };
+    let body = &event["message"];
+    let id = body["message_id"].as_str()?.to_string();
+    let text = body["text"].as_str().unwrap_or_default().to_string();
+    let login = event["user_login"].as_str().unwrap_or_default().to_string();
+
+    // Fragments → elements like the pinned-message parse: native emotes inline,
+    // everything else (text/cheermotes/mentions) as its literal text.
+    let mut elements: Vec<bks_core::MessageElement> = Vec::new();
+    if let Some(fragments) = body["fragments"].as_array() {
+        for fragment in fragments {
+            let frag_text = fragment["text"].as_str().unwrap_or_default();
+            match fragment["emote"]["id"].as_str() {
+                Some(emote_id) if !emote_id.is_empty() => {
+                    elements.push(bks_core::MessageElement::Emote(std::sync::Arc::new(
+                        bks_core::Emote {
+                            url: format!("{}/{emote_id}/default/dark/2.0", crate::helix::EMOTE_CDN),
+                            id: emote_id.to_string(),
+                            name: frag_text.to_string(),
+                            animated: false,
+                            tooltip: bks_core::EmoteTooltip::provider("Twitch"),
+                        },
+                    )));
+                }
+                _ if !frag_text.is_empty() => {
+                    elements.push(bks_core::MessageElement::Text {
+                        text: frag_text.to_string(),
+                        color: None,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    if elements.is_empty() && !text.is_empty() {
+        elements.push(bks_core::MessageElement::Text {
+            text: text.clone(),
+            color: None,
+        });
+    }
+
+    let message = bks_core::Message {
+        id,
+        platform: Platform::Twitch,
+        channel: event["broadcaster_user_login"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        // The notification has no send time; delivery is within a beat of it.
+        timestamp: now,
+        author: bks_core::Author {
+            display_name: name_of(event, "user_name", "user_login"),
+            login,
+            // The payload carries no name color — the UI's stable per-user
+            // fallback color applies, same as a colorless IRC chatter.
+            color: None,
+            badges: Vec::new(),
+            paint: None,
+            user_id: event["user_id"].as_str().unwrap_or_default().to_string(),
+        },
+        raw_text: text,
+        elements: bks_core::mentionize(bks_core::linkify(elements)),
+        reply: None,
+        first_message: false,
+        highlighted: false,
+        historical: false,
+        reward_id: None,
+    };
+    Some(ChatEvent::Suspicious {
+        platform: Platform::Twitch,
+        status,
+        detail: suspicious_detail(event),
+        message: Box::new(message),
+    })
+}
+
+/// The extra context Twitch attaches to a suspicious user: ban-evasion
+/// assessment and/or shared-channel bans. Empty when manually flagged with
+/// neither ("" — the status label alone tells the story).
+fn suspicious_detail(event: &Value) -> String {
+    let types: Vec<&str> = event["types"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|t| t.as_str()).collect())
+        .unwrap_or_default();
+    let mut parts: Vec<String> = Vec::new();
+    if types.contains(&"ban_evader") {
+        match event["ban_evasion_evaluation"].as_str() {
+            Some(eval @ ("likely" | "possible")) => parts.push(format!("{eval} ban evader")),
+            _ => parts.push("ban evader".to_string()),
+        }
+    }
+    if types.contains(&"banned_in_shared_channel") {
+        let n = event["shared_ban_channel_ids"]
+            .as_array()
+            .map_or(0, |a| a.len());
+        match n {
+            0 => parts.push("banned in a shared channel".to_string()),
+            n => parts.push(format!(
+                "banned in {n} shared {}",
+                bks_core::plural(n as u64, "channel", "channels")
+            )),
+        }
+    }
+    parts.join(" · ")
+}
+
+/// A `channel.suspicious_user.update` (v1) notification (a mod changed someone's
+/// treatment) → a notice line in the moderator feed's voice.
+fn suspicious_update(event: &Value) -> Option<String> {
+    let moderator = moderator_name(event);
+    let user = target_name(event);
+    Some(match event["low_trust_status"].as_str()? {
+        "restricted" => format!("{moderator} restricted {user} as a suspicious user"),
+        "active_monitoring" => format!("{moderator} started monitoring {user} as a suspicious user"),
+        "none" | "no_treatment" => {
+            format!("{moderator} removed {user}'s suspicious-user treatment")
+        }
+        other => {
+            tracing::debug!("suspicious_user.update with unhandled status {other}");
+            return None;
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,6 +827,95 @@ mod tests {
     }
 
     #[test]
+    fn suspicious_message_restricted_with_detail() {
+        let event = json!({
+            "broadcaster_user_login": "streamer",
+            "user_id": "1050263434",
+            "user_login": "baduser",
+            "user_name": "BadUser",
+            "low_trust_status": "restricted",
+            "shared_ban_channel_ids": ["100", "200"],
+            "types": ["ban_evader", "banned_in_shared_channel"],
+            "ban_evasion_evaluation": "likely",
+            "message": {
+                "message_id": "msg-9",
+                "text": "hello Kappa",
+                "fragments": [
+                    { "type": "text", "text": "hello ", "cheermote": null, "emote": null },
+                    { "type": "emote", "text": "Kappa", "cheermote": null,
+                      "emote": { "id": "25", "emote_set_id": "0" } },
+                ],
+            },
+        });
+        match suspicious_message(&event, Utc::now()) {
+            Some(ChatEvent::Suspicious {
+                status,
+                detail,
+                message,
+                ..
+            }) => {
+                assert_eq!(status, SuspiciousStatus::Restricted);
+                assert_eq!(detail, "likely ban evader · banned in 2 shared channels");
+                assert_eq!(message.id, "msg-9");
+                assert_eq!(message.author.login, "baduser");
+                assert_eq!(message.author.display_name, "BadUser");
+                assert_eq!(message.raw_text, "hello Kappa");
+                assert!(message.elements.iter().any(|e| matches!(
+                    e,
+                    bks_core::MessageElement::Emote(em) if em.id == "25" && em.name == "Kappa"
+                )));
+            }
+            other => panic!("expected Suspicious, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suspicious_message_monitored_without_detail() {
+        let event = json!({
+            "user_login": "chatter",
+            "user_name": "Chatter",
+            "low_trust_status": "active_monitoring",
+            "types": ["manually_added"],
+            "ban_evasion_evaluation": "unknown",
+            "message": { "message_id": "msg-1", "text": "hi", "fragments": [] },
+        });
+        match suspicious_message(&event, Utc::now()) {
+            Some(ChatEvent::Suspicious { status, detail, message, .. }) => {
+                assert_eq!(status, SuspiciousStatus::Monitored);
+                assert_eq!(detail, "");
+                assert!(matches!(
+                    message.elements.as_slice(),
+                    [bks_core::MessageElement::Text { text, .. }] if text == "hi"
+                ));
+            }
+            other => panic!("expected Suspicious, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suspicious_update_notices() {
+        let event = |status: &str| {
+            json!({
+                "moderator_user_name": "StreamMod",
+                "user_name": "BadUser",
+                "low_trust_status": status,
+            })
+        };
+        assert_eq!(
+            suspicious_update(&event("restricted")),
+            Some("StreamMod restricted BadUser as a suspicious user".to_string())
+        );
+        assert_eq!(
+            suspicious_update(&event("active_monitoring")),
+            Some("StreamMod started monitoring BadUser as a suspicious user".to_string())
+        );
+        assert_eq!(
+            suspicious_update(&event("none")),
+            Some("StreamMod removed BadUser's suspicious-user treatment".to_string())
+        );
+    }
+
+    #[test]
     fn scope_checks() {
         let full: Vec<String> = [
             "moderator:manage:banned_users",
@@ -694,5 +939,9 @@ mod tests {
         assert!(!can_moderate_feed(&old));
         assert!(!can_automod(&old));
         assert!(can_automod(&["moderator:manage:automod".to_string()]));
+        assert!(!can_suspicious(&old));
+        assert!(can_suspicious(&[
+            "moderator:read:suspicious_users".to_string()
+        ]));
     }
 }

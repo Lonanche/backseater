@@ -277,12 +277,9 @@ pub(crate) struct LiveInfo {
 /// send time, so the pair is stable). `None` for row kinds without a natural
 /// key (system/error/live notices), which are never deduplicated.
 pub(crate) fn row_key(row: &Row) -> Option<u64> {
-    use std::hash::{Hash, Hasher};
     match row {
         Row::Message { msg, .. } if !msg.id.is_empty() => {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            (0u8, msg.platform, &msg.id).hash(&mut h);
-            Some(h.finish())
+            Some(message_row_key(msg.platform, &msg.id))
         }
         Row::Event {
             platform,
@@ -292,6 +289,16 @@ pub(crate) fn row_key(row: &Row) -> Option<u64> {
         } => Some(event_row_key(*platform, timestamp, text)),
         _ => None,
     }
+}
+
+/// [`row_key`]'s message arm, callable without a built `Row` — the store probes
+/// it to learn whether a message id is already buffered (a suspicious-user mark
+/// for a row already shown needs a re-measure, not an insert).
+pub(crate) fn message_row_key(platform: bks_core::Platform, id: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (0u8, platform, id).hash(&mut h);
+    h.finish()
 }
 
 /// [`row_key`]'s event arm, callable before a `Row::Event` is built — the store
@@ -3622,6 +3629,10 @@ impl ChatView {
                     let struck = model.is_struck(msg);
                     let mentioned = this.mentions.matches(&msg.raw_text);
                     let suppressed = this.suppress.matches_message(msg);
+                    let suspicious = model.suspicious_for(msg).map(|m| render::SuspiciousTag {
+                        restricted: m.status == bks_platform::SuspiciousStatus::Restricted,
+                        detail: m.detail.clone(),
+                    });
                     let decorated = log::decorate(msg, model);
                     // Ordinals only need ordering, so the row index strides
                     // them like the log.
@@ -3633,6 +3644,7 @@ impl ChatView {
                             mentioned,
                             hide_timestamp: !crate::settings::show_timestamps_chat(),
                             suppressed,
+                            suspicious,
                             ..Default::default()
                         },
                         font_size,

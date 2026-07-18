@@ -166,6 +166,20 @@ platform = implement one trait + one message builder, with zero UI changes**.
   any mod acts. Single deleted messages (IRC `CLEARMSG`) strike just that row for everyone. Needs the
   scopes added for it — an older login keeps working, the feed just stays off until the next login.
   See the moderator-feed note below.
+- **Suspicious-user marks (Twitch "Low Trust", mod-only)**: messages from monitored/restricted
+  chatters get a burnt-orange row tint + a corner pill ("MONITORED" / "RESTRICTED", with Twitch's
+  detail appended — "likely ban evader · banned in 2 shared channels"), and treatment changes post
+  a notice ("mod restricted X as a suspicious user"). EventSub `channel.suspicious_user.message` +
+  `.update` v1 (`moderator:read:suspicious_users`, in `SCOPES`; two more subs on the shared
+  socket). A **monitored** user's message also arrives over IRC, so the mark is a side-table entry
+  (`ChannelModel.suspicious_ids`, pruned with its row on ring trim) resolved at render like
+  `is_struck` — either arrival order works (mark-first renders marked from the start; row-first
+  re-measures via `Changed`). A **restricted** user's message is withheld from IRC entirely, so
+  the event's carried copy (rebuilt in `eventsub.rs::suspicious_message` from the payload's
+  fragments — native emotes inline, no name color → the stable per-user fallback) is inserted as
+  a normal marked row (`row_keys` dedupes if Twitch ever echoes it). The seam is
+  `ChatEvent::Suspicious { platform, status, detail, message }` + `SuspiciousStatus`; the pill
+  outranks the mention/first-message/highlighted tints, and the search window shows it too.
 - **Pinned messages (Twitch + Kick)**: a banner above the log shows each platform's active mod
   pin ("📌 Pinned by X" + the message rendered like a chat line), with an ✕ that dismisses *just
   that pin* locally (session-only, keyed by message id) and per-platform "Show pinned messages"
@@ -805,6 +819,9 @@ logged in AND a moderator/broadcaster of the tab's Twitch channel, the feed subs
 - **`automod.message.hold` / `.update` v2** (scope `moderator:manage:automod`) → `ChatEvent::
   AutoModHeld` renders an amber row (chatter, held text, reason, **Allow/Deny** chips →
   `Helix::manage_automod_message`); the `.update` resolves the row in place ("✔ allowed by mod").
+- **`channel.suspicious_user.message` / `.update` v1** (scope `moderator:read:suspicious_users`) →
+  `ChatEvent::Suspicious` (monitored/restricted marks — see the suspicious-user bullet in Current
+  status) and a treatment-change notice.
 ⚠️ **One shared socket app-wide, NOT one per tab.** Twitch caps EventSub at **3 WebSocket
 connections with enabled subscriptions per (client id, user id)**; the old per-tab socket 429'd
 ("number of websocket transports limit exceeded") the moment a user modded 4+ channels (or a startup
@@ -813,7 +830,7 @@ another socket. So `eventsub_manager.rs` owns a **single** socket for the logged
 multiplexes every tab onto it: tabs `register_eventsub(auth, broadcaster_id, sink)` → get back an
 `EventsubRegistration` guard; the manager creates that channel's subscriptions on the shared session
 and routes each notification to the owning sink by `subscription.condition.broadcaster_user_id`. One
-socket holds 300 subscriptions (~100 channels at 3 subs each). A background `socket_task` runs the
+socket holds 300 subscriptions (~60 channels at 5 subs each). A background `socket_task` runs the
 connection + reconnect-with-backoff, re-subscribing all registered channels on each fresh session; an
 internal command channel handles register/unregister without locks across awaits. A **new login**
 (different `client_id`/`user_id`/token) rebinds the socket (old task retires + deletes its subs). The
