@@ -99,6 +99,12 @@ enum TwitchCmd {
         user: String,
         reason: String,
     },
+    /// Suspicious-user (Low Trust) treatment: `Some(true)` restricts,
+    /// `Some(false)` monitors, `None` removes the treatment.
+    Suspicious {
+        user: String,
+        status: Option<bool>,
+    },
     /// twitch.tv's `/pin`: send the message, then pin it for `duration_secs`
     /// (`None` = until the stream ends).
     Pin {
@@ -918,6 +924,28 @@ impl Controller {
                 ),
                 _ => self.notice("usage: /warn <user> <reason>"),
             },
+            "monitor" | "restrict" => match args.first() {
+                Some(user) => self.twitch_cmd(
+                    target,
+                    &cmd,
+                    TwitchCmd::Suspicious {
+                        user: user_arg(user),
+                        status: Some(cmd == "restrict"),
+                    },
+                ),
+                None => self.notice(format!("usage: /{cmd} <user>")),
+            },
+            "unmonitor" | "unrestrict" => match args.first() {
+                Some(user) => self.twitch_cmd(
+                    target,
+                    &cmd,
+                    TwitchCmd::Suspicious {
+                        user: user_arg(user),
+                        status: None,
+                    },
+                ),
+                None => self.notice(format!("usage: /{cmd} <user>")),
+            },
             "pin" => {
                 // Optional leading duration ("/pin 10m message"); a bare
                 // number is MINUTES ("/pin 20 hi" = 20m — pins are minutes-
@@ -1072,6 +1100,15 @@ impl Controller {
                 TwitchCmd::Warn { user, reason } => (
                     actions.warn(ch, &user, &reason).await,
                     Some(format!("warned {user}")),
+                ),
+                // No confirmation: the EventSub suspicious_user.update notice
+                // reports the change ("You restricted X as a suspicious user").
+                TwitchCmd::Suspicious { user, status } => (
+                    match status {
+                        Some(restricted) => actions.mark_suspicious(ch, &user, restricted).await,
+                        None => actions.unmark_suspicious(ch, &user).await,
+                    },
+                    None,
                 ),
                 TwitchCmd::Pin {
                     message,

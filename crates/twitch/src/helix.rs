@@ -634,6 +634,56 @@ impl Helix {
         ensure_ok(resp, "warn").await
     }
 
+    /// Marks `target` as a suspicious user in `broadcaster`'s chat — restricted
+    /// (messages withheld from chat, delivered to mods for review) or merely
+    /// monitored. Needs `moderator:manage:suspicious_users`.
+    pub async fn add_suspicious_user(
+        &self,
+        broadcaster: &str,
+        target: &str,
+        restricted: bool,
+    ) -> anyhow::Result<()> {
+        let (broadcaster_id, target_id) = self.resolve_pair(broadcaster, target).await?;
+        let status = if restricted {
+            "RESTRICTED"
+        } else {
+            "ACTIVE_MONITORING"
+        };
+        let body = serde_json::json!({ "user_id": target_id, "status": status });
+        let url = format!(
+            "{HELIX}/moderation/suspicious_users?broadcaster_id={broadcaster_id}&moderator_id={}",
+            self.moderator_id
+        );
+        let resp = self
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .context("suspicious-user request")?;
+        ensure_ok(resp, "suspicious user").await
+    }
+
+    /// Removes `target`'s suspicious-user treatment in `broadcaster`'s chat.
+    /// Needs `moderator:manage:suspicious_users`.
+    pub async fn remove_suspicious_user(
+        &self,
+        broadcaster: &str,
+        target: &str,
+    ) -> anyhow::Result<()> {
+        let (broadcaster_id, target_id) = self.resolve_pair(broadcaster, target).await?;
+        let url = format!(
+            "{HELIX}/moderation/suspicious_users?broadcaster_id={broadcaster_id}\
+             &moderator_id={}&user_id={target_id}",
+            self.moderator_id
+        );
+        let resp = self
+            .delete(url)
+            .send()
+            .await
+            .context("suspicious-user request")?;
+        ensure_ok(resp, "suspicious user").await
+    }
+
     /// Patches `broadcaster`'s chat settings with the given (partial) `settings`
     /// body — only the fields present change. Needs
     /// `moderator:manage:chat_settings`. The typed toggles live on

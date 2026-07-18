@@ -337,6 +337,33 @@ pub const COMMANDS: &[CommandDef] = &[
         broadcaster_only: false,
         mod_only: true,
     },
+    CommandDef {
+        name: "monitor",
+        aliases: &[],
+        usage: "/monitor <user>",
+        description: "Mark a user as a monitored suspicious user",
+        platforms: TWITCH,
+        broadcaster_only: false,
+        mod_only: true,
+    },
+    CommandDef {
+        name: "restrict",
+        aliases: &[],
+        usage: "/restrict <user>",
+        description: "Restrict a suspicious user (their messages are held for mod review)",
+        platforms: TWITCH,
+        broadcaster_only: false,
+        mod_only: true,
+    },
+    CommandDef {
+        name: "unmonitor",
+        aliases: &["unrestrict"],
+        usage: "/unmonitor <user>",
+        description: "Remove a user's suspicious-user treatment",
+        platforms: TWITCH,
+        broadcaster_only: false,
+        mod_only: true,
+    },
 ];
 
 /// What a command implicitly acts on — derived from its usage line's first
@@ -469,6 +496,8 @@ mod tests {
         assert_eq!(implicit_target("timeout"), Some(ImplicitTarget::User));
         assert_eq!(implicit_target("ban"), Some(ImplicitTarget::User));
         assert_eq!(implicit_target("warn"), Some(ImplicitTarget::User));
+        assert_eq!(implicit_target("monitor"), Some(ImplicitTarget::User));
+        assert_eq!(implicit_target("unrestrict"), Some(ImplicitTarget::User));
         // Aliases and case resolve like canonical names.
         assert_eq!(implicit_target("untimeout"), Some(ImplicitTarget::User));
         assert_eq!(implicit_target("BAN"), Some(ImplicitTarget::User));

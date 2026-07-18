@@ -94,8 +94,11 @@ platform = implement one trait + one message builder, with zero UI changes**.
   success), `/clear`, chat modes `/slow [secs]` `/slowoff` `/followers [duration]` `/followersoff`
   `/subscribers(off)` `/emoteonly(off)` `/uniquechat(off)` (PATCH `/helix/chat/settings`; feedback
   arrives via ROOMSTATE → the mode bar), `/mod` `/unmod` `/vip` `/unvip` (broadcaster-only per
-  Twitch), `/shoutout`, `/raid` `/unraid`, `/me` (sent as `/me` PRIVMSG text — the one slash
-  command Twitch IRC still interprets). The scopes for these (announcements/warnings/
+  Twitch), `/shoutout`, `/raid` `/unraid`, `/monitor` `/restrict` `/unmonitor`|`/unrestrict`
+  (suspicious-user treatment via POST/DELETE `/helix/moderation/suspicious_users`, body `status`
+  `ACTIVE_MONITORING`/`RESTRICTED`, scope `moderator:manage:suspicious_users`; no confirmation
+  notice — the EventSub `suspicious_user.update` notice reports it), `/me` (sent as `/me` PRIVMSG
+  text — the one slash command Twitch IRC still interprets). The scopes for these (announcements/warnings/
   chat_settings/shoutouts/raids/moderators/vips manage) are in `SCOPES`; an older token keeps
   chatting and the commands 401/403 with a hint until the next login. **Chatview-intercepted UI
   commands** (`ChatView::handle_ui_command`, never reach the controller): `/chatters`|`/viewers`,
@@ -171,7 +174,8 @@ platform = implement one trait + one message builder, with zero UI changes**.
   detail appended — "likely ban evader · banned in 2 shared channels"), and treatment changes post
   a notice ("mod restricted X as a suspicious user"). EventSub `channel.suspicious_user.message` +
   `.update` v1 (`moderator:read:suspicious_users`, in `SCOPES`; two more subs on the shared
-  socket). A **monitored** user's message also arrives over IRC, so the mark is a side-table entry
+  socket). Mods set the treatment with `/monitor` `/restrict` `/unmonitor`|`/unrestrict` (see the
+  slash-commands bullet). A **monitored** user's message also arrives over IRC, so the mark is a side-table entry
   (`ChannelModel.suspicious_ids`, pruned with its row on ring trim) resolved at render like
   `is_struck` — either arrival order works (mark-first renders marked from the start; row-first
   re-measures via `Changed`). A **restricted** user's message is withheld from IRC entirely, so

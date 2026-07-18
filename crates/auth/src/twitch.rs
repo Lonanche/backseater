@@ -24,7 +24,8 @@ const STORE_NAME: &str = "twitch_credentials";
 
 /// Chat + moderation, plus the EventSub moderator feed: `channel.moderate` v2
 /// requires the whole read set below (each satisfied by read OR manage), the
-/// suspicious-user (Low Trust) marks need `moderator:read:suspicious_users`, and
+/// suspicious-user (Low Trust) marks need `moderator:read:suspicious_users`
+/// (+ `manage` for `/monitor` `/restrict` `/unmonitor` `/unrestrict`), and
 /// AutoMod hold/allow/deny needs `moderator:manage:automod`. The viewer list
 /// needs `moderator:read:chatters`; the personal emote set for the picker +
 /// autocomplete (cross-channel sub emotes) needs `user:read:emotes`. The
@@ -43,7 +44,8 @@ const SCOPES: &str = "chat:read chat:edit user:write:chat user:read:emotes \
                       moderator:read:blocked_terms \
                       moderator:read:unban_requests \
                       moderator:read:moderators moderator:read:vips \
-                      moderator:read:chatters moderator:read:suspicious_users";
+                      moderator:read:chatters moderator:read:suspicious_users \
+                      moderator:manage:suspicious_users";
 
 /// A validated Twitch user session.
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -228,6 +228,22 @@ impl TwitchActions {
         self.helix.warn(channel, user, reason).await
     }
 
+    /// Marks `user` as a suspicious user: restricted (messages withheld for mod
+    /// review) or merely monitored.
+    pub async fn mark_suspicious(
+        &self,
+        channel: &str,
+        user: &str,
+        restricted: bool,
+    ) -> anyhow::Result<()> {
+        self.helix.add_suspicious_user(channel, user, restricted).await
+    }
+
+    /// Removes `user`'s suspicious-user treatment.
+    pub async fn unmark_suspicious(&self, channel: &str, user: &str) -> anyhow::Result<()> {
+        self.helix.remove_suspicious_user(channel, user).await
+    }
+
     /// Slow mode: `Some(secs)` (Twitch allows 3–120) turns it on, `None` off.
     pub async fn set_slow_mode(&self, channel: &str, secs: Option<u32>) -> anyhow::Result<()> {
         let body = match secs {
