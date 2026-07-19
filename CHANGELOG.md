@@ -3,6 +3,13 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.6.0-beta.3
+
+### Fixes
+
+- Chat search (Ctrl+F) now matches only message text; a query no longer
+  returns every message a user sent just because their name contains it.
+
 ## v0.6.0-beta.2
 
 ### Features

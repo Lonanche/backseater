@@ -21,15 +21,12 @@ pub fn normalize(query: &str) -> String {
 }
 
 /// Whether `msg` matches an already-[`normalize`]d query: case-insensitive
-/// substring of the message text, login, or display name; empty matches all.
-/// This runs per buffered message on every rebuild — each keystroke and each
-/// buffer change while the search window is open — so the matching is the
-/// allocation-free [`bks_core::contains_ci`].
+/// substring of the message text only (usernames are deliberately not
+/// searched); empty matches all. This runs per buffered message on every
+/// rebuild — each keystroke and each buffer change while the search window is
+/// open — so the matching is the allocation-free [`bks_core::contains_ci`].
 pub fn matches(msg: &Message, query: &str) -> bool {
-    query.is_empty()
-        || contains_ci(&msg.raw_text, query)
-        || contains_ci(&msg.author.login, query)
-        || contains_ci(&msg.author.display_name, query)
+    query.is_empty() || contains_ci(&msg.raw_text, query)
 }
 
 /// The buffered chat messages matching an already-[`normalize`]d query, in the
@@ -90,14 +87,15 @@ mod tests {
     }
 
     #[test]
-    fn matches_text_login_and_display_name_case_insensitively() {
+    fn matches_text_case_insensitively_but_not_usernames() {
         let rows = [
             message_row("1", "alice", "Alice", "Hello WORLD"),
             message_row("2", "bob", "ボブ", "kappa"),
         ];
         assert_eq!(filter(rows.iter(), &normalize("world"))[0].id, "1");
-        assert_eq!(filter(rows.iter(), &normalize("ALI"))[0].id, "1");
-        assert_eq!(filter(rows.iter(), &normalize("ボ"))[0].id, "2");
+        assert_eq!(filter(rows.iter(), &normalize("ボ")).len(), 0);
+        assert!(filter(rows.iter(), &normalize("ALI")).is_empty());
+        assert!(filter(rows.iter(), &normalize("bob")).is_empty());
         assert!(filter(rows.iter(), &normalize("zzz")).is_empty());
     }
 

@@ -296,7 +296,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
   (`viewer_list`/`viewer_list_window`), module `crates/app/src/viewerlist.rs`.
 - **Chat search (Ctrl+F — bare Ctrl/Cmd only, Shift/Alt chords pass through)**: a child OS
   window per view listing the tab's buffered chat history with a live search box
-  (case-insensitive substring of message text / login / display name; matching in
+  (case-insensitive substring of the message text only — usernames deliberately not searched; matching in
   `crates/app/src/search.rs` on the shared `bks_core::contains_ci`, whose ASCII-needle path is
   allocation-free since it runs per buffered message on every rebuild — the viewer list filters
   through it too; the normalized query is cached on `ChatView.search_query` per keystroke, not
