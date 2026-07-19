@@ -3,6 +3,28 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.6.0-beta.2
+
+### Features
+
+- Pick which channel events play a sound: every event kind in a tab's
+  events-panel settings (Subscriptions, Gifts, Raids / Hosts, Bits / Kicks,
+  Channel points, …) now has a bell toggle next to its checkbox, so a raid or
+  a gift bomb can ping you the way a mention does. Sounds are off by default
+  and per tab; a mass gift plays a single ping for the whole batch, never one
+  per recipient, and an event pings once even when the same channel is open in
+  several tabs or popped-out windows.
+- The event-kind list (with its bells) is available even when the events panel
+  itself is turned off — events still show in the chat log, and now they can
+  ping without the panel.
+- Streamer mode's sound muting now covers event pings too (the setting is
+  labeled "Mute alert sounds while active").
+
+### Fixes
+
+- Changing a tab's events-panel filters now applies to that tab's popped-out
+  windows too; popouts used to keep the filters they were opened with.
+
 ## v0.6.0-beta.1
 
 ### Features
