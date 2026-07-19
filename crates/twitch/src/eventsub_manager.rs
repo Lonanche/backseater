@@ -109,8 +109,8 @@ fn manager() -> &'static Arc<ManagerInner> {
 pub fn register(auth: EventsubAuth, broadcaster_id: String, sink: ChatSink) -> Option<Registration> {
     if !auth.feed_available() {
         tracing::info!(
-            "twitch token lacks the moderator-feed scopes; log out and back in to enable \
-             rich moderation notices + AutoMod"
+            "twitch token lacks the moderator-feed scopes; log in again with Full \
+             moderator permissions to enable rich moderation notices + AutoMod"
         );
         return None;
     }

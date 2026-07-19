@@ -807,7 +807,16 @@ pub(crate) struct BackseaterApp {
     /// Mention-store subscriptions: row clicks → select the source tab, and
     /// new mentions → tail + repaint the global tab.
     _mention_subs: Vec<Subscription>,
+    /// Whether the Twitch login-permissions chooser is expanded under the
+    /// Account row. Session-only.
+    twitch_perm_open: bool,
+    /// The tier being picked in the chooser while it's open; committed to
+    /// [`Settings::twitch_login_scopes`] when the login is launched.
+    twitch_perm_choice: bks_auth::twitch::ScopeChoice,
 }
+
+/// A click action on a Twitch-permissions-chooser option row.
+type PermRowAction = Box<dyn Fn(&mut BackseaterApp, &mut Context<BackseaterApp>)>;
 
 impl BackseaterApp {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -1073,6 +1082,8 @@ impl BackseaterApp {
             mentions_new: false,
             mentions_unread: false,
             _mention_subs,
+            twitch_perm_open: false,
+            twitch_perm_choice: bks_auth::twitch::ScopeChoice::default(),
         }
     }
 
@@ -2495,29 +2506,351 @@ impl BackseaterApp {
 
     /// Renders the Account section: one card row per platform (logo, login
     /// status, a Log in / Log out button). Actions go through the active tab's
-    /// controller.
+    /// controller. The Twitch row carries the login-permissions chooser (an
+    /// inline expander, not a dialog — child windows render no dialog layer).
     fn account_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let state = self.session.login_state();
+        let mut card = setting_card().child(self.twitch_account_row(state.twitch, cx));
+        if self.twitch_perm_open {
+            card = card
+                .child(card_divider())
+                .child(self.twitch_permissions_editor(cx));
+        }
+        card = card.child(card_divider()).child(self.account_row(
+            bks_core::Platform::Kick,
+            state.kick,
+            cx,
+            |c| c.kick_login(),
+            |c| c.kick_logout(),
+        ));
         v_flex()
             .gap_2()
             .child(section_title("Accounts"))
+            .child(card)
+            .into_any_element()
+    }
+
+    /// The Twitch account row: logo + status — including what the token is
+    /// allowed to do ("full moderator + broadcaster") — and Log in /
+    /// Permissions… / Log out. Log in expands the permissions chooser instead
+    /// of jumping straight to the browser; Permissions… reopens it to re-login
+    /// at a different tier (the only way scopes can change).
+    fn twitch_account_row(
+        &self,
+        account: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let logged_in = account.is_some();
+        let status = match &account {
+            // A legacy token with no stored scopes is unknown, not chat-only —
+            // show no tier rather than a wrong one (gating skips it too).
+            Some(name) => match session::twitch_granted_scopes().filter(|s| !s.is_empty()) {
+                Some(scopes) => format!(
+                    "Logged in as {name} — {}",
+                    bks_auth::twitch::ScopeChoice::summarize(&scopes)
+                ),
+                None => format!("Logged in as {name}"),
+            },
+            None => "Not logged in".to_string(),
+        };
+        let buttons = if logged_in {
+            h_flex()
+                .gap_1()
+                .child(
+                    Button::new("twitch-permissions")
+                        .label("Permissions…")
+                        .small()
+                        .outline()
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.toggle_twitch_permissions(cx)),
+                        ),
+                )
+                .child(
+                    Button::new("logout-Twitch")
+                        .label("Log out")
+                        .small()
+                        .danger()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(c) = this.active_controller(cx) {
+                                c.twitch_logout();
+                            }
+                            this.twitch_perm_open = false;
+                            cx.notify();
+                        })),
+                )
+        } else {
+            h_flex().child(
+                Button::new("login-Twitch")
+                    .label("Log in")
+                    .small()
+                    .primary()
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_twitch_permissions(cx))),
+            )
+        };
+        self.account_row_shell(
+            bks_core::Platform::Twitch,
+            status,
+            buttons.into_any_element(),
+            cx,
+        )
+    }
+
+    /// The shared account-row layout (platform icon, name + status column, the
+    /// action buttons at the right) both platform rows render through, so they
+    /// can't drift apart inside the same card.
+    fn account_row_shell(
+        &self,
+        platform: bks_core::Platform,
+        status: String,
+        buttons: gpui::AnyElement,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py_2p5()
             .child(
-                setting_card()
-                    .child(self.account_row(
-                        bks_core::Platform::Twitch,
-                        state.twitch,
-                        cx,
-                        |c| c.twitch_login(),
-                        |c| c.twitch_logout(),
-                    ))
-                    .child(card_divider())
-                    .child(self.account_row(
-                        bks_core::Platform::Kick,
-                        state.kick,
-                        cx,
-                        |c| c.kick_login(),
-                        |c| c.kick_logout(),
+                div()
+                    .flex_none()
+                    .w(px(22.))
+                    .flex()
+                    .justify_center()
+                    .child(platform_icon(platform, 20.)),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(SharedString::from(platform.label())),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(status)),
+                    ),
+            )
+            .child(buttons)
+            .into_any_element()
+    }
+
+    /// Opens (seeding from the saved choice, chat-only for a first login) or
+    /// closes the Twitch permissions chooser.
+    fn toggle_twitch_permissions(&mut self, cx: &mut Context<Self>) {
+        self.twitch_perm_open = !self.twitch_perm_open;
+        if self.twitch_perm_open {
+            self.twitch_perm_choice =
+                self.settings
+                    .twitch_login_scopes
+                    .unwrap_or(bks_auth::twitch::ScopeChoice {
+                        preset: bks_auth::twitch::ScopePreset::ChatOnly,
+                        broadcaster: false,
+                    });
+        }
+        cx.notify();
+    }
+
+    /// Persists the chosen tier and launches the browser login with it.
+    fn confirm_twitch_login(&mut self, cx: &mut Context<Self>) {
+        let choice = self.twitch_perm_choice;
+        self.settings.twitch_login_scopes = Some(choice);
+        self.settings.save();
+        self.twitch_perm_open = false;
+        if let Some(c) = self.active_controller(cx) {
+            c.twitch_login(choice);
+        }
+        cx.notify();
+    }
+
+    /// The expanded permissions chooser: three preset tiers as radio rows, the
+    /// broadcaster add-on checkbox, and the button that opens the browser.
+    /// What's picked here is exactly what Twitch's consent screen lists — the
+    /// point of the chooser (the full scope list scares off someone who only
+    /// wants to chat).
+    fn twitch_permissions_editor(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use bks_auth::twitch::ScopePreset;
+        use gpui_component::Icon;
+
+        let choice = self.twitch_perm_choice;
+        let accent = cx.theme().primary;
+        // One selectable option row — the radio tiers and the checkbox add-on
+        // share this chrome so their styling can't drift apart.
+        let option_row = |id: &'static str,
+                          selected: bool,
+                          indicator: gpui::AnyElement,
+                          title: &'static str,
+                          blurb: &'static str,
+                          on_click: PermRowAction,
+                          cx: &mut Context<Self>| {
+            let hover_bg = cx.theme().secondary;
+            h_flex()
+                .id(id)
+                .w_full()
+                .items_start()
+                .gap_2()
+                .px_2()
+                .py_1p5()
+                .rounded_md()
+                .cursor_pointer()
+                .when(selected, |el| el.bg(accent.opacity(0.12)))
+                .when(!selected, |el| el.hover(move |s| s.bg(hover_bg)))
+                .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
+                .child(indicator)
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(SharedString::from(title)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(SharedString::from(blurb)),
+                        ),
+                )
+        };
+        let radio_dot = |selected: bool, cx: &Context<Self>| {
+            div()
+                .flex_none()
+                .mt(px(2.))
+                .size(px(14.))
+                .rounded_full()
+                .border_2()
+                .border_color(if selected { accent } else { cx.theme().border })
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(selected, |el| {
+                    el.child(div().size(px(6.)).rounded_full().bg(accent))
+                })
+                .into_any_element()
+        };
+        let preset_row = |id: &'static str,
+                          preset: ScopePreset,
+                          title: &'static str,
+                          blurb: &'static str,
+                          cx: &mut Context<Self>| {
+            let selected = choice.preset == preset;
+            option_row(
+                id,
+                selected,
+                radio_dot(selected, cx),
+                title,
+                blurb,
+                Box::new(move |this, cx| {
+                    this.twitch_perm_choice.preset = preset;
+                    cx.notify();
+                }),
+                cx,
+            )
+        };
+
+        v_flex()
+            .w_full()
+            .px_3()
+            .py_2p5()
+            .gap_2()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(
+                        "Choose how much Backseater may do with your Twitch account — \
+                         the browser's consent screen lists exactly this, nothing more. \
+                         Change it any time by logging in again.",
                     )),
+            )
+            .child(preset_row(
+                "twitch-perm-chat",
+                ScopePreset::ChatOnly,
+                "Chat only",
+                "Read and send chat messages. The shortest consent screen.",
+                cx,
+            ))
+            .child(preset_row(
+                "twitch-perm-basic",
+                ScopePreset::BasicModeration,
+                "Basic moderation",
+                "Chat, plus ban/timeout, delete messages, pin messages, and the viewer list.",
+                cx,
+            ))
+            .child(preset_row(
+                "twitch-perm-full",
+                ScopePreset::FullModerator,
+                "Full moderator",
+                "Every moderation tool: warnings, announcements, chat modes, the AutoMod \
+                 queue, suspicious users, and the rich mod-action feed.",
+                cx,
+            ))
+            .child({
+                // A checkbox indicator in the same row chrome — it's an
+                // add-on, not a fourth tier.
+                let checked = choice.broadcaster;
+                let boxed = div()
+                    .flex_none()
+                    .mt(px(2.))
+                    .size(px(14.))
+                    .rounded_sm()
+                    .border_2()
+                    .border_color(if checked { accent } else { cx.theme().border })
+                    .when(checked, |el| el.bg(accent))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(checked, |el| {
+                        el.child(
+                            Icon::new(IconName::Check)
+                                .size(px(10.))
+                                .text_color(cx.theme().primary_foreground),
+                        )
+                    })
+                    .into_any_element();
+                option_row(
+                    "twitch-perm-broadcaster",
+                    checked,
+                    boxed,
+                    "Broadcaster tools",
+                    "/raid and granting mod/VIP — only useful on your own channel.",
+                    Box::new(|this, cx| {
+                        this.twitch_perm_choice.broadcaster = !this.twitch_perm_choice.broadcaster;
+                        cx.notify();
+                    }),
+                    cx,
+                )
+            })
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("twitch-perm-cancel")
+                            .label("Cancel")
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.twitch_perm_open = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("twitch-perm-go")
+                            .label("Open Twitch login")
+                            .small()
+                            .primary()
+                            .on_click(cx.listener(|this, _, _, cx| this.confirm_twitch_login(cx))),
+                    ),
             )
             .into_any_element()
     }
@@ -2562,40 +2895,7 @@ impl BackseaterApp {
                     cx.notify();
                 }))
         };
-        h_flex()
-            .w_full()
-            .items_center()
-            .gap_3()
-            .px_3()
-            .py_2p5()
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(22.))
-                    .flex()
-                    .justify_center()
-                    .child(platform_icon(platform, 20.)),
-            )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_0p5()
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(SharedString::from(label)),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(SharedString::from(status)),
-                    ),
-            )
-            .child(button)
-            .into_any_element()
+        self.account_row_shell(platform, status, button.into_any_element(), cx)
     }
 
     /// Renders the Themes section: a selector (Dark / Light / each saved custom
@@ -6256,6 +6556,35 @@ fn chip_tooltip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The scope lists live in two crates — bks-auth defines what a login tier
+    /// requests, bks-twitch defines what the EventSub feed needs — with no
+    /// dependency between them. This is the tie: if `channel.moderate` grows a
+    /// new required scope, this fails instead of the feed silently going dark
+    /// for full-moderator logins.
+    #[test]
+    fn full_moderator_tier_powers_the_whole_eventsub_feed() {
+        use bks_auth::twitch::{ScopeChoice, ScopePreset};
+        let auth = |preset| bks_twitch::EventsubAuth {
+            client_id: String::new(),
+            token: String::new(),
+            user_id: String::new(),
+            scopes: ScopeChoice {
+                preset,
+                broadcaster: false,
+            }
+            .scopes()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        };
+        let full = auth(ScopePreset::FullModerator);
+        assert!(full.wants_moderate(), "full tier must cover channel.moderate");
+        assert!(full.wants_automod());
+        assert!(full.wants_suspicious());
+        // Basic deliberately leaves the rich feed off (generic notices remain).
+        assert!(!auth(ScopePreset::BasicModeration).feed_available());
+    }
 
     #[test]
     fn flash_alpha_pulses_then_ends() {

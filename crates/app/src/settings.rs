@@ -332,6 +332,11 @@ pub struct Settings {
     /// yet, so an intentionally emptied list stays empty on later launches.
     #[serde(default)]
     pub mod_buttons_seeded: bool,
+    /// The scope tier the last Twitch login requested (Account → the login
+    /// permissions chooser). `None` = never chosen — the chooser then defaults
+    /// to chat-only, the least scary consent screen.
+    #[serde(default)]
+    pub twitch_login_scopes: Option<bks_auth::twitch::ScopeChoice>,
 }
 
 fn default_font_size() -> f32 {
@@ -380,6 +385,7 @@ impl Default for Settings {
             mod_button_mode: ModButtonMode::default(),
             mod_buttons: default_mod_buttons(),
             mod_buttons_seeded: true,
+            twitch_login_scopes: None,
         }
     }
 }

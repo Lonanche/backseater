@@ -50,18 +50,20 @@ impl EventsubAuth {
         can_moderate_feed(&self.scopes) || can_automod(&self.scopes) || can_suspicious(&self.scopes)
     }
 
-    /// Whether the token carries the `channel.moderate` scope set.
-    pub(crate) fn wants_moderate(&self) -> bool {
+    /// Whether the token carries the `channel.moderate` scope set. Public so
+    /// the app can assert its login tiers actually cover the feed (the scope
+    /// lists live in two crates; a test ties them together).
+    pub fn wants_moderate(&self) -> bool {
         can_moderate_feed(&self.scopes)
     }
 
     /// Whether the token carries the AutoMod scope.
-    pub(crate) fn wants_automod(&self) -> bool {
+    pub fn wants_automod(&self) -> bool {
         can_automod(&self.scopes)
     }
 
     /// Whether the token carries the suspicious-user (Low Trust) scope.
-    pub(crate) fn wants_suspicious(&self) -> bool {
+    pub fn wants_suspicious(&self) -> bool {
         can_suspicious(&self.scopes)
     }
 }

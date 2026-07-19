@@ -2244,7 +2244,9 @@ impl ChatView {
     /// and stays, but pinning/unpinning only exists on Kick's site API, which
     /// rejects third-party OAuth tokens ([`Controller::KICK_UNSUPPORTED`]).
     fn can_pin(&self, platform: bks_core::Platform, cx: &App) -> bool {
-        platform == bks_core::Platform::Twitch && self.channel.read(cx).can_moderate(platform)
+        platform == bks_core::Platform::Twitch
+            && self.channel.read(cx).can_moderate(platform)
+            && !crate::session::twitch_scope_missing(commands::SCOPE_CHAT_MESSAGES)
     }
 
     /// The live-status bar above the log: one segment per platform of this tab
@@ -4173,6 +4175,13 @@ impl ChatView {
                         .filter(|m| {
                             (can_mod || !m.def.mod_only) && (owner || !m.def.broadcaster_only)
                         })
+                        // Commands the Twitch login tier opted out of (typing
+                        // one anyway still runs it — the API returns the real
+                        // error, same rule as the mod/broadcaster filters).
+                        .filter(|m| {
+                            platform != bks_core::Platform::Twitch
+                                || !crate::session::twitch_scope_missing(m.def.twitch_scopes)
+                        })
                         .map(PopupItem::Command)
                         .collect()
                 })
@@ -4630,7 +4639,9 @@ impl ChatView {
     /// on the status bar (a while-live, mods-only feature), and `/viewers` /
     /// `/chatters` still open it any time.
     fn viewerlist_button(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if self.config.twitch_channel.is_empty() {
+        if self.config.twitch_channel.is_empty()
+            || crate::session::twitch_scope_missing(commands::SCOPE_CHATTERS)
+        {
             return None;
         }
         Some(
@@ -6038,8 +6049,22 @@ impl ChatView {
         // dead. Role grants (mod/VIP) also need a *broadcaster* token, so only the
         // channel owner sees them — a plain moderator can't add/remove mod or VIP.
         let is_broadcaster = card.is_broadcaster;
-        let show_ban_timeout = !is_broadcaster && !card.is_moderator;
-        let show_roles = !is_broadcaster && self.channel.read(cx).twitch_broadcaster;
+        // A Twitch login tier without the matching scopes hides the affordance
+        // (it could only 401) — Kick's scope set is fixed, so only Twitch gates.
+        // The scope slices come from the command registry so the gates can't
+        // drift from what /ban, /mod, /vip actually require.
+        let twitch = platform == bks_core::Platform::Twitch;
+        let show_ban_timeout = !is_broadcaster
+            && !card.is_moderator
+            && !(twitch && crate::session::twitch_scope_missing(commands::SCOPE_BANNED_USERS));
+        // Mod and VIP grants are gated per scope (a token could carry one and
+        // not the other), matching the popup's per-command /mod and /vip gates.
+        let can_grant_mod =
+            !(twitch && crate::session::twitch_scope_missing(commands::SCOPE_MODERATORS));
+        let can_grant_vip = !(twitch && crate::session::twitch_scope_missing(commands::SCOPE_VIPS));
+        let show_roles = !is_broadcaster
+            && self.channel.read(cx).twitch_broadcaster
+            && (can_grant_mod || can_grant_vip);
         let login = card.login.clone();
 
         // The user's own custom mod buttons (Settings → Mod Buttons), filtered
@@ -6053,6 +6078,12 @@ impl ChatView {
             .filter(|b| b.platform.is_none_or(|p| p == platform))
             .filter(|b| commands::supported_on(&b.command, platform))
             .filter(|b| commands::targets_user(&b.command))
+            .filter(|b| {
+                !twitch
+                    || !crate::session::twitch_scope_missing(commands::twitch_scopes_for_template(
+                        &b.command,
+                    ))
+            })
             .enumerate()
             .map(|(i, b)| {
                 let label = if b.name.is_empty() {
@@ -6149,7 +6180,10 @@ impl ChatView {
         // Warn (Twitch-only — Kick has no warn API): a reason box + button;
         // Helix requires the reason, and the chatter must acknowledge the
         // warning before they can chat again. Applied by Enter or the button.
-        let warn_row = (platform == bks_core::Platform::Twitch)
+        // Gated on its own warnings scope, not show_ban_timeout's banned_users
+        // — a Basic-moderation login can ban but not warn.
+        let warn_row = (platform == bks_core::Platform::Twitch
+            && !crate::session::twitch_scope_missing(commands::SCOPE_WARNINGS))
             .then_some(self.usercard_warn_input.as_ref())
             .flatten()
             .map(|input| {
@@ -6218,34 +6252,38 @@ impl ChatView {
             let login = SharedString::from(login.clone());
             h_flex()
                 .gap_1()
-                .child(role_btn(
-                    "usercard-mod",
-                    "Mod",
-                    controller::Role::Moderator,
-                    true,
-                    login.clone(),
-                ))
-                .child(role_btn(
-                    "usercard-unmod",
-                    "Unmod",
-                    controller::Role::Moderator,
-                    false,
-                    login.clone(),
-                ))
-                .child(role_btn(
-                    "usercard-vip",
-                    "VIP",
-                    controller::Role::Vip,
-                    true,
-                    login.clone(),
-                ))
-                .child(role_btn(
-                    "usercard-unvip",
-                    "Unvip",
-                    controller::Role::Vip,
-                    false,
-                    login.clone(),
-                ))
+                .when(can_grant_mod, |row| {
+                    row.child(role_btn(
+                        "usercard-mod",
+                        "Mod",
+                        controller::Role::Moderator,
+                        true,
+                        login.clone(),
+                    ))
+                    .child(role_btn(
+                        "usercard-unmod",
+                        "Unmod",
+                        controller::Role::Moderator,
+                        false,
+                        login.clone(),
+                    ))
+                })
+                .when(can_grant_vip, |row| {
+                    row.child(role_btn(
+                        "usercard-vip",
+                        "VIP",
+                        controller::Role::Vip,
+                        true,
+                        login.clone(),
+                    ))
+                    .child(role_btn(
+                        "usercard-unvip",
+                        "Unvip",
+                        controller::Role::Vip,
+                        false,
+                        login.clone(),
+                    ))
+                })
         });
 
         // A compact, sectioned panel: the timeout chips + custom-duration row,

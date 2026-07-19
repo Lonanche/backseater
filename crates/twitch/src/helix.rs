@@ -542,9 +542,9 @@ impl Helix {
             }
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 anyhow::bail!(
-                    "Twitch rejected the request (401) — if you logged in before \
-                     the viewer list was added, log out and back in (Settings → \
-                     Account) to grant it"
+                    "Twitch rejected the request (401) — your login didn't grant \
+                     the viewer list; log in again with at least Basic moderation \
+                     (Settings → Account → Permissions)"
                 );
             }
             if !status.is_success() {

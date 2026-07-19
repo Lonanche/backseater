@@ -29,16 +29,40 @@ pub struct CommandDef {
     /// Whether the command needs to be the *broadcaster* (Twitch only lets the
     /// channel owner raid or grant roles) — hidden from mere mods the same way.
     pub broadcaster_only: bool,
+    /// The scopes the logged-in *Twitch* token needs to run this (empty = none:
+    /// IRC/UI-only commands). Logins request a user-chosen scope tier
+    /// (Settings → Account), so the popup hides commands the token can't run —
+    /// like `mod_only` for non-mods — via `session::twitch_scope_missing`.
+    /// Kick's scope set is fixed at login, so it isn't gated here.
+    pub twitch_scopes: &'static [&'static str],
 }
 
 const TWITCH: &[Platform] = &[Platform::Twitch];
 const TWITCH_KICK: &[Platform] = &[Platform::Twitch, Platform::Kick];
+
+// Named scope slices — every entry below uses one, and the `pub` ones are the
+// single source the ad-hoc UI gates reference too (`ChatView::can_pin`, the
+// viewer-list button, the usercard panels), so a scope rename can't silently
+// diverge between the registry and a hand-copied literal.
+const NO_SCOPES: &[&str] = &[];
+pub const SCOPE_BANNED_USERS: &[&str] = &["moderator:manage:banned_users"];
+pub const SCOPE_CHAT_MESSAGES: &[&str] = &["moderator:manage:chat_messages"];
+pub const SCOPE_CHATTERS: &[&str] = &["moderator:read:chatters"];
+pub const SCOPE_MODERATORS: &[&str] = &["channel:manage:moderators"];
+pub const SCOPE_VIPS: &[&str] = &["channel:manage:vips"];
+pub const SCOPE_WARNINGS: &[&str] = &["moderator:manage:warnings"];
+const SCOPE_CHAT_SETTINGS: &[&str] = &["moderator:manage:chat_settings"];
+const SCOPE_ANNOUNCEMENTS: &[&str] = &["moderator:manage:announcements"];
+const SCOPE_SUSPICIOUS: &[&str] = &["moderator:manage:suspicious_users"];
+const SCOPE_RAIDS: &[&str] = &["channel:manage:raids"];
+const SCOPE_SHOUTOUTS: &[&str] = &["moderator:manage:shoutouts"];
 
 /// Every built-in command, alphabetical by canonical name (the popup shows them
 /// in this order for an empty stem).
 pub const COMMANDS: &[CommandDef] = &[
     CommandDef {
         name: "announce",
+        twitch_scopes: SCOPE_ANNOUNCEMENTS,
         aliases: &[],
         usage: "/announce <message>",
         description: "Post a highlighted announcement",
@@ -48,6 +72,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "announceblue",
+        twitch_scopes: SCOPE_ANNOUNCEMENTS,
         aliases: &[],
         usage: "/announceblue <message>",
         description: "Post a blue announcement",
@@ -57,6 +82,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "announcegreen",
+        twitch_scopes: SCOPE_ANNOUNCEMENTS,
         aliases: &[],
         usage: "/announcegreen <message>",
         description: "Post a green announcement",
@@ -66,6 +92,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "announceorange",
+        twitch_scopes: SCOPE_ANNOUNCEMENTS,
         aliases: &[],
         usage: "/announceorange <message>",
         description: "Post an orange announcement",
@@ -75,6 +102,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "announcepurple",
+        twitch_scopes: SCOPE_ANNOUNCEMENTS,
         aliases: &[],
         usage: "/announcepurple <message>",
         description: "Post a purple announcement",
@@ -84,6 +112,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "ban",
+        twitch_scopes: SCOPE_BANNED_USERS,
         aliases: &[],
         usage: "/ban <user> [reason]",
         description: "Ban a user from chat",
@@ -93,6 +122,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "chatters",
+        twitch_scopes: SCOPE_CHATTERS,
         aliases: &["viewers"],
         usage: "/chatters",
         description: "Open the viewer list (mods only)",
@@ -102,6 +132,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "clear",
+        twitch_scopes: SCOPE_CHAT_MESSAGES,
         aliases: &[],
         usage: "/clear",
         description: "Clear the chat history",
@@ -111,6 +142,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "delete",
+        twitch_scopes: SCOPE_CHAT_MESSAGES,
         aliases: &[],
         usage: "/delete <message-id>",
         // Twitch = Helix; Kick = public `DELETE /chat/{id}` (needs the
@@ -122,6 +154,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "emoteonly",
+        twitch_scopes: SCOPE_CHAT_SETTINGS,
         aliases: &[],
         usage: "/emoteonly",
         description: "Restrict chat to emote-only messages",
@@ -131,6 +164,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "emoteonlyoff",
+        twitch_scopes: SCOPE_CHAT_SETTINGS,
         aliases: &[],
         usage: "/emoteonlyoff",
         description: "Turn off emote-only mode",
@@ -140,6 +174,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "followers",
+        twitch_scopes: SCOPE_CHAT_SETTINGS,
         aliases: &[],
         usage: "/followers [duration]",
         description: "Followers-only chat (optional min follow age)",
@@ -149,6 +184,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "followersoff",
+        twitch_scopes: SCOPE_CHAT_SETTINGS,
         aliases: &[],
         usage: "/followersoff",
         description: "Turn off followers-only mode",
@@ -158,6 +194,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "me",
+        twitch_scopes: NO_SCOPES,
         aliases: &[],
         usage: "/me <message>",
         description: "Send an action message",
@@ -167,6 +204,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "mod",
+        twitch_scopes: SCOPE_MODERATORS,
         aliases: &[],
         usage: "/mod <user>",
         description: "Grant moderator (broadcaster only)",
@@ -176,6 +214,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "pin",
+        twitch_scopes: &["user:write:chat", "moderator:manage:chat_messages"],
         aliases: &[],
         usage: "/pin [duration] <message>",
         description: "Send a message and pin it (default: until stream ends)",
@@ -185,6 +224,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "raid",
+        twitch_scopes: SCOPE_RAIDS,
         aliases: &[],
         usage: "/raid <channel>",
         description: "Start a raid (broadcaster only)",
@@ -194,6 +234,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "shoutout",
+        twitch_scopes: SCOPE_SHOUTOUTS,
         aliases: &[],
         usage: "/shoutout <channel>",
         description: "Send an official shoutout",
@@ -203,6 +244,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "slow",
+        twitch_scopes: SCOPE_CHAT_SETTINGS,
         aliases: &[],
         usage: "/slow [seconds]",
         description: "Slow mode (default 30s between messages)",
@@ -212,6 +254,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "slowoff",
+        twitch_scopes: SCOPE_CHAT_SETTINGS,
         aliases: &[],
         usage: "/slowoff",
         description: "Turn off slow mode",
@@ -221,6 +264,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "subscribers",
+        twitch_scopes: SCOPE_CHAT_SETTINGS,
         aliases: &[],
         usage: "/subscribers",
         description: "Restrict chat to subscribers",
@@ -230,6 +274,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "subscribersoff",
+        twitch_scopes: SCOPE_CHAT_SETTINGS,
         aliases: &[],
         usage: "/subscribersoff",
         description: "Turn off subscribers-only mode",
@@ -239,6 +284,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "timeout",
+        twitch_scopes: SCOPE_BANNED_USERS,
         aliases: &[],
         usage: "/timeout <user> <duration> [reason]",
         description: "Time a user out (600, 30m, 1h, 3d, 1w)",
@@ -248,6 +294,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "unban",
+        twitch_scopes: SCOPE_BANNED_USERS,
         aliases: &["untimeout"],
         usage: "/unban <user>",
         description: "Lift a ban or timeout",
@@ -257,6 +304,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "uniquechat",
+        twitch_scopes: SCOPE_CHAT_SETTINGS,
         aliases: &[],
         usage: "/uniquechat",
         description: "Require unique messages",
@@ -266,6 +314,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "uniquechatoff",
+        twitch_scopes: SCOPE_CHAT_SETTINGS,
         aliases: &[],
         usage: "/uniquechatoff",
         description: "Turn off unique-chat mode",
@@ -275,6 +324,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "unmod",
+        twitch_scopes: SCOPE_MODERATORS,
         aliases: &[],
         usage: "/unmod <user>",
         description: "Revoke moderator (broadcaster only)",
@@ -284,6 +334,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "unpin",
+        twitch_scopes: SCOPE_CHAT_MESSAGES,
         aliases: &[],
         usage: "/unpin",
         // Twitch-only, like /delete — Kick has no public unpin endpoint.
@@ -294,6 +345,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "unraid",
+        twitch_scopes: SCOPE_RAIDS,
         aliases: &[],
         usage: "/unraid",
         description: "Cancel a pending raid",
@@ -303,6 +355,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "unvip",
+        twitch_scopes: SCOPE_VIPS,
         aliases: &[],
         usage: "/unvip <user>",
         description: "Revoke VIP (broadcaster only)",
@@ -312,6 +365,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "usercard",
+        twitch_scopes: NO_SCOPES,
         aliases: &["user"],
         usage: "/usercard <user>",
         description: "Open a chatter's usercard",
@@ -321,6 +375,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "vip",
+        twitch_scopes: SCOPE_VIPS,
         aliases: &[],
         usage: "/vip <user>",
         description: "Grant VIP (broadcaster only)",
@@ -330,6 +385,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "warn",
+        twitch_scopes: SCOPE_WARNINGS,
         aliases: &[],
         usage: "/warn <user> <reason>",
         description: "Warn a user (they must acknowledge it)",
@@ -339,6 +395,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "monitor",
+        twitch_scopes: SCOPE_SUSPICIOUS,
         aliases: &[],
         usage: "/monitor <user>",
         description: "Mark a user as a monitored suspicious user",
@@ -348,6 +405,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "restrict",
+        twitch_scopes: SCOPE_SUSPICIOUS,
         aliases: &[],
         usage: "/restrict <user>",
         description: "Restrict a suspicious user (their messages are held for mod review)",
@@ -357,6 +415,7 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "unmonitor",
+        twitch_scopes: SCOPE_SUSPICIOUS,
         aliases: &["unrestrict"],
         usage: "/unmonitor <user>",
         description: "Remove a user's suspicious-user treatment",
@@ -377,15 +436,31 @@ pub enum ImplicitTarget {
     MessageId,
 }
 
+/// The registry entry for `name` — a canonical name or an alias, any case.
+/// The one place the name/alias match lives; every template/name lookup
+/// (`implicit_target`, `supported_on`, `twitch_scopes_for_template`) goes
+/// through it so they can't gate the same command differently.
+fn def_for(name: &str) -> Option<&'static CommandDef> {
+    let name = name.to_lowercase();
+    COMMANDS
+        .iter()
+        .find(|c| c.name == name || c.aliases.contains(&name.as_str()))
+}
+
+/// The leading `/command` name of a template, if it starts with one.
+fn leading_command(template: &str) -> Option<&str> {
+    template
+        .trim_start()
+        .strip_prefix('/')?
+        .split_whitespace()
+        .next()
+}
+
 /// The implicit target of the command named `name` (an alias works too), or
 /// `None` for commands that don't lead with `<user>`/`<message-id>` — those
 /// need explicit placeholders on a mod button (or take no target at all).
 pub fn implicit_target(name: &str) -> Option<ImplicitTarget> {
-    let name = name.to_lowercase();
-    let cmd = COMMANDS
-        .iter()
-        .find(|c| c.name == name || c.aliases.contains(&name.as_str()))?;
-    match cmd.usage.split_whitespace().nth(1) {
+    match def_for(name)?.usage.split_whitespace().nth(1) {
         Some("<user>") => Some(ImplicitTarget::User),
         Some("<message-id>") => Some(ImplicitTarget::MessageId),
         _ => None,
@@ -403,11 +478,7 @@ pub fn needs_msg_id(template: &str) -> bool {
     if template.contains("{user}") {
         return false;
     }
-    template
-        .strip_prefix('/')
-        .and_then(|rest| rest.split_whitespace().next())
-        .and_then(implicit_target)
-        == Some(ImplicitTarget::MessageId)
+    leading_command(template).and_then(implicit_target) == Some(ImplicitTarget::MessageId)
 }
 
 /// Whether a mod button's command template acts on a *user* (not a message):
@@ -422,12 +493,7 @@ pub fn targets_user(template: &str) -> bool {
     if template.contains("{msg-id}") {
         return false;
     }
-    template
-        .trim_start()
-        .strip_prefix('/')
-        .and_then(|rest| rest.split_whitespace().next())
-        .and_then(implicit_target)
-        == Some(ImplicitTarget::User)
+    leading_command(template).and_then(implicit_target) == Some(ImplicitTarget::User)
 }
 
 /// Whether a mod button's command template can run on `platform`: a leading
@@ -435,14 +501,19 @@ pub fn targets_user(template: &str) -> bool {
 /// "/delete" can't run on Kick rows, so the button ghosts there); plain text
 /// (sent to chat) and unknown commands aren't platform-gated.
 pub fn supported_on(template: &str, platform: Platform) -> bool {
-    let Some(rest) = template.trim_start().strip_prefix('/') else {
-        return true;
-    };
-    let name = rest.split_whitespace().next().unwrap_or("").to_lowercase();
-    COMMANDS
-        .iter()
-        .find(|c| c.name == name || c.aliases.contains(&name.as_str()))
+    leading_command(template)
+        .and_then(def_for)
         .is_none_or(|c| c.platforms.contains(&platform))
+}
+
+/// The Twitch scopes a mod-button template's leading known command needs —
+/// empty for plain text and unknown commands (those aren't scope-gated). The
+/// strip/usercard buttons ghost on Twitch rows when the login tier left these
+/// out (`session::twitch_scope_missing`), like `supported_on` for platforms.
+pub fn twitch_scopes_for_template(template: &str) -> &'static [&'static str] {
+    leading_command(template)
+        .and_then(def_for)
+        .map_or(NO_SCOPES, |c| c.twitch_scopes)
 }
 
 /// One autocomplete candidate: a command under one of its spellings. Aliases
@@ -600,6 +671,44 @@ mod tests {
             .iter()
             .filter(|c| c.broadcaster_only)
             .all(|c| c.mod_only));
+    }
+
+    #[test]
+    fn twitch_scopes_cover_every_twitch_command_that_calls_helix() {
+        // Every Twitch mod command goes through a scoped Helix endpoint except
+        // the UI-only ones (usercard opens a window; chatters' fetch is gated
+        // by its own scope). A missing entry here would leave the command
+        // visible in the popup for a login tier that can't run it.
+        for cmd in COMMANDS {
+            if cmd.platforms.contains(&Platform::Twitch)
+                && cmd.mod_only
+                && cmd.name != "usercard"
+            {
+                assert!(
+                    !cmd.twitch_scopes.is_empty(),
+                    "/{} has no twitch_scopes",
+                    cmd.name
+                );
+            }
+        }
+        // Spot-checks: non-mod commands stay ungated; pin needs both the Helix
+        // send (it sends the message itself) and the pin call.
+        assert!(twitch_scopes_for_template("/me hi").is_empty());
+        assert_eq!(
+            twitch_scopes_for_template("/timeout 600 spam"),
+            SCOPE_BANNED_USERS
+        );
+        assert_eq!(
+            twitch_scopes_for_template("  /untimeout {user}"),
+            SCOPE_BANNED_USERS
+        );
+        assert_eq!(
+            twitch_scopes_for_template("/pin hello"),
+            &["user:write:chat", "moderator:manage:chat_messages"]
+        );
+        // Plain text / unknown commands aren't scope-gated.
+        assert!(twitch_scopes_for_template("!so {user}").is_empty());
+        assert!(twitch_scopes_for_template("/notacommand").is_empty());
     }
 
     #[test]

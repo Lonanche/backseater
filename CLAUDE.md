@@ -77,9 +77,32 @@ platform = implement one trait + one message builder, with zero UI changes**.
   icon(s)** — Twitch / Kick / both — with a tooltip) appears when logged into both; **all** commands
   are disabled in Both mode (gated in `handle_command` + the chatview intercepts, with a
   switch-the-target notice). See the auth note below.
+- **Twitch login permissions (scope tiers)**: the Twitch consent screen only lists what the user
+  chose, so a chat-only user isn't scared off by "Ban users"-style lines. The Account row's Log in
+  (and, when logged in, a Permissions… button showing the granted tier via
+  `ScopeChoice::summarize`) expands an **inline chooser** in the settings card — NOT a dialog,
+  child windows render no dialog layer (`main.rs::twitch_permissions_editor`, session state
+  `twitch_perm_open`/`twitch_perm_choice`, persisted as `Settings.twitch_login_scopes`;
+  first-login default **Chat only**): **Chat only** (`chat:read/edit`, `user:write:chat`,
+  `user:read:emotes`), **Basic moderation** (+ `moderator:manage:banned_users`/`chat_messages` +
+  `moderator:read:chatters` — ban/timeout/unban, delete, pin, viewer list; ban notices still come
+  from the generic IRC fallback since the rich feed needs Full), **Full moderator** (+ warnings/
+  announcements/shoutouts/chat_settings/AutoMod/suspicious users + the `channel.moderate` read
+  set), and a separate **Broadcaster** checkbox (`channel:manage:raids/moderators/vips`). Tiers
+  live in `bks_auth::twitch::ScopeChoice`/`ScopePreset` (`login` takes the choice;
+  `ScopeChoice::default()` = everything, the pre-tier behavior). Gating reads the **granted**
+  scopes, process-wide like the settings flags (`session::twitch_scope_missing`, written only by
+  the session on load/login/logout; logged-out = no gating, and a legacy token with no stored
+  scopes = *unknown* = no gating either — hiding would break moderation UI that worked before the
+  tiers; the account row also skips the tier summary then): the command popup filters on
+  `CommandDef.twitch_scopes` (scope slices are named consts the ad-hoc gates reuse), mod-strip +
+  usercard custom buttons ghost via `commands::twitch_scopes_for_template`, and the hover 📌
+  (`can_pin`), viewer-list 👥, usercard ban/timeout + role panels hide. EventSub already
+  self-gated on scopes — unchanged. Changing tiers = re-login (Permissions… → chooser → browser);
+  an implicit-flow token's scopes are fixed at authorize time.
 - **Slash commands + autocomplete** (`crates/app/src/commands.rs` = the registry: name/aliases/
-  usage/description/platforms/mod_only — a future user-defined custom-command feature layers
-  entries onto it). Typing `/` at the **start of the line** opens the same autocomplete popup as
+  usage/description/platforms/mod_only/twitch_scopes — a future user-defined custom-command
+  feature layers entries onto it). Typing `/` at the **start of the line** opens the same autocomplete popup as
   `@`/`:` listing the **send target platform's** commands only (Kick sees just Kick's; Both shows
   the disabled notice), with **mod-only commands hidden unless the user can moderate** that
   channel (`ChannelModel::can_moderate` — Twitch = IRC USERSTATE mod flag, Kick = the logged-in
@@ -99,8 +122,11 @@ platform = implement one trait + one message builder, with zero UI changes**.
   `ACTIVE_MONITORING`/`RESTRICTED`, scope `moderator:manage:suspicious_users`; no confirmation
   notice — the EventSub `suspicious_user.update` notice reports it), `/me` (sent as `/me` PRIVMSG
   text — the one slash command Twitch IRC still interprets). The scopes for these (announcements/warnings/
-  chat_settings/shoutouts/raids/moderators/vips manage) are in `SCOPES`; an older token keeps
-  chatting and the commands 401/403 with a hint until the next login. **Chatview-intercepted UI
+  chat_settings/shoutouts/raids/moderators/vips manage) are in the Full-moderator/Broadcaster login
+  tiers (see the login-permissions bullet); a token without them keeps chatting and the commands
+  401/403 with a hint until the next login — and the popup hides commands the token's granted
+  scopes can't run (`CommandDef.twitch_scopes` + `session::twitch_scope_missing`; typing a hidden
+  one anyway still runs it, same rule as mod_only). **Chatview-intercepted UI
   commands** (`ChatView::handle_ui_command`, never reach the controller): `/chatters`|`/viewers`,
   `/usercard <user>`|`/user` (opens on the target platform; uses a seen message's identity, else a
   bare card the stats fetch fills), `/unpin` (the target platform's active pin).
@@ -173,7 +199,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
   chatters get a burnt-orange row tint + a corner pill ("MONITORED" / "RESTRICTED", with Twitch's
   detail appended — "likely ban evader · banned in 2 shared channels"), and treatment changes post
   a notice ("mod restricted X as a suspicious user"). EventSub `channel.suspicious_user.message` +
-  `.update` v1 (`moderator:read:suspicious_users`, in `SCOPES`; two more subs on the shared
+  `.update` v1 (`moderator:read:suspicious_users`, in the Full-moderator tier; two more subs on the shared
   socket). Mods set the treatment with `/monitor` `/restrict` `/unmonitor`|`/unrestrict` (see the
   slash-commands bullet). A **monitored** user's message also arrives over IRC, so the mark is a side-table entry
   (`ChannelModel.suspicious_ids`, pruned with its row on ring trim) resolved at render like
@@ -258,7 +284,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
   window listing who's connected to the tab's Twitch chat, with a live search filter, count,
   Refresh, and click-a-name → usercard. Data is Helix `GET /chat/chatters` (paginated,
   `crates/twitch/src/helix.rs::chatters`), which Twitch only serves to the **broadcaster +
-  moderators** (`moderator:read:chatters`, added to `SCOPES` — a pre-existing login needs a
+  moderators** (`moderator:read:chatters`, in the Basic-moderation tier — a pre-existing login needs a
   re-login, surfaced as a 401 hint; a non-mod gets the explanatory 403 message). ⚠️ The
   *anonymous* list twitch.tv itself shows rides the web GQL `chatters` field, which is behind
   Twitch's browser-integrity check (`IntegrityCheckFailed` for any third-party client — verified
@@ -818,7 +844,7 @@ logged in AND a moderator/broadcaster of the tab's Twitch channel, the feed subs
   `ChatEvent::Notice` ("mod timed out user for 10m: reason", unban/untimeout, delete + clipped body,
   clear, warn, slow/emote/followers/sub-only toggles, raids, mod/VIP grants, blocked/permitted terms,
   unban requests; `shared_chat_*` variants read like the plain ones). Needs the big read-scope set
-  (see `SCOPES` in `auth/src/twitch.rs`) — **a token from before those scopes leaves the feed off
+  (the Full-moderator tier in `auth/src/twitch.rs`) — **a token from before those scopes leaves the feed off
   until the next login** (logged as a hint, chat still works).
 - **`automod.message.hold` / `.update` v2** (scope `moderator:manage:automod`) → `ChatEvent::
   AutoModHeld` renders an amber row (chatter, held text, reason, **Allow/Deny** chips →
@@ -939,7 +965,9 @@ when you can't see the window).
 CI auto-publishes the installer + update feed to GitHub Releases (`docs/RELEASING.md`).
 Never push `v*` tags by hand; the publish step creates them.
 
-**Twitch login (send/moderate):** Settings → Account. The app ships with a built-in
+**Twitch login (send/moderate):** Settings → Account — Log in expands the scope-tier chooser
+(Chat only / Basic moderation / Full moderator + Broadcaster; see the login-permissions bullet in
+Current status) before opening the browser. The app ships with a built-in
 Twitch Client ID (`DEFAULT_CLIENT_ID` in `crates/auth/src/twitch.rs`, redirect `http://localhost:38276`)
 — a Client ID is **not a secret**, so it's safe to embed (only the Client *Secret* is, and the
 implicit flow uses none). Override with `BKS_TWITCH_CLIENT_ID`. Token saved to the **OS keyring**

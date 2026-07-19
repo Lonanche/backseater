@@ -358,8 +358,8 @@ impl Controller {
     /// Account actions for the settings UI. Each only mutates the shared
     /// [`Session`]; every tab reacts via the login-change subscription. Progress
     /// and error notices for an attempt go to this tab's feed.
-    pub fn twitch_login(&self) {
-        self.session.twitch_login(self.events.clone());
+    pub fn twitch_login(&self, choice: bks_auth::twitch::ScopeChoice) {
+        self.session.twitch_login(self.events.clone(), choice);
     }
 
     pub fn twitch_logout(&self) {

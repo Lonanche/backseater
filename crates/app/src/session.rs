@@ -15,8 +15,9 @@
 //! falls back to an anonymous read connection (chat still flows, sending is
 //! disabled) until login returns.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
+use bks_auth::twitch::ScopeChoice;
 use bks_kick::KickActions;
 use bks_platform::ChatEvent;
 use bks_twitch::{EventsubAuth, TwitchActions, TwitchAuth, TwitchSource};
@@ -24,6 +25,42 @@ use tokio::runtime::Handle;
 use tokio::sync::{watch, Mutex};
 
 type Sink = smol::channel::Sender<ChatEvent>;
+
+/// The Twitch token's *granted* scopes, process-wide (`None` = not logged in) —
+/// the render-path gates ([`twitch_scope_missing`]) read this instead of
+/// threading the session through every call site, same pattern as the
+/// `settings::*` flags. Written only by the session (load/login/logout).
+static TWITCH_SCOPES: RwLock<Option<Arc<Vec<String>>>> = RwLock::new(None);
+
+fn set_twitch_scopes(scopes: Option<&[String]>) {
+    *TWITCH_SCOPES.write().unwrap() = scopes.map(|s| Arc::new(s.to_vec()));
+}
+
+/// The granted Twitch scopes, if logged in (the account row's summary).
+pub fn twitch_granted_scopes() -> Option<Arc<Vec<String>>> {
+    TWITCH_SCOPES.read().unwrap().clone()
+}
+
+/// Whether the logged-in Twitch token lacks any of `required` — the UI gate for
+/// features the user opted out of at login (hide the affordance rather than let
+/// it 401). `false` while logged out: anonymous states are gated by mod status
+/// already, and login-time gates shouldn't hide a logged-out UI. `false` too
+/// for a legacy token with no stored scopes (saved before `Credentials.scopes`
+/// existed): that's *unknown*, not "nothing granted" — gating on it would hide
+/// moderation UI that worked before the tiers existed; a truly missing scope
+/// still surfaces as the API's 401 hint, the pre-tier behavior.
+pub fn twitch_scope_missing(required: &[&str]) -> bool {
+    if required.is_empty() {
+        // Unscoped commands/templates — the common case on the per-row render
+        // path, kept lock-free.
+        return false;
+    }
+    match &*TWITCH_SCOPES.read().unwrap() {
+        Some(granted) if granted.is_empty() => false,
+        Some(granted) => required.iter().any(|r| !granted.iter().any(|g| g == r)),
+        None => false,
+    }
+}
 
 /// A snapshot of what's logged in, broadcast to every tab on each change. Carries
 /// only what subscribers need to reconcile + display (the account names, not the
@@ -87,6 +124,7 @@ impl Session {
     pub fn new(rt: Handle, twitch_client_id: String) -> Self {
         let mut state = State::default();
         if let Ok(Some(creds)) = bks_auth::twitch::load() {
+            set_twitch_scopes(Some(&creds.scopes));
             state.twitch_auth = Some(TwitchAuth {
                 login: creds.login.clone(),
                 oauth_pass: creds.irc_pass(),
@@ -171,14 +209,15 @@ impl Session {
         self.changes.borrow().clone()
     }
 
-    /// Runs Twitch OAuth in the browser, saves, and applies the login. `events`
-    /// is where progress/error notices for *this attempt* go (the issuing feed);
-    /// the resulting state change is broadcast to all tabs.
-    pub fn twitch_login(&self, events: Sink) {
+    /// Runs Twitch OAuth in the browser with the scopes `choice` selects, saves,
+    /// and applies the login. `events` is where progress/error notices for
+    /// *this attempt* go (the issuing feed); the resulting state change is
+    /// broadcast to all tabs.
+    pub fn twitch_login(&self, events: Sink, choice: ScopeChoice) {
         let this = self.clone();
         tracing::info!("opening browser for Twitch login");
         self.rt.spawn(async move {
-            let creds = match bks_auth::twitch::login(&this.twitch_client_id).await {
+            let creds = match bks_auth::twitch::login(&this.twitch_client_id, choice).await {
                 Ok(c) => c,
                 Err(err) => {
                     let _ =
@@ -205,6 +244,10 @@ impl Session {
                 s.twitch_auth = None;
                 s.twitch_eventsub = None;
             }
+            // Cleared here, with the auth state, not synchronously at the call
+            // site — else a repaint between the two would render "Logged in as
+            // X" with the scope summary already gone.
+            set_twitch_scopes(None);
             this.broadcast("logged out of Twitch").await;
         });
     }
@@ -245,6 +288,7 @@ impl Session {
     }
 
     async fn apply_twitch(&self, creds: bks_auth::twitch::Credentials) {
+        set_twitch_scopes(Some(&creds.scopes));
         let auth = TwitchAuth {
             login: creds.login.clone(),
             oauth_pass: creds.irc_pass(),

@@ -22,30 +22,125 @@ const AUTHORIZE_URL: &str = "https://id.twitch.tv/oauth2/authorize";
 const VALIDATE_URL: &str = "https://id.twitch.tv/oauth2/validate";
 const STORE_NAME: &str = "twitch_credentials";
 
-/// Chat + moderation, plus the EventSub moderator feed: `channel.moderate` v2
-/// requires the whole read set below (each satisfied by read OR manage), the
-/// suspicious-user (Low Trust) marks need `moderator:read:suspicious_users`
-/// (+ `manage` for `/monitor` `/restrict` `/unmonitor` `/unrestrict`), and
-/// AutoMod hold/allow/deny needs `moderator:manage:automod`. The viewer list
-/// needs `moderator:read:chatters`; the personal emote set for the picker +
-/// autocomplete (cross-channel sub emotes) needs `user:read:emotes`. The
-/// slash commands need their manage scopes: announcements (`/announce`),
-/// warnings (`/warn`), chat_settings (`/slow`, `/followers`, …), shoutouts
-/// (`/shoutout`), raids (`/raid`), and the broadcaster-only
-/// `channel:manage:moderators`/`vips` (`/mod`, `/vip` + the usercard buttons).
-/// A token from before these were added keeps working for chat — the extra
-/// features just stay off (401/403 with a hint) until the next login.
-const SCOPES: &str = "chat:read chat:edit user:write:chat user:read:emotes \
-                      moderator:manage:banned_users moderator:manage:chat_messages \
-                      moderator:manage:automod moderator:manage:announcements \
-                      moderator:manage:warnings moderator:manage:chat_settings \
-                      moderator:manage:shoutouts \
-                      channel:manage:raids channel:manage:moderators channel:manage:vips \
-                      moderator:read:blocked_terms \
-                      moderator:read:unban_requests \
-                      moderator:read:moderators moderator:read:vips \
-                      moderator:read:chatters moderator:read:suspicious_users \
-                      moderator:manage:suspicious_users";
+/// The always-requested core: read + send chat (IRC), Helix sends (`/pin`'s
+/// send-and-pin), and the personal emote set for the picker + autocomplete
+/// (cross-channel sub emotes).
+const CHAT_SCOPES: &[&str] = &[
+    "chat:read",
+    "chat:edit",
+    "user:write:chat",
+    "user:read:emotes",
+];
+
+/// Basic moderation on top of chat: ban/timeout/unban (+ the usercard's timeout
+/// chips), single-message delete + `/clear`, pin/unpin, and the viewer list.
+const BASIC_MOD_SCOPES: &[&str] = &[
+    "moderator:manage:banned_users",
+    "moderator:manage:chat_messages",
+    "moderator:read:chatters",
+];
+
+/// Everything else a moderator can do, on top of basic: warnings, announcements,
+/// shoutouts, chat modes (`/slow`, `/followers`, …), the AutoMod queue, the
+/// suspicious-user (Low Trust) marks + `/monitor`/`/restrict`, and the read set
+/// the EventSub `channel.moderate` v2 rich moderator feed requires (each of its
+/// conditions is satisfied by read OR manage, so the manage scopes above cover
+/// banned_users/chat_messages and the reads below cover the rest).
+const FULL_MOD_SCOPES: &[&str] = &[
+    "moderator:manage:automod",
+    "moderator:manage:announcements",
+    "moderator:manage:warnings",
+    "moderator:manage:chat_settings",
+    "moderator:manage:shoutouts",
+    "moderator:read:blocked_terms",
+    "moderator:read:unban_requests",
+    "moderator:read:moderators",
+    "moderator:read:vips",
+    "moderator:read:suspicious_users",
+    "moderator:manage:suspicious_users",
+];
+
+/// Own-channel commands, a separate opt-in (only useful to streamers): `/raid`
+/// `/unraid`, `/mod` `/unmod`, `/vip` `/unvip` + the usercard role buttons.
+const BROADCASTER_SCOPES: &[&str] = &[
+    "channel:manage:raids",
+    "channel:manage:moderators",
+    "channel:manage:vips",
+];
+
+/// How much of Twitch the user chose to authorize at login — the consent screen
+/// grows with the tier, which is why this is a choice at all (the full list is
+/// long enough to scare off someone who only wants to chat). Each tier includes
+/// the ones below it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScopePreset {
+    ChatOnly,
+    BasicModeration,
+    #[default]
+    FullModerator,
+}
+
+/// The user's scope selection for a Twitch login: a preset tier plus the
+/// separate broadcaster add-on (raids + role grants — only useful on a channel
+/// they own).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeChoice {
+    pub preset: ScopePreset,
+    #[serde(default)]
+    pub broadcaster: bool,
+}
+
+impl Default for ScopeChoice {
+    /// Everything — what logins requested before the choice existed.
+    fn default() -> Self {
+        Self {
+            preset: ScopePreset::FullModerator,
+            broadcaster: true,
+        }
+    }
+}
+
+impl ScopeChoice {
+    /// The scopes this choice requests, in a stable order.
+    pub fn scopes(&self) -> Vec<&'static str> {
+        let mut scopes: Vec<&'static str> = CHAT_SCOPES.to_vec();
+        if self.preset != ScopePreset::ChatOnly {
+            scopes.extend_from_slice(BASIC_MOD_SCOPES);
+        }
+        if self.preset == ScopePreset::FullModerator {
+            scopes.extend_from_slice(FULL_MOD_SCOPES);
+        }
+        if self.broadcaster {
+            scopes.extend_from_slice(BROADCASTER_SCOPES);
+        }
+        scopes
+    }
+
+    /// The space-separated scope string for the authorize URL.
+    fn scope_string(&self) -> String {
+        self.scopes().join(" ")
+    }
+
+    /// A short human summary of what a *granted* scope list amounts to, for the
+    /// account row ("chat only", "basic moderation", …). Derived from the token,
+    /// not the saved choice, so it's honest about what Twitch actually granted
+    /// (an old token from before the tiers reads as whatever it carries).
+    pub fn summarize(granted: &[String]) -> String {
+        let has = |s: &str| granted.iter().any(|x| x == s);
+        let tier = if FULL_MOD_SCOPES.iter().all(|s| has(s)) {
+            "full moderator"
+        } else if BASIC_MOD_SCOPES.iter().all(|s| has(s)) {
+            "basic moderation"
+        } else {
+            "chat only"
+        };
+        if BROADCASTER_SCOPES.iter().all(|s| has(s)) {
+            format!("{tier} + broadcaster")
+        } else {
+            tier.to_string()
+        }
+    }
+}
 
 /// A validated Twitch user session.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -80,7 +175,8 @@ pub fn client_id() -> String {
 
 /// Runs the full login: opens the browser, waits for the redirect, validates
 /// the token. `client_id` must have `http://localhost:38276` as a redirect URL.
-pub async fn login(client_id: &str) -> anyhow::Result<Credentials> {
+/// `choice` picks how much is requested (the consent screen lists exactly it).
+pub async fn login(client_id: &str, choice: ScopeChoice) -> anyhow::Result<Credentials> {
     let redirect = format!("http://localhost:{REDIRECT_PORT}");
     // `state` ties the redirect to this login attempt: without it, anything that
     // can reach localhost:38276 during a login (another local process, a web page
@@ -91,7 +187,7 @@ pub async fn login(client_id: &str) -> anyhow::Result<Credentials> {
     let auth_url = format!(
         "{AUTHORIZE_URL}?response_type=token&client_id={client_id}\
          &redirect_uri={redirect}&scope={}&state={state}",
-        server::urlencode(SCOPES)
+        server::urlencode(&choice.scope_string())
     );
 
     let listener = server::bind(REDIRECT_PORT).await?;
@@ -150,4 +246,98 @@ pub fn load() -> anyhow::Result<Option<Credentials>> {
 
 pub fn clear() -> anyhow::Result<()> {
     crate::store::clear_secret(STORE_NAME)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn owned(scopes: &[&str]) -> Vec<String> {
+        scopes.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn tiers_nest_and_default_is_everything() {
+        let chat = ScopeChoice {
+            preset: ScopePreset::ChatOnly,
+            broadcaster: false,
+        }
+        .scopes();
+        let basic = ScopeChoice {
+            preset: ScopePreset::BasicModeration,
+            broadcaster: false,
+        }
+        .scopes();
+        let full = ScopeChoice {
+            preset: ScopePreset::FullModerator,
+            broadcaster: false,
+        }
+        .scopes();
+        assert_eq!(chat, CHAT_SCOPES);
+        assert!(chat.iter().all(|s| basic.contains(s)));
+        assert!(basic.iter().all(|s| full.contains(s)));
+        assert!(basic.contains(&"moderator:read:chatters"));
+        assert!(!basic.contains(&"moderator:manage:warnings"));
+        assert!(!full.iter().any(|s| s.starts_with("channel:manage:")));
+
+        // The default choice (pre-existing behavior) requests every scope, and
+        // nothing twice.
+        let all = ScopeChoice::default().scopes();
+        assert!(all.contains(&"channel:manage:raids"));
+        let mut deduped = all.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(all.len(), deduped.len());
+    }
+
+    #[test]
+    fn full_moderator_satisfies_the_eventsub_moderate_feed() {
+        // channel.moderate v2 wants read-or-manage of each of these; the full
+        // tier must cover all of them or the rich moderator feed silently
+        // stays off (see bks_twitch::eventsub::can_moderate_feed).
+        let full = ScopeChoice {
+            preset: ScopePreset::FullModerator,
+            broadcaster: false,
+        }
+        .scopes();
+        let covered = |name: &str| {
+            full.contains(&format!("moderator:read:{name}").as_str())
+                || full.contains(&format!("moderator:manage:{name}").as_str())
+        };
+        for name in [
+            "blocked_terms",
+            "chat_settings",
+            "unban_requests",
+            "banned_users",
+            "chat_messages",
+            "warnings",
+        ] {
+            assert!(covered(name), "feed scope not covered: {name}");
+        }
+        assert!(full.contains(&"moderator:read:moderators"));
+        assert!(full.contains(&"moderator:read:vips"));
+    }
+
+    #[test]
+    fn summarize_names_the_granted_tier() {
+        let chat = ScopeChoice {
+            preset: ScopePreset::ChatOnly,
+            broadcaster: false,
+        };
+        let basic = ScopeChoice {
+            preset: ScopePreset::BasicModeration,
+            broadcaster: false,
+        };
+        assert_eq!(ScopeChoice::summarize(&owned(&chat.scopes())), "chat only");
+        assert_eq!(
+            ScopeChoice::summarize(&owned(&basic.scopes())),
+            "basic moderation"
+        );
+        assert_eq!(
+            ScopeChoice::summarize(&owned(&ScopeChoice::default().scopes())),
+            "full moderator + broadcaster"
+        );
+        // A legacy token (no scopes stored) reads as the floor.
+        assert_eq!(ScopeChoice::summarize(&[]), "chat only");
+    }
 }

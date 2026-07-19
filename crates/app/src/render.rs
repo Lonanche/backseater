@@ -2144,7 +2144,13 @@ fn mod_button_strip(msg: &Message, ids: &RowIds, scale: Scale, ctx: ModStrip) ->
             let real = ctx.row_moderated
                 && b.platform.is_none_or(|p| p == msg.platform)
                 && crate::commands::supported_on(&b.command, msg.platform)
-                && !(echo && crate::commands::needs_msg_id(&b.command));
+                && !(echo && crate::commands::needs_msg_id(&b.command))
+                // A Twitch login tier without the button's scopes ghosts it
+                // (the click could only 401).
+                && !(msg.platform == Platform::Twitch
+                    && crate::session::twitch_scope_missing(
+                        crate::commands::twitch_scopes_for_template(&b.command),
+                    ));
             mod_button_chip(ids.mod_button(i), b, scale, ctx.click.clone(), !real)
         })
         .collect();
