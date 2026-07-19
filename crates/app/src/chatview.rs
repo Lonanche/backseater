@@ -1252,10 +1252,27 @@ impl ChatView {
                 // Filter-passing events append to this view's events panel.
                 // Looked up by stable sequence number: `None` means a burst
                 // already trimmed it past MAX_EVENTS — nothing to show.
-                let passes = self.channel.read(cx).event_at(*seq).is_some_and(|ev| {
-                    self.config.event_kinds.enabled(ev.kind)
-                        && !(self.config.collapse_gift_subs && ev.group.is_some())
-                });
+                let (sound, passes) = {
+                    let channel = self.channel.read(cx);
+                    match channel.event_at(*seq) {
+                        // The per-kind alert ping (bell toggles in the events-
+                        // panel settings): a mass gift's per-recipient rows stay
+                        // silent (the batch announcement pings once), and the
+                        // model's claim plays one ping per event no matter how
+                        // many views share the channel (popouts/duplicate tabs).
+                        Some(ev) => (
+                            self.config.event_sounds.enabled(ev.kind)
+                                && ev.group.is_none()
+                                && channel.claim_event_sound(*seq),
+                            self.config.event_kinds.enabled(ev.kind)
+                                && !(self.config.collapse_gift_subs && ev.group.is_some()),
+                        ),
+                        None => (false, false),
+                    }
+                };
+                if sound {
+                    crate::sound::play_ping();
+                }
                 if passes {
                     let ix = self.events_shown.len();
                     self.events_shown.push_back(*seq);
@@ -1658,6 +1675,12 @@ impl ChatView {
         self.rebuild_events_shown(cx);
         // "Events only" adds/removes rows from the main log: re-measure.
         self.layout_changed(cx);
+    }
+
+    /// Replaces which event kinds play the alert ping (bell toggles in the
+    /// events-panel settings). Arrival-time only — nothing rendered changes.
+    pub(crate) fn set_event_sounds(&mut self, sounds: tabs::EventSounds) {
+        self.config.event_sounds = sounds;
     }
 
     /// This tab's live layout (mutated here by header-arrow moves and divider

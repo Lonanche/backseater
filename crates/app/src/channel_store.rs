@@ -269,6 +269,12 @@ pub struct ChannelModel {
     /// shown event (correct order) instead of being held. Keyed by lowercased
     /// redeemer name → the instant the event rendered.
     recent_reward_events: HashMap<String, std::time::Instant>,
+    /// One past the last event sequence number the alert ping has played for.
+    /// Interior-mutable so views can claim it from their (read-borrowed) event
+    /// subscription: several views may share this model (a tab plus its
+    /// popouts/duplicates), each with its own sound filter, and the first
+    /// sound-enabled view to claim wins so one event pings once app-wide.
+    event_sound_mark: std::cell::Cell<u64>,
     /// The connection handle (send/moderation), shared by every view.
     pub controller: Controller,
     /// Drains the connection's event stream into this model. Dropping the model
@@ -289,6 +295,18 @@ impl ChannelModel {
     pub fn event_at(&self, seq: u64) -> Option<&RetainedEvent> {
         let ix = seq.checked_sub(self.events_base)?;
         self.events.get(ix as usize)
+    }
+
+    /// Claims the alert ping for event `seq`: true exactly once per event no
+    /// matter how many views observe this model. Sound-enabled views call it
+    /// from their `EventAppended` handler; since an emit's subscribers all see
+    /// one event before the next, a monotonic mark suffices.
+    pub fn claim_event_sound(&self, seq: u64) -> bool {
+        if self.event_sound_mark.get() > seq {
+            return false;
+        }
+        self.event_sound_mark.set(seq + 1);
+        true
     }
 
     /// Whether the logged-in user can moderate (pin/ban/timeout) on `platform`.
@@ -1169,6 +1187,7 @@ fn build_model(
             rich_mod_feed: HashSet::from([Platform::Kick]),
             pending_reward_msgs: HashMap::new(),
             recent_reward_events: HashMap::new(),
+            event_sound_mark: std::cell::Cell::new(0),
             controller,
             _drain: drain,
         }

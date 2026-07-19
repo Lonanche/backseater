@@ -307,8 +307,9 @@ pub struct Settings {
     /// names and per-tab terms — one app-wide mute list.
     #[serde(default)]
     pub muted_mentions: Vec<String>,
-    /// Whether streamer mode also mutes mention sounds. On by default — going
-    /// live shouldn't leak pings into the stream unless the user opts out.
+    /// Whether streamer mode also mutes alert sounds (mention + event pings).
+    /// On by default — going live shouldn't leak pings into the stream unless
+    /// the user opts out.
     #[serde(default = "default_true")]
     pub streamer_mute_sounds: bool,
     /// Whether streamer mode hides link-preview thumbnails (tooltip + inline

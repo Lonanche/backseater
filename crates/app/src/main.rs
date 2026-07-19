@@ -2171,7 +2171,32 @@ impl BackseaterApp {
         cx.notify();
     }
 
-    /// Pushes tab `ix`'s (already-mutated) events filters to its live view and
+    /// Runs `f` on tab `ix`'s main-strip view and every live popout mirroring
+    /// it (popouts aren't in [`tabs`](Self::tabs)), pruning dead popout handles
+    /// first — the one fan-out path for pushing per-tab view config, so a
+    /// popout can't keep acting on a stale copy.
+    fn update_tab_views(
+        &mut self,
+        ix: usize,
+        cx: &mut Context<Self>,
+        f: impl Fn(&mut ChatView, &mut Context<ChatView>),
+    ) {
+        let Some(tab) = self.tabs.get(ix) else {
+            return;
+        };
+        let tab_id = tab.id;
+        tab.view.update(cx, |view, cx| f(view, cx));
+        self.popout_views.retain(|(_, weak)| weak.upgrade().is_some());
+        for (id, weak) in &self.popout_views {
+            if *id == tab_id {
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |view, cx| f(view, cx));
+                }
+            }
+        }
+    }
+
+    /// Pushes tab `ix`'s (already-mutated) events filters to its live views and
     /// persists — shared tail of the filter setters below.
     fn push_events_filter(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(ix) else {
@@ -2183,7 +2208,7 @@ impl BackseaterApp {
             tab.config.hide_sub_messages,
             tab.config.collapse_gift_subs,
         );
-        tab.view.update(cx, |view, cx| {
+        self.update_tab_views(ix, cx, move |view, cx| {
             view.set_events_filter(kinds, only, hide_msgs, collapse, cx)
         });
         self.persist();
@@ -2197,6 +2222,21 @@ impl BackseaterApp {
         };
         *tab.config.event_kinds.toggle_mut(kind) = on;
         self.push_events_filter(ix, cx);
+    }
+
+    /// Toggles whether `kind` plays the alert ping for tab `ix` (the bell
+    /// toggles in the events-panel settings). The popout fan-out matters here:
+    /// popouts share the channel model's one-ping-per-event claim, so a stale
+    /// popout copy would keep pinging with the old setting.
+    fn set_event_sound(&mut self, ix: usize, kind: EventKind, on: bool, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get_mut(ix) else {
+            return;
+        };
+        *tab.config.event_sounds.toggle_mut(kind) = on;
+        let sounds = tab.config.event_sounds;
+        self.update_tab_views(ix, cx, move |view, _| view.set_event_sounds(sounds));
+        self.persist();
+        cx.notify();
     }
 
     /// Toggles "events only" (hide events from the main log) for tab `ix`.
@@ -2443,22 +2483,41 @@ impl BackseaterApp {
                     .into_any_element(),
             ));
 
-            let kinds = EventKind::ALL.into_iter().map(|kind| {
-                Checkbox::new(SharedString::from(format!("event-kind-{}", kind.label())))
-                    .label(kind.label())
-                    .checked(filter.enabled(kind))
-                    .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                        this.set_event_kind(ix, kind, *checked, cx);
-                    }))
-            });
-            card = card.child(card_divider()).child(
-                v_flex()
-                    .gap_1()
-                    .px_3()
-                    .py_2()
-                    .children(kinds.map(IntoElement::into_any_element)),
-            );
         }
+
+        // The kind list renders with or without the panel: the visibility
+        // checkbox is panel-only (a plain label replaces it when the panel is
+        // off), but the sound bells always apply — events still show in the
+        // chat log, and their ping shouldn't require the panel.
+        let muted_fg = cx.theme().muted_foreground;
+        let kinds = EventKind::ALL.into_iter().map(|kind| {
+            h_flex()
+                .justify_between()
+                .child(if show {
+                    Checkbox::new(SharedString::from(format!("event-kind-{}", kind.label())))
+                        .label(kind.label())
+                        .checked(filter.enabled(kind))
+                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                            this.set_event_kind(ix, kind, *checked, cx);
+                        }))
+                        .into_any_element()
+                } else {
+                    div().child(kind.label()).into_any_element()
+                })
+                .child(self.event_bell(ix, kind, cx))
+        });
+        card = card.child(card_divider()).child(
+            v_flex()
+                .gap_1()
+                .px_3()
+                .py_2()
+                .child(div().text_xs().text_color(muted_fg).child(if show {
+                    "The bell also plays a sound when that event happens."
+                } else {
+                    "The bell plays a sound when that event happens (events show in the chat log)."
+                }))
+                .children(kinds.map(IntoElement::into_any_element)),
+        );
 
         let show_mentions = tab.config.layout.contains(tabs::PanelKind::Mentions);
         let mut mentions_card = setting_card().child(setting_row(
@@ -3776,8 +3835,8 @@ impl BackseaterApp {
                     ))
                     .child(card_divider())
                     .child(setting_row(
-                        "Mute mention sounds while active",
-                        Some("Mention pings stay silent so they don't leak into the stream."),
+                        "Mute alert sounds while active",
+                        Some("Mention and event pings stay silent so they don't leak into the stream."),
                         {
                             use gpui_component::switch::Switch;
                             Switch::new("streamer-mute-sounds")
@@ -4017,39 +4076,79 @@ impl BackseaterApp {
     /// aren't listed here.
     /// Renders one Highlights term list (Mentions or Ignore): the current terms
     /// as removable chips plus an input + Add button.
-    /// A mention chip's bell/bell-off sound toggle (only mention terms get one;
-    /// ignore terms have no sound). Muting is app-wide by normalized term.
-    /// Vector icons, not 🔔/🔕 emoji — small emoji bells render ambiguously
-    /// (the plain bell read as "crossed"), so the two states looked alike.
+    /// The shared bell/bell-off sound-toggle chrome (mention chips + event
+    /// kinds): `ringing` = the sound is on. Vector icons, not 🔔/🔕 emoji —
+    /// small emoji bells render ambiguously (the plain bell read as "crossed"),
+    /// so the two states looked alike.
+    fn bell_toggle(
+        id: SharedString,
+        ringing: bool,
+        cx: &Context<Self>,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    ) -> gpui::AnyElement {
+        div()
+            .id(id)
+            .px_1()
+            .py_0p5()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|s| s.bg(cx.theme().muted))
+            .when(!ringing, |s| s.opacity(0.55))
+            .child(
+                gpui::svg()
+                    .path(if ringing {
+                        "icons/bell.svg"
+                    } else {
+                        "icons/bell-off.svg"
+                    })
+                    .size(px(14.))
+                    .flex_none()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .on_click(on_click)
+            .into_any_element()
+    }
+
+    /// A mention chip's bell toggle (only mention terms get one; ignore terms
+    /// have no sound). Muting is app-wide by normalized term.
     fn term_bell(&self, id_stem: &str, term: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
         let muted = self
             .settings
             .muted_mentions
             .contains(&bks_core::normalize_term(term));
         let toggle = term.to_string();
-        div()
-            .id(SharedString::from(format!("bell-{id_stem}-{term}")))
-            .px_1()
-            .py_0p5()
-            .rounded_md()
-            .cursor_pointer()
-            .hover(|s| s.bg(cx.theme().muted))
-            .when(muted, |s| s.opacity(0.55))
-            .child(
-                gpui::svg()
-                    .path(if muted {
-                        "icons/bell-off.svg"
-                    } else {
-                        "icons/bell.svg"
-                    })
-                    .size(px(14.))
-                    .flex_none()
-                    .text_color(cx.theme().muted_foreground),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
+        Self::bell_toggle(
+            SharedString::from(format!("bell-{id_stem}-{term}")),
+            !muted,
+            cx,
+            cx.listener(move |this, _, _, cx| {
                 this.toggle_mention_mute(&toggle, cx);
-            }))
-            .into_any_element()
+            }),
+        )
+    }
+
+    /// An event kind's bell toggle in the events-panel settings: whether that
+    /// kind plays the alert ping when it arrives live.
+    fn event_bell(&self, ix: usize, kind: EventKind, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let on = self
+            .tabs
+            .get(ix)
+            .is_some_and(|t| t.config.event_sounds.enabled(kind));
+        Self::bell_toggle(
+            SharedString::from(format!("event-bell-{}", kind.label())),
+            on,
+            cx,
+            cx.listener(move |this, _, _, cx| {
+                // Flip the value read at click time, not a render-time capture,
+                // so a toggle from another surface can't turn this click into
+                // a no-op write of the state it already shows.
+                let on = this
+                    .tabs
+                    .get(ix)
+                    .is_some_and(|t| t.config.event_sounds.enabled(kind));
+                this.set_event_sound(ix, kind, !on, cx);
+            }),
+        )
     }
 
     fn term_list_section(&self, list: TermList, cx: &mut Context<Self>) -> gpui::AnyElement {

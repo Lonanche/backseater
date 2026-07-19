@@ -13,70 +13,90 @@ const STORE_NAME: &str = "tabs";
 /// it just default to the first tab.
 const ACTIVE_STORE_NAME: &str = "active_tab";
 
-/// Which event kinds the events panel shows. Stored as one bool per kind so old
-/// `tabs.json` files (without this field) load with every kind enabled via the
-/// serde default. Serialized by kind name, not position, so reordering the
-/// [`EventKind`] enum can't silently flip the wrong toggles.
-// `#[serde(default)]` fills every missing field (or an absent filter) from
-// `Default` — the single source of truth for the "all on" defaults, so a newly
-// added kind doesn't need its own per-field serde attr.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct EventFilter {
-    pub sub: bool,
-    pub gift: bool,
-    pub raid: bool,
-    pub bits: bool,
-    pub reward: bool,
-    pub watch_streak: bool,
-    pub announcement: bool,
-    pub other: bool,
+/// Generates a one-bool-per-[`EventKind`] toggle struct — the shared shape of
+/// the events panel's visibility filter and the alert-sound picks, so adding a
+/// kind is one edit here, not parallel match arms per struct. Each is stored as
+/// named bools so old `tabs.json` files (missing a field or the whole struct)
+/// fill from `$default` via serde's container `default`, and serialization is
+/// by kind name, not position, so reordering the [`EventKind`] enum can't
+/// silently flip the wrong toggles. (A single const-generic struct would be
+/// tidier still, but serde's derive doesn't support const generics.)
+macro_rules! event_toggles {
+    ($(#[$doc:meta])* $name:ident, default = $default:literal) => {
+        $(#[$doc])*
+        #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+        #[serde(default)]
+        pub struct $name {
+            pub sub: bool,
+            pub gift: bool,
+            pub raid: bool,
+            pub bits: bool,
+            pub reward: bool,
+            pub watch_streak: bool,
+            pub announcement: bool,
+            pub other: bool,
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self {
+                    sub: $default,
+                    gift: $default,
+                    raid: $default,
+                    bits: $default,
+                    reward: $default,
+                    watch_streak: $default,
+                    announcement: $default,
+                    other: $default,
+                }
+            }
+        }
+
+        impl $name {
+            /// Whether `kind`'s toggle is on.
+            pub fn enabled(&self, kind: EventKind) -> bool {
+                match kind {
+                    EventKind::Sub => self.sub,
+                    EventKind::Gift => self.gift,
+                    EventKind::Raid => self.raid,
+                    EventKind::Bits => self.bits,
+                    EventKind::Reward => self.reward,
+                    EventKind::WatchStreak => self.watch_streak,
+                    EventKind::Announcement => self.announcement,
+                    EventKind::Other => self.other,
+                }
+            }
+
+            /// Mutable access to the toggle for `kind`, for the settings UI.
+            pub fn toggle_mut(&mut self, kind: EventKind) -> &mut bool {
+                match kind {
+                    EventKind::Sub => &mut self.sub,
+                    EventKind::Gift => &mut self.gift,
+                    EventKind::Raid => &mut self.raid,
+                    EventKind::Bits => &mut self.bits,
+                    EventKind::Reward => &mut self.reward,
+                    EventKind::WatchStreak => &mut self.watch_streak,
+                    EventKind::Announcement => &mut self.announcement,
+                    EventKind::Other => &mut self.other,
+                }
+            }
+        }
+    };
 }
 
-impl Default for EventFilter {
-    fn default() -> Self {
-        Self {
-            sub: true,
-            gift: true,
-            raid: true,
-            bits: true,
-            reward: true,
-            watch_streak: true,
-            announcement: true,
-            other: true,
-        }
-    }
-}
-
-impl EventFilter {
-    /// Whether events of `kind` should appear in the panel.
-    pub fn enabled(&self, kind: EventKind) -> bool {
-        match kind {
-            EventKind::Sub => self.sub,
-            EventKind::Gift => self.gift,
-            EventKind::Raid => self.raid,
-            EventKind::Bits => self.bits,
-            EventKind::Reward => self.reward,
-            EventKind::WatchStreak => self.watch_streak,
-            EventKind::Announcement => self.announcement,
-            EventKind::Other => self.other,
-        }
-    }
-
-    /// Mutable access to the toggle for `kind`, for the settings checklist.
-    pub fn toggle_mut(&mut self, kind: EventKind) -> &mut bool {
-        match kind {
-            EventKind::Sub => &mut self.sub,
-            EventKind::Gift => &mut self.gift,
-            EventKind::Raid => &mut self.raid,
-            EventKind::Bits => &mut self.bits,
-            EventKind::Reward => &mut self.reward,
-            EventKind::WatchStreak => &mut self.watch_streak,
-            EventKind::Announcement => &mut self.announcement,
-            EventKind::Other => &mut self.other,
-        }
-    }
-}
+event_toggles!(
+    /// Which event kinds the events panel shows (all on by default).
+    EventFilter,
+    default = true
+);
+event_toggles!(
+    /// Which event kinds play the alert ping when they arrive live. All off by
+    /// default — sounds are opt-in, like the mention ping — and independent of
+    /// [`EventFilter`]: a kind can ping without showing in the panel and vice
+    /// versa.
+    EventSounds,
+    default = false
+);
 
 /// What one cell of a tab's layout grid shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -326,6 +346,9 @@ pub struct TabConfig {
     /// Which event kinds appear in the events panel (all enabled by default).
     #[serde(default)]
     pub event_kinds: EventFilter,
+    /// Which event kinds play the alert ping on arrival (all off by default).
+    #[serde(default)]
+    pub event_sounds: EventSounds,
     /// When the events panel is shown, hide event rows from the main chat log so
     /// events appear *only* in the panel. Off by default (events show in both).
     #[serde(default)]
@@ -375,6 +398,7 @@ impl TabConfig {
             kick_channel: String::new(),
             youtube_channel: String::new(),
             event_kinds: EventFilter::default(),
+            event_sounds: EventSounds::default(),
             events_only: false,
             hide_sub_messages: false,
             collapse_gift_subs: true,

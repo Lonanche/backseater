@@ -68,12 +68,10 @@ impl MentionStore {
         }
         // The store is the one point a live mention passes exactly once
         // app-wide (deduped above), so the alert ping plays here: master
-        // toggle on, matched term unmuted, and not silenced by streamer mode.
-        if entry.sound
-            && crate::settings::mention_sound_enabled()
-            && !(crate::streamer_mode::is_active() && crate::settings::streamer_mute_sounds())
-        {
-            crate::sound::play_mention_ping();
+        // toggle on and matched term unmuted (`play_ping` itself applies the
+        // streamer-mode mute).
+        if entry.sound && crate::settings::mention_sound_enabled() {
+            crate::sound::play_ping();
         }
         self.entries.push_back(entry);
         if self.entries.len() > MAX_MENTIONS {
