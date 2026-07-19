@@ -3,6 +3,33 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.6.0-beta.1
+
+### Features
+
+- Choose what Backseater may do with your Twitch account when you log in.
+  The Account settings now offer three permission tiers — **Chat only**
+  (read and send messages), **Basic moderation** (ban/timeout, delete
+  messages, pin messages, viewer list), and **Full moderator** (warnings,
+  announcements, chat modes, the AutoMod queue, suspicious users, and the
+  rich mod-action feed) — plus a separate **Broadcaster tools** add-on
+  (/raid and granting mod/VIP, for your own channel). Twitch's consent
+  screen lists only what you picked, so a chat-only login shows just a few
+  harmless lines instead of the full moderator list.
+- Anything your login tier doesn't cover is hidden in the app — mod buttons,
+  the hover 📌, the viewer list, and slash-command suggestions all follow the
+  permissions you actually granted instead of failing with an API error.
+- The Twitch account row shows what your login can do ("basic moderation",
+  "full moderator + broadcaster", …), and a new Permissions… button lets you
+  re-login at a different tier any time.
+- Existing logins are untouched: a token from before this version keeps
+  everything visible and working exactly as before.
+
+### Fixes
+
+- Jumping to a chat message (from search or a mention) no longer lands it
+  hidden underneath the floating pinned-message cards at the top of the log.
+
 ## v0.5.5
 
 ### Features
