@@ -1164,6 +1164,14 @@ fn build_model(
     cx: &mut App,
 ) -> Entity<ChannelModel> {
     let (rx, controller) = crate::bridge::connect(session, twitch, kick, youtube);
+    model_from_connection(rx, controller, cx)
+}
+
+fn model_from_connection(
+    rx: smol::channel::Receiver<ChatEvent>,
+    controller: Controller,
+    cx: &mut App,
+) -> Entity<ChannelModel> {
     cx.new(|cx| {
         let drain = cx.spawn(async move |weak: WeakEntity<ChannelModel>, cx| {
             while let Ok(event) = rx.recv().await {
@@ -1210,6 +1218,30 @@ fn build_model(
             _drain: drain,
         }
     })
+}
+
+/// Registers an offline channel using the production model and event drain.
+#[cfg(test)]
+pub(crate) fn register_for_test(
+    session: Session,
+    twitch: &str,
+    cx: &mut App,
+) -> Entity<ChannelModel> {
+    let (tx, rx) = smol::channel::bounded(1024);
+    let controller = Controller::new(
+        session,
+        tx,
+        tokio::runtime::Handle::current(),
+        twitch.into(),
+        String::new(),
+    );
+    let model = model_from_connection(rx, controller, cx);
+    let mut store = ChannelStore::default();
+    store
+        .channels
+        .insert(ChannelKey::new(twitch, "", ""), model.downgrade());
+    cx.set_global(store);
+    model
 }
 
 /// Assigns a mass gift's per-recipient event to its batch announcement.

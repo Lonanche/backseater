@@ -9,6 +9,9 @@
 mod log;
 mod picker;
 
+#[cfg(test)]
+mod gui_tests;
+
 use std::collections::{HashMap, HashSet};
 
 use bks_core::Message;

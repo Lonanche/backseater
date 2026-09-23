@@ -59,3 +59,6 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diag
 # Embeds resources/icon.ico as the exe's icon resource (see build.rs).
 [build-dependencies]
 winresource = "0.1"
+
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["test-support"] }

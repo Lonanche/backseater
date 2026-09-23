@@ -39,7 +39,8 @@ jobs:
           shared-key: build
 
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test
+      - name: Unit and headless GUI tests
+        run: cargo test --workspace --locked
       - run: cargo build --release -p backseater
 
       # ---- Auto-release: everything below only runs on a push to main whose

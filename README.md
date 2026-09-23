@@ -82,13 +82,35 @@ Windows is the primary target (GPUI's DirectX backend). Requires:
 
 ```sh
 cargo build                 # whole workspace
-cargo test                  # unit tests
+cargo test                  # unit + headless GUI interaction tests
 cargo run -p backseater     # run the app
 ```
 
 Channels are set per tab (right-click a tab → Settings). `/login` starts the
 Twitch OAuth flow, `/kicklogin` the Kick one. `BKS_DEBUG=1` logs received
 messages to stderr.
+
+## GUI tests
+
+The chat view has automated interaction tests that run with `cargo test` and on
+every pull request in the Windows CI job. To run only these tests:
+
+```sh
+cargo test -p backseater gui_
+```
+
+The suite exercises the production `ChatView` through GPUI's simulated keyboard
+and mouse input: sent-message history and draft restoration, Tab completion and
+focus, autocomplete selection and dismissal, and emote-picker search/insertion.
+It uses a fixed offline channel, a logged-out test session, and an in-memory image
+cache. It does not load your saved settings/accounts or connect to chat services.
+No desktop session or GPU is needed at test runtime (the normal build prerequisites
+still apply).
+
+These tests check interaction behavior and layout hit targets, not screenshot
+appearance or native Windows window management. Test fixtures and helpers live in
+`crates/app/src/chatview/gui_tests.rs`; picker controls expose debug selectors so
+mouse tests use their rendered bounds instead of hard-coded screen coordinates.
 
 ## GPUI dependency pinning
 

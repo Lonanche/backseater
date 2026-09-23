@@ -123,6 +123,8 @@ struct Entry {
 /// backs its fetches with a persistent on-disk byte cache.
 pub struct LruImageCache {
     entries: HashMap<u64, Entry>,
+    #[cfg(test)]
+    offline: bool,
     /// Images are dropped (decoded frames + GPU textures) this long after they
     /// were last drawn.
     lifetime: Duration,
@@ -136,6 +138,13 @@ struct GlobalImageCache(Entity<LruImageCache>);
 impl gpui::Global for GlobalImageCache {}
 
 impl LruImageCache {
+    #[cfg(test)]
+    pub(crate) fn install_for_test(cx: &mut App) {
+        let cache = Self::new(Duration::from_secs(600), cx);
+        cache.update(cx, |cache, _| cache.offline = true);
+        cx.set_global(GlobalImageCache(cache));
+    }
+
     /// The app-wide shared cache, created on first use. All callers get the same
     /// entity, so its eviction/disk cache is shared across the whole app. The first
     /// call starts the single periodic eviction sweep (every `sweep_interval`).
@@ -176,6 +185,8 @@ impl LruImageCache {
     fn new(lifetime: Duration, cx: &mut App) -> Entity<Self> {
         let e = cx.new(|_cx| LruImageCache {
             entries: HashMap::new(),
+            #[cfg(test)]
+            offline: false,
             lifetime,
         });
         cx.observe_release(&e, |cache, cx| {
@@ -632,6 +643,10 @@ impl ImageCache for LruImageCache {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        #[cfg(test)]
+        if self.offline {
+            return None;
+        }
         let hash = hash(resource);
         let now = Instant::now();
 

@@ -118,6 +118,7 @@ impl Render for EmoteCell {
         // Fill the fixed cell box (matches `picker_cell_style`) and center the emote.
         div()
             .id("picker-emote")
+            .debug_selector(|| format!("picker-emote-{}", self.name))
             .w(px(PICKER_CELL_W))
             .h(px(PICKER_CELL_H))
             .flex()
@@ -429,7 +430,12 @@ impl ChatView {
         let search = h_flex()
             .w_full()
             .px_1()
-            .child(div().flex_1().child(Input::new(&self.picker_search)));
+            .child(
+                div()
+                    .debug_selector(|| "picker-search".into())
+                    .flex_1()
+                    .child(Input::new(&self.picker_search)),
+            );
 
         let body = if self.picker_rows.is_empty() {
             let msg = if !self.picker_query(cx).is_empty() {
@@ -506,6 +512,7 @@ impl ChatView {
 
         v_flex()
             .id("emote-picker")
+            .debug_selector(|| "emote-picker".into())
             .w_full()
             .p_2()
             .gap_1()
@@ -525,6 +532,7 @@ impl ChatView {
         // 12px padding when a suffix is set, which read as a stray gap.
         div()
             .id("emote-picker-toggle")
+            .debug_selector(|| "emote-picker-toggle".into())
             .px_1p5()
             .mr(px(-6.))
             .rounded_sm()
