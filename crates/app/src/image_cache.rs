@@ -295,7 +295,7 @@ fn finish_frame(frame: image::Frame) -> image::Frame {
         let new_h = ((h as f64 * scale) as u32).max(1);
         buf = image::imageops::resize(&buf, new_w, new_h, image::imageops::FilterType::Triangle);
     }
-    for px in buf.chunks_exact_mut(4) {
+    for px in buf.as_chunks_mut::<4>().0 {
         px.swap(0, 2); // RGBA -> BGRA
     }
     image::Frame::from_parts(buf, 0, 0, delay)
