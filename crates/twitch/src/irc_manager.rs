@@ -19,7 +19,7 @@
 //! its replacement during a tab edit) — each registration has a unique id, so a
 //! guard's drop removes exactly its own sink, and the channel is only PARTed
 //! when its last sink unregisters. Sends and replies for a channel are handed to
-//! the write client, which also echoes our own message back (Twitch doesn't).
+//! the write client; our sent messages arrive back on the separate read client.
 //!
 //! A background [`socket_task`] runs the connection(s), reconnecting with backoff.
 //! On each fresh session it re-JOINs every registered channel through a
@@ -503,7 +503,7 @@ async fn run_session(
                     Ok(m) => m,
                     Err(err) => return SessionOutcome::Transient(err),
                 };
-                if let Err(err) = handle_write(write.as_mut().unwrap(), &msg).await {
+                if let Err(err) = handle_write(write.as_mut().unwrap(), &msg, channels).await {
                     return SessionOutcome::Transient(err);
                 }
             }
@@ -637,6 +637,7 @@ async fn handle_read(
                 }
             }
         }
+        tmi::Message::Notice(notice) => handle_notice(&notice, channels).await,
         // Twitch asked us to reconnect: reconnect this same read client in place
         // and re-JOIN every channel on it (a fresh session drops the joins).
         tmi::Message::Reconnect => {
@@ -654,10 +655,12 @@ async fn handle_read(
     Ok(())
 }
 
-/// Handles one message off the write connection. We only keep it drained
-/// (answering pings, honoring a RECONNECT) so its socket buffer never stalls; the
-/// write connection carries no display data (chat arrives on the read connection).
-async fn handle_write(write: &mut tmi::Client, msg: &tmi::IrcMessage) -> anyhow::Result<()> {
+/// Handles write-side keepalives and rejections of our outgoing messages.
+async fn handle_write(
+    write: &mut tmi::Client,
+    msg: &tmi::IrcMessage,
+    channels: &HashMap<String, Channel>,
+) -> anyhow::Result<()> {
     use anyhow::Context;
     match msg.as_typed().context("parsing message (write)")? {
         tmi::Message::Reconnect => {
@@ -666,9 +669,31 @@ async fn handle_write(write: &mut tmi::Client, msg: &tmi::IrcMessage) -> anyhow:
         tmi::Message::Ping(ping) => {
             write.pong(&ping).await.context("ponging (write)")?;
         }
+        tmi::Message::Notice(notice) => handle_notice(&notice, channels).await,
         _ => {}
     }
     Ok(())
+}
+
+async fn handle_notice(notice: &tmi::Notice<'_>, channels: &HashMap<String, Channel>) {
+    // msg_* notices explain rejected/held messages. Mode changes already arrive
+    // through ROOMSTATE/EventSub; don't repeat those as errors. Untagged notices
+    // include connection/authentication failures and still need to be visible.
+    if let Some(id) = notice.id() {
+        if !id.starts_with("msg_") && !matches!(id, "tos_ban" | "unrecognized_cmd") {
+            return;
+        }
+    }
+    let event = ChatEvent::Error(format!("Twitch: {}", notice.text()));
+    if let Some(channel) = notice.channel() {
+        if let Some(ch) = channels.get(&channel_key(channel)) {
+            fan_out(ch, event).await;
+        }
+    } else {
+        for ch in channels.values() {
+            fan_out(ch, event.clone()).await;
+        }
+    }
 }
 
 /// Sends a message (or reply) on the write client. We do NOT synthesize a local
@@ -779,6 +804,116 @@ mod tests {
         let raw = format!("@room-id=12345;{tags} :tmi.twitch.tv ROOMSTATE #oilrats");
         let irc = IrcMessageRef::parse(&raw).unwrap();
         tmi::RoomState::from_irc(irc).unwrap().into_owned()
+    }
+
+    async fn receive_notice(raw: &str, channels: &HashMap<String, Channel>) {
+        let irc = IrcMessageRef::parse(raw).unwrap();
+        let tmi::Message::Notice(notice) = irc.as_typed().unwrap() else {
+            panic!("expected NOTICE");
+        };
+        handle_notice(&notice, channels).await;
+    }
+
+    #[tokio::test]
+    async fn rejected_messages_preserve_twitchs_reason_in_the_affected_channel() {
+        let mut channels = HashMap::new();
+        let (tx, mut rx) = bks_platform::chat_channel();
+        let (tx_mirror, mut rx_mirror) = bks_platform::chat_channel();
+        let (tx_other, mut rx_other) = bks_platform::chat_channel();
+        add_sink(&mut channels, "#chan".into(), 1, tx);
+        add_sink(&mut channels, "#chan".into(), 2, tx_mirror);
+        add_sink(&mut channels, "#other".into(), 3, tx_other);
+
+        for (id, reason) in [
+            ("msg_slowmode", "Wait 7 seconds before sending again."),
+            ("msg_subsonly", "A subscription is required."),
+            ("msg_followersonly", "Follow this channel to chat."),
+            (
+                "msg_requires_verified_phone_number",
+                "Verify your phone number.",
+            ),
+            ("msg_verified_email", "Verify your email address."),
+            ("msg_timedout", "Your timeout has 42 seconds remaining."),
+            ("msg_banned", "You are banned in this channel."),
+            ("msg_ratelimit", "You are sending too quickly."),
+            ("msg_duplicate", "This repeats your previous message."),
+            ("msg_rejected", "Your message is awaiting moderator review."),
+            (
+                "msg_rejected_mandatory",
+                "This message is blocked by moderation settings.",
+            ),
+            ("msg_new_restriction", "A new chat requirement applies."),
+        ] {
+            receive_notice(
+                &format!("@msg-id={id} :tmi.twitch.tv NOTICE #ChAn :{reason}"),
+                &channels,
+            )
+            .await;
+            for receiver in [&mut rx, &mut rx_mirror] {
+                match receiver.try_recv() {
+                    Ok(ChatEvent::Error(text)) => assert_eq!(text, format!("Twitch: {reason}")),
+                    other => panic!("expected visible error for {id}, got {other:?}"),
+                }
+                assert!(receiver.try_recv().is_err());
+            }
+            assert!(rx_other.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn notices_for_closed_channels_are_not_shown_elsewhere() {
+        let (tx, mut rx) = bks_platform::chat_channel();
+        let channels = HashMap::from([("#open".into(), Channel::new(1, tx))]);
+        receive_notice(
+            "@msg-id=msg_banned :tmi.twitch.tv NOTICE #closed :You cannot chat here.",
+            &channels,
+        )
+        .await;
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn connection_notices_without_a_channel_reach_all_registered_channels() {
+        let (tx_a, mut rx_a) = bks_platform::chat_channel();
+        let (tx_b, mut rx_b) = bks_platform::chat_channel();
+        let channels = HashMap::from([
+            ("#a".into(), Channel::new(1, tx_a)),
+            ("#b".into(), Channel::new(2, tx_b)),
+        ]);
+        receive_notice(
+            ":tmi.twitch.tv NOTICE * :Login authentication failed",
+            &channels,
+        )
+        .await;
+        for receiver in [&mut rx_a, &mut rx_b] {
+            match receiver.try_recv() {
+                Ok(ChatEvent::Error(text)) => {
+                    assert_eq!(text, "Twitch: Login authentication failed")
+                }
+                other => panic!("expected connection error, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn routine_mode_and_success_notices_do_not_become_send_errors() {
+        let (tx, mut rx) = bks_platform::chat_channel();
+        let channels = HashMap::from([("#chan".into(), Channel::new(1, tx))]);
+        for id in [
+            "slow_on",
+            "slow_off",
+            "subs_on",
+            "emote_only_on",
+            "followers_on_zero",
+            "delete_message_success",
+        ] {
+            receive_notice(
+                &format!("@msg-id={id} :tmi.twitch.tv NOTICE #chan :Settings updated."),
+                &channels,
+            )
+            .await;
+            assert!(rx.try_recv().is_err(), "unexpected error for {id}");
+        }
     }
 
     #[test]

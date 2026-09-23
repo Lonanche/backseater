@@ -168,6 +168,39 @@ fn gui_history_restores_the_draft_after_browsing_sent_messages(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn gui_send_error_preserves_draft_and_failed_message_for_retry(cx: &mut TestAppContext) {
+    let mut app = Harness::new(cx);
+    app.type_text("message to retry");
+    app.keys("enter");
+    app.type_text("new draft");
+
+    let reason = "Twitch: Wait 7 seconds before sending again.";
+    app.cx.update(|_, cx| {
+        let channel = app.view.read(cx).channel.clone();
+        channel.update(cx, |channel, cx| {
+            channel.push(ChatEvent::Error(reason.into()), cx);
+        });
+    });
+    app.draw();
+    app.cx.update(|_, cx| {
+        assert!(app
+            .view
+            .read(cx)
+            .channel
+            .read(cx)
+            .rows
+            .iter()
+            .any(|row| matches!(row, Row::Error(text) if text == reason)));
+    });
+    assert_eq!(app.text(), "new draft");
+    app.keys("up");
+    assert_eq!(app.text(), "message to retry");
+    app.keys("down");
+    assert_eq!(app.text(), "new draft");
+    app.assert_composer_focused();
+}
+
+#[gpui::test]
 fn gui_tab_cycles_emotes_without_moving_focus(cx: &mut TestAppContext) {
     let mut app = Harness::new(cx);
     app.type_text("Kap");
