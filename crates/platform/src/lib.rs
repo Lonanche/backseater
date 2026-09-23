@@ -338,7 +338,10 @@ pub enum ChatEvent {
     /// [`ChatModes`]); connectors emit one only when something actually changed
     /// from what they last emitted. Shown in the mode bar above the composer —
     /// not a chat row.
-    ChatModes { platform: Platform, modes: ChatModes },
+    ChatModes {
+        platform: Platform,
+        modes: ChatModes,
+    },
     /// A periodic concurrent-viewer-count update for the platform's stream,
     /// separate from [`ChatEvent::Live`] so a count refresh can't clobber the
     /// live-status metadata (title/game/last stream). `None` = unknown or
@@ -387,10 +390,15 @@ pub struct LastStream {
 }
 
 /// A stream of [`ChatEvent`]s for one joined channel.
-pub type ChatStream = mpsc::UnboundedReceiver<ChatEvent>;
+pub type ChatStream = mpsc::Receiver<ChatEvent>;
 
 /// The sending half a connector keeps to publish events.
-pub type ChatSink = mpsc::UnboundedSender<ChatEvent>;
+pub type ChatSink = mpsc::Sender<ChatEvent>;
+
+/// Bounded queues propagate backpressure without discarding moderation events.
+pub fn chat_channel() -> (ChatSink, ChatStream) {
+    mpsc::channel(1024)
+}
 
 /// Reading and sending chat. Every platform connector implements this; the UI
 /// depends only on the trait, never a concrete platform.
@@ -409,5 +417,35 @@ pub trait ChatSource: Send + Sync {
         _reply_parent_id: Option<&str>,
     ) -> anyhow::Result<()> {
         anyhow::bail!("sending is not supported on this connection")
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn full_queue_backpressures_without_losing_moderation_events() {
+        let (tx, mut rx) = chat_channel();
+        for _ in 0..1024 {
+            tx.send(ChatEvent::Notice("queued".into())).await.unwrap();
+        }
+        let send = tokio::spawn(async move {
+            tx.send(ChatEvent::DeleteMessage {
+                platform: Platform::Twitch,
+                message_id: "deleted".into(),
+            })
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!send.is_finished());
+        rx.recv().await.unwrap();
+        send.await.unwrap().unwrap();
+        for _ in 1..1024 {
+            rx.recv().await.unwrap();
+        }
+        assert!(
+            matches!(rx.recv().await, Some(ChatEvent::DeleteMessage { message_id, .. }) if message_id == "deleted")
+        );
     }
 }

@@ -153,6 +153,7 @@ struct State {
     /// Active Twitch source for this tab — anonymous or authed. Cancelled when
     /// swapped (reconnect / channel change) so we never run two at once.
     twitch: Option<Arc<TwitchSource>>,
+    twitch_task: Option<tokio::task::JoinHandle<()>>,
     /// Kick chatters this tab has seen (login → numeric id), so moderation can
     /// target them — Kick's API can't resolve a username to an id.
     kick_user_ids: HashMap<String, u64>,
@@ -239,32 +240,33 @@ impl Controller {
         let this = self.clone();
         let mut rx = self.session.subscribe();
         self.rt.spawn(async move {
-            let mut prev = rx.borrow().clone();
-            // Initial connect with whatever's logged in right now.
-            this.reconnect_twitch().await;
-            this.refresh_kick_mod_status().await;
-            while rx.changed().await.is_ok() {
-                // The session outlives every tab, so `changed()` alone would keep
-                // this task (and a reconnect per login flip) alive forever after
-                // the tab closed. A closed events channel means the ChatView is
-                // gone — stop reconciling.
-                if this.events.is_closed() {
-                    break;
+            let reconcile = async {
+                let mut prev = rx.borrow_and_update().clone();
+                // Initial connect with whatever's logged in right now.
+                this.reconnect_twitch().await;
+                this.refresh_kick_mod_status().await;
+                while rx.changed().await.is_ok() {
+                    let now = rx.borrow_and_update().clone();
+                    if now.twitch_generation != prev.twitch_generation {
+                        this.reconnect_twitch().await;
+                    }
+                    if prev.kick() && !now.kick() {
+                        this.reset_target_off_kick();
+                    }
+                    // Compare the account, not just the flag, so a re-login as a
+                    // different Kick user re-resolves too.
+                    if now.kick != prev.kick {
+                        this.refresh_kick_mod_status().await;
+                    }
+                    prev = now;
                 }
-                let now = rx.borrow().clone();
-                if now.twitch() != prev.twitch() {
-                    this.reconnect_twitch().await;
-                }
-                if prev.kick() && !now.kick() {
-                    this.reset_target_off_kick();
-                }
-                // Compare the account, not just the flag, so a re-login as a
-                // different Kick user re-resolves too.
-                if now.kick != prev.kick {
-                    this.refresh_kick_mod_status().await;
-                }
-                prev = now;
+            };
+            // The session outlives tabs: cancel even without another login event.
+            tokio::select! {
+                _ = this.events.closed() => {},
+                _ = reconcile => {},
             }
+            this.stop_twitch().await;
         });
     }
 
@@ -314,7 +316,7 @@ impl Controller {
     /// the moment the user chats. Historical (backlog) messages are skipped:
     /// their badges are as old as the message. The store dedupes, so re-asserts
     /// with the same value never re-measure the log.
-    pub fn sync_kick_mod_from_message(&self, msg: &bks_core::Message) {
+    pub async fn sync_kick_mod_from_message(&self, msg: &bks_core::Message) {
         if msg.historical {
             return;
         }
@@ -326,11 +328,14 @@ impl Controller {
         }
         let is_broadcaster = msg.author.badges.iter().any(|b| b.id == "broadcaster");
         let is_mod = is_broadcaster || msg.author.badges.iter().any(|b| b.id == "moderator");
-        let _ = self.events.try_send(ChatEvent::ModStatus {
-            platform: bks_core::Platform::Kick,
-            is_mod,
-            is_broadcaster,
-        });
+        let _ = self
+            .events
+            .send(ChatEvent::ModStatus {
+                platform: bks_core::Platform::Kick,
+                is_mod,
+                is_broadcaster,
+            })
+            .await;
     }
 
     /// On Kick logout, a tab targeting Kick/Both can no longer send there, so
@@ -1393,16 +1398,39 @@ impl Controller {
     /// session's EventSub credentials (if logged in) ride along so the moderator
     /// feed connects as this user; a login flip lands back here with the new ones.
     async fn connect_twitch(&self, source: Arc<TwitchSource>) {
-        if let Some(old) = self.state.lock().await.twitch.replace(source.clone()) {
-            old.cancel();
-        }
+        self.stop_twitch().await;
         let eventsub = self.session.twitch_eventsub().await;
-        self.rt.spawn(crate::bridge::run_twitch(
+        let events = self.events.clone();
+        let mut state = self.state.lock().await;
+        state.twitch = Some(source.clone());
+        let connection = crate::bridge::run_twitch(
             source,
             format!("#{}", self.twitch_channel),
             self.events.clone(),
             eventsub,
-        ));
+        );
+        state.twitch_task = Some(self.rt.spawn(async move {
+            tokio::select! {
+                _ = events.closed() => {},
+                _ = connection => {},
+            }
+        }));
+    }
+
+    async fn stop_twitch(&self) {
+        let task = {
+            let mut state = self.state.lock().await;
+            if let Some(source) = state.twitch.take() {
+                source.cancel();
+            }
+            state.twitch_task.take()
+        };
+        // Joining cancellation drops side-feed guards before the replacement
+        // starts, and prevents a delayed startup from registering the old login.
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
     }
 }
 
@@ -1437,4 +1465,58 @@ fn join(parts: &[&str]) -> Option<String> {
 /// reject it and the Kick `login → id` map is keyed on bare names.
 fn user_arg(arg: &str) -> String {
     arg.trim_start_matches('@').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stopping_twitch_cancels_a_connection_still_starting() {
+        let (tx, _rx) = smol::channel::bounded(1);
+        let controller = Controller::new(
+            Session::for_test(),
+            tx,
+            Handle::current(),
+            "channel".into(),
+            String::new(),
+        );
+        let task = tokio::spawn(std::future::pending::<()>());
+        let abort = task.abort_handle();
+        {
+            let mut state = controller.state.lock().await;
+            state.twitch = Some(Arc::new(TwitchSource::new()));
+            state.twitch_task = Some(task);
+        }
+        controller.stop_twitch().await;
+        assert!(abort.is_finished());
+        let state = controller.state.lock().await;
+        assert!(state.twitch.is_none());
+        assert!(state.twitch_task.is_none());
+    }
+
+    #[tokio::test]
+    async fn closing_the_event_receiver_releases_the_login_watcher() {
+        let (tx, rx) = smol::channel::bounded(1);
+        let controller = Controller::new(
+            Session::for_test(),
+            tx,
+            Handle::current(),
+            String::new(),
+            String::new(),
+        );
+        let state = Arc::downgrade(&controller.state);
+        controller.start();
+        drop(controller);
+        tokio::task::yield_now().await;
+        assert!(state.upgrade().is_some());
+        drop(rx);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while state.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("closed tab retained its controller");
+    }
 }

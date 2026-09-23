@@ -16,9 +16,8 @@ members = [
 edition = "2021"
 version = "0.6.0-beta.3"
 license = "MIT"
-# Floor set by `u64::is_multiple_of` (stabilized 1.87); gives a clear error
-# instead of a bare unresolved-method on older toolchains.
-rust-version = "1.87"
+# Required by the patched `time` dependency (0.3.47).
+rust-version = "1.88"
 
 [workspace.dependencies]
 bks-core = { path = "crates/core" }

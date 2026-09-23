@@ -286,7 +286,7 @@ pub async fn run(channel_id: String, tx: ChatSink) -> anyhow::Result<()> {
             }
             _ => continue,
         };
-        if tx.send(event).is_err() {
+        if tx.send(event).await.is_err() {
             break; // UI dropped the receiver.
         }
     }
@@ -388,7 +388,10 @@ fn redeem_details(r: &Redemption) -> bks_platform::EventDetails {
     let input = r.user_input.trim();
     bks_platform::EventDetails {
         actor: Some(r.user.display_name.clone()),
-        compact: Some(format!("redeemed {} · {} pts", r.reward.title, r.reward.cost)),
+        compact: Some(format!(
+            "redeemed {} · {} pts",
+            r.reward.title, r.reward.cost
+        )),
         redeem_input: (!input.is_empty()).then(|| input.to_string()),
         ..Default::default()
     }
@@ -417,10 +420,7 @@ mod tests {
         assert_eq!(redeem_details(&r).redeem_input, None);
 
         r.user_input = "  gg wp  ".into();
-        assert_eq!(
-            redeem_details(&r).redeem_input.as_deref(),
-            Some("gg wp")
-        );
+        assert_eq!(redeem_details(&r).redeem_input.as_deref(), Some("gg wp"));
     }
 
     #[test]

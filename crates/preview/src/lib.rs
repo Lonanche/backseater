@@ -9,7 +9,7 @@
 //! tooltip today and (designed-for, not built) an inline in-chat card later.
 //!
 //! **No GUI, no runtime here.** The crate defines the trait, the data, and a
-//! process-wide [`PreviewCache`] that dedupes fetches by URL (a link posted five
+//! process-wide [`PreviewCache`] that dedupes fetches by provider and target (a link posted five
 //! times, hovered twice, and shown inline all share one fetch). The *driving* of
 //! the async fetch — spawning it on a tokio runtime and storing the result — is
 //! the app's job (it owns the runtime, like the image cache), so this crate
@@ -21,9 +21,27 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 
+/// Parses a preview link before a provider checks its exact host and path.
+pub fn web_url(input: &str) -> Option<url::Url> {
+    if input.len() > 4096 {
+        return None;
+    }
+    let url = url::Url::parse(input)
+        .or_else(|error| match error {
+            url::ParseError::RelativeUrlWithoutBase => url::Url::parse(&format!("https://{input}")),
+            error => Err(error),
+        })
+        .ok()?;
+    (matches!(url.scheme(), "http" | "https")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none())
+    .then_some(url)
+}
+
 /// What kind of thing a link points at — lets the UI label/style the card and
 /// grows as providers are added.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PreviewKind {
     /// A video (YouTube watch/live/short, …).
     Video,
@@ -53,7 +71,7 @@ pub struct LinkPreview {
 
 /// A link a provider claimed, carrying the provider-specific id it extracted so
 /// [`LinkPreviewProvider::fetch`] doesn't re-parse the URL.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PreviewTarget {
     /// The extracted id (e.g. a YouTube video id).
     pub id: String,
@@ -82,142 +100,177 @@ const TTL: Duration = Duration::from_secs(30 * 60);
 /// retry soon, but a burst of the same bad link doesn't hammer the network.
 const NEGATIVE_TTL: Duration = Duration::from_secs(60);
 
-/// The cache state for one URL.
-#[derive(Clone)]
-enum Entry {
-    /// A fetch is running; don't start another.
-    Pending,
-    /// Resolved successfully at this time.
-    Ready(Arc<LinkPreview>, Instant),
-    /// Failed at this time (negative cache).
-    Failed(Instant),
-}
+const MAX_ENTRIES: usize = 512;
+const MAX_PENDING: usize = 64;
+const PENDING_TTL: Duration = Duration::from_secs(60);
 
-/// The outcome of asking the cache for a URL's preview.
-pub enum Lookup {
-    /// Ready to render.
+type CacheKey = (usize, PreviewTarget);
+
+enum EntryState {
+    Pending(u64),
     Ready(Arc<LinkPreview>),
-    /// No provider claims this URL — never previewable.
-    Unsupported,
-    /// A fetch is in flight (or was just started by this call — see the returned
-    /// flag); nothing to show yet.
-    Pending,
-    /// Recently failed and still within the negative-cache window; nothing to show.
     Failed,
 }
 
-/// A process-wide, URL-keyed preview cache with in-flight dedupe and a short
-/// negative cache. Providers are registered once; the app drives fetches.
-///
-/// Flow the app follows on hover: call [`PreviewCache::lookup`]; if its result's
-/// `to_fetch` is `Some`, spawn that target's fetch on the runtime and call
-/// [`PreviewCache::store`] with the result, then repaint.
-pub struct PreviewCache {
-    providers: Vec<Box<dyn LinkPreviewProvider>>,
-    entries: Mutex<HashMap<String, Entry>>,
+struct Entry {
+    state: EntryState,
+    created: Instant,
+    last_used: Instant,
 }
 
-/// What [`PreviewCache::lookup`] hands back — the current state plus, when a
-/// fetch needs starting, the target to fetch and which provider owns it.
+impl Entry {
+    fn fresh(&self, now: Instant) -> bool {
+        let ttl = match self.state {
+            EntryState::Pending(_) => PENDING_TTL,
+            EntryState::Ready(_) => TTL,
+            EntryState::Failed => NEGATIVE_TTL,
+        };
+        now.duration_since(self.created) < ttl
+    }
+
+    fn lookup(&self) -> Lookup {
+        match &self.state {
+            EntryState::Pending(_) => Lookup::Pending,
+            EntryState::Ready(p) => Lookup::Ready(p.clone()),
+            EntryState::Failed => Lookup::Failed,
+        }
+    }
+}
+
+pub enum Lookup {
+    Ready(Arc<LinkPreview>),
+    Unsupported,
+    Pending,
+    Failed,
+}
+
+#[derive(Default)]
+struct CacheState {
+    entries: HashMap<CacheKey, Entry>,
+    generation: u64,
+}
+
+/// Bounded cache keyed by the provider's canonical target, not tracking URLs.
+pub struct PreviewCache {
+    providers: Vec<Box<dyn LinkPreviewProvider>>,
+    state: Mutex<CacheState>,
+}
+
+/// Identifies one fetch so a late completion cannot overwrite a newer attempt.
+pub struct PreviewRequest {
+    key: CacheKey,
+    generation: u64,
+}
+
 pub struct LookupResult {
     pub state: Lookup,
-    /// `Some` only when the caller should *start* a fetch (state is `Pending`
-    /// and no fetch was already running): the target + the provider index.
-    pub to_fetch: Option<(PreviewTarget, usize)>,
+    pub to_fetch: Option<PreviewRequest>,
 }
 
 impl PreviewCache {
     pub fn new(providers: Vec<Box<dyn LinkPreviewProvider>>) -> Self {
         Self {
             providers,
-            entries: Mutex::new(HashMap::new()),
+            state: Mutex::new(CacheState::default()),
         }
     }
 
-    /// Which provider (if any) claims `url`, and the target to fetch.
-    fn match_provider(&self, url: &str) -> Option<(PreviewTarget, usize)> {
+    fn match_provider(&self, url: &str) -> Option<CacheKey> {
         self.providers
             .iter()
             .enumerate()
-            .find_map(|(i, p)| p.match_url(url).map(|t| (t, i)))
+            .find_map(|(i, p)| p.match_url(url).map(|target| (i, target)))
     }
 
-    /// Looks up `url`'s preview state, marking it in-flight (and telling the
-    /// caller to start the fetch) on a fresh, uncached, supported URL.
     pub fn lookup(&self, url: &str) -> LookupResult {
-        let Some((target, provider_ix)) = self.match_provider(url) else {
+        let Some(key) = self.match_provider(url) else {
             return LookupResult {
                 state: Lookup::Unsupported,
                 to_fetch: None,
             };
         };
-
-        let mut entries = self.entries.lock().unwrap();
-        match entries.get(url) {
-            Some(Entry::Ready(preview, at)) if at.elapsed() < TTL => LookupResult {
-                state: Lookup::Ready(preview.clone()),
+        let now = Instant::now();
+        let mut cache = self.state.lock().unwrap();
+        cache.entries.retain(|_, entry| entry.fresh(now));
+        if let Some(entry) = cache.entries.get_mut(&key) {
+            entry.last_used = now;
+            return LookupResult {
+                state: entry.lookup(),
                 to_fetch: None,
-            },
-            Some(Entry::Failed(at)) if at.elapsed() < NEGATIVE_TTL => LookupResult {
+            };
+        }
+        let pending = cache
+            .entries
+            .values()
+            .filter(|entry| matches!(entry.state, EntryState::Pending(_)))
+            .count();
+        if pending >= MAX_PENDING {
+            return LookupResult {
                 state: Lookup::Failed,
                 to_fetch: None,
-            },
-            Some(Entry::Pending) => LookupResult {
-                state: Lookup::Pending,
-                to_fetch: None,
-            },
-            // Absent, or a stale Ready/Failed → (re)start the fetch.
-            _ => {
-                entries.insert(url.to_string(), Entry::Pending);
-                LookupResult {
-                    state: Lookup::Pending,
-                    to_fetch: Some((target, provider_ix)),
-                }
+            };
+        }
+        if cache.entries.len() >= MAX_ENTRIES {
+            let oldest = cache
+                .entries
+                .iter()
+                .filter(|(_, entry)| !matches!(entry.state, EntryState::Pending(_)))
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone());
+            if let Some(key) = oldest {
+                cache.entries.remove(&key);
             }
+        }
+        cache.generation += 1;
+        let generation = cache.generation;
+        cache.entries.insert(
+            key.clone(),
+            Entry {
+                state: EntryState::Pending(generation),
+                created: now,
+                last_used: now,
+            },
+        );
+        LookupResult {
+            state: Lookup::Pending,
+            to_fetch: Some(PreviewRequest { key, generation }),
         }
     }
 
-    /// Reads `url`'s current state **without** starting or marking a fetch — for
-    /// the render path, which must not mutate cache state. Distinguishes Ready /
-    /// Pending / Failed / Unsupported so the caller can hide a *failed* preview
-    /// rather than show it as perpetually loading.
     pub fn lookup_peek(&self, url: &str) -> Lookup {
-        if !self.is_supported(url) {
+        let Some(key) = self.match_provider(url) else {
             return Lookup::Unsupported;
-        }
-        let entries = self.entries.lock().unwrap();
-        match entries.get(url) {
-            Some(Entry::Ready(preview, at)) if at.elapsed() < TTL => Lookup::Ready(preview.clone()),
-            Some(Entry::Failed(at)) if at.elapsed() < NEGATIVE_TTL => Lookup::Failed,
-            Some(Entry::Pending) => Lookup::Pending,
-            // Absent, or a stale Ready/Failed → a fetch will (re)start on the next
-            // hover `lookup`; until then treat it as pending (loading).
-            _ => Lookup::Pending,
+        };
+        let cache = self.state.lock().unwrap();
+        match cache.entries.get(&key) {
+            Some(entry) if entry.fresh(Instant::now()) => entry.lookup(),
+            _ => Lookup::Failed,
         }
     }
 
-    /// Runs a claimed target's fetch through its provider. The app awaits this on
-    /// its runtime, then calls [`store`](Self::store) with the outcome.
-    pub async fn fetch(&self, target: &PreviewTarget, provider_ix: usize) -> anyhow::Result<LinkPreview> {
-        self.providers[provider_ix].fetch(target).await
+    pub async fn fetch(&self, request: &PreviewRequest) -> anyhow::Result<LinkPreview> {
+        self.providers[request.key.0].fetch(&request.key.1).await
     }
 
-    /// Records a fetch outcome for `url` (resolved or failed).
-    pub fn store(&self, url: &str, result: anyhow::Result<LinkPreview>) {
-        let mut entries = self.entries.lock().unwrap();
-        match result {
-            Ok(preview) => {
-                entries.insert(url.to_string(), Entry::Ready(Arc::new(preview), Instant::now()));
-            }
+    pub fn store(&self, request: PreviewRequest, result: anyhow::Result<LinkPreview>) {
+        let mut cache = self.state.lock().unwrap();
+        let Some(entry) = cache.entries.get_mut(&request.key) else {
+            return;
+        };
+        if !matches!(entry.state, EntryState::Pending(g) if g == request.generation) {
+            return;
+        }
+        entry.state = match result {
+            Ok(preview) => EntryState::Ready(Arc::new(preview)),
             Err(err) => {
-                tracing::debug!("link preview fetch for {url} failed: {err:#}");
-                entries.insert(url.to_string(), Entry::Failed(Instant::now()));
+                tracing::debug!("link preview fetch failed: {err:#}");
+                EntryState::Failed
             }
-        }
+        };
+        entry.created = Instant::now();
+        entry.last_used = entry.created;
     }
 
-    /// Whether any registered provider claims `url` (cheap; no fetch). Lets the
-    /// UI decide *whether to even arm* a hover preview without touching the cache.
     pub fn is_supported(&self, url: &str) -> bool {
         self.match_provider(url).is_some()
     }
@@ -236,7 +289,7 @@ mod tests {
         }
         fn match_url(&self, url: &str) -> Option<PreviewTarget> {
             url.strip_prefix("fake://").map(|id| PreviewTarget {
-                id: id.to_string(),
+                id: id.split('?').next().unwrap().to_string(),
                 kind: PreviewKind::Video,
             })
         }
@@ -259,7 +312,10 @@ mod tests {
     #[test]
     fn unsupported_url_is_unsupported() {
         let c = cache();
-        assert!(matches!(c.lookup("https://x.com").state, Lookup::Unsupported));
+        assert!(matches!(
+            c.lookup("https://x.com").state,
+            Lookup::Unsupported
+        ));
         assert!(!c.is_supported("https://x.com"));
         assert!(c.is_supported("fake://abc"));
     }
@@ -269,20 +325,26 @@ mod tests {
         let c = cache();
         let first = c.lookup("fake://abc");
         assert!(matches!(first.state, Lookup::Pending));
-        assert!(first.to_fetch.is_some(), "first lookup should start a fetch");
+        assert!(
+            first.to_fetch.is_some(),
+            "first lookup should start a fetch"
+        );
 
         // A second lookup while in flight must NOT start another fetch (dedupe).
         let second = c.lookup("fake://abc");
         assert!(matches!(second.state, Lookup::Pending));
-        assert!(second.to_fetch.is_none(), "in-flight fetch must not restart");
+        assert!(
+            second.to_fetch.is_none(),
+            "in-flight fetch must not restart"
+        );
     }
 
     #[test]
     fn store_then_lookup_is_ready() {
         let c = cache();
-        c.lookup("fake://abc"); // mark pending
+        let request = c.lookup("fake://abc").to_fetch.unwrap();
         c.store(
-            "fake://abc",
+            request,
             Ok(LinkPreview {
                 kind: PreviewKind::Video,
                 title: "hello".into(),
@@ -304,10 +366,85 @@ mod tests {
     #[test]
     fn failed_fetch_is_negative_cached() {
         let c = cache();
-        c.lookup("fake://abc");
-        c.store("fake://abc", Err(anyhow::anyhow!("boom")));
+        let request = c.lookup("fake://abc").to_fetch.unwrap();
+        c.store(request, Err(anyhow::anyhow!("boom")));
         let after = c.lookup("fake://abc");
         assert!(matches!(after.state, Lookup::Failed));
-        assert!(after.to_fetch.is_none(), "negative cache must not immediately retry");
+        assert!(
+            after.to_fetch.is_none(),
+            "negative cache must not immediately retry"
+        );
+    }
+    #[test]
+    fn canonical_targets_share_pending_and_ready_entries() {
+        let c = cache();
+        let request = c.lookup("fake://clip?tracking=one").to_fetch.unwrap();
+        assert!(c.lookup("fake://clip?tracking=two").to_fetch.is_none());
+        c.store(request, Err(anyhow::anyhow!("missing")));
+        assert!(matches!(
+            c.lookup("fake://clip?tracking=three").state,
+            Lookup::Failed
+        ));
+        assert_eq!(c.state.lock().unwrap().entries.len(), 1);
+    }
+
+    #[test]
+    fn expires_unvisited_entries_and_rejects_late_completions() {
+        let c = cache();
+        let old = c.lookup("fake://old").to_fetch.unwrap();
+        c.state
+            .lock()
+            .unwrap()
+            .entries
+            .get_mut(&old.key)
+            .unwrap()
+            .created = Instant::now() - PENDING_TTL;
+        let new = c.lookup("fake://old").to_fetch.unwrap();
+        c.store(old, Err(anyhow::anyhow!("late completion")));
+        assert!(matches!(c.lookup_peek("fake://old"), Lookup::Pending));
+        c.store(new, Err(anyhow::anyhow!("new completion")));
+        c.state
+            .lock()
+            .unwrap()
+            .entries
+            .values_mut()
+            .next()
+            .unwrap()
+            .created = Instant::now() - NEGATIVE_TTL;
+        c.lookup("fake://another");
+        assert_eq!(c.state.lock().unwrap().entries.len(), 1);
+    }
+
+    #[test]
+    fn bounds_completed_entries_and_pending_work() {
+        let c = cache();
+        for i in 0..MAX_ENTRIES + 20 {
+            let request = c.lookup(&format!("fake://{i}")).to_fetch.unwrap();
+            c.store(request, Err(anyhow::anyhow!("missing")));
+        }
+        assert_eq!(c.state.lock().unwrap().entries.len(), MAX_ENTRIES);
+        for i in 0..MAX_PENDING {
+            assert!(c.lookup(&format!("fake://pending{i}")).to_fetch.is_some());
+        }
+        assert!(c.lookup("fake://overflow").to_fetch.is_none());
+        assert_eq!(c.state.lock().unwrap().entries.len(), MAX_ENTRIES);
+    }
+
+    #[test]
+    fn capacity_eviction_keeps_recently_used_entries() {
+        let c = cache();
+        for i in 0..MAX_ENTRIES {
+            let request = c.lookup(&format!("fake://{i}")).to_fetch.unwrap();
+            c.store(request, Err(anyhow::anyhow!("missing")));
+        }
+        c.lookup("fake://0");
+        c.lookup("fake://new");
+        let cache = c.state.lock().unwrap();
+        assert!(cache
+            .entries
+            .contains_key(&c.match_provider("fake://0").unwrap()));
+        assert!(!cache
+            .entries
+            .contains_key(&c.match_provider("fake://1").unwrap()));
     }
 }

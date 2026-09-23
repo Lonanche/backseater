@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use crate::api::{InnertubeContext, PLAYER_URL};
-use crate::resolve::extract_video_id;
+use crate::resolve::is_video_id;
 
 /// The YouTube video preview provider. Register one in the app's provider list.
 #[derive(Default)]
@@ -55,14 +55,22 @@ impl LinkPreviewProvider for YoutubePreviewProvider {
     }
 
     fn match_url(&self, url: &str) -> Option<PreviewTarget> {
-        // Only claim URLs that look like YouTube video links — extract_video_id
-        // returns None for channel/handle sources, and we don't want to claim a
-        // bare 11-char word that isn't a URL, so require a youtube host marker.
-        let lower = url.to_ascii_lowercase();
-        if !lower.contains("youtube.com/") && !lower.contains("youtu.be/") {
-            return None;
-        }
-        extract_video_id(url).map(|id| PreviewTarget {
+        let url = bks_preview::web_url(url)?;
+        let segments: Vec<_> = url.path().trim_matches('/').split('/').collect();
+        let id = match (url.host_str()?, segments.as_slice()) {
+            ("youtu.be" | "www.youtu.be", [id]) => (*id).to_string(),
+            ("youtube.com" | "www.youtube.com" | "m.youtube.com", ["watch"]) => url
+                .query_pairs()
+                .find(|(key, _)| key == "v")?
+                .1
+                .into_owned(),
+            (
+                "youtube.com" | "www.youtube.com" | "m.youtube.com",
+                ["live" | "shorts" | "embed", id],
+            ) => (*id).to_string(),
+            _ => return None,
+        };
+        is_video_id(&id).then_some(PreviewTarget {
             id,
             kind: PreviewKind::Video,
         })
@@ -130,6 +138,23 @@ mod tests {
     }
 
     #[test]
+    fn rejects_spoofed_hosts_and_non_web_links() {
+        let provider = YoutubePreviewProvider::new();
+        for url in [
+            "https://example.org/youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://youtube.com.evil.example/watch?v=dQw4w9WgXcQ",
+            "https://youtube.com@evil.example/watch?v=dQw4w9WgXcQ",
+            "ftp://youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://youtube.com/watch?notv=dQw4w9WgXcQ",
+        ] {
+            assert!(
+                provider.match_url(url).is_none(),
+                "unexpected preview for {url}"
+            );
+        }
+    }
+
+    #[test]
     fn matches_watch_and_short_urls() {
         let p = provider();
         assert_eq!(
@@ -138,7 +163,8 @@ mod tests {
             Some("dQw4w9WgXcQ".to_string())
         );
         assert_eq!(
-            p.match_url("https://youtu.be/dQw4w9WgXcQ?si=x").map(|t| t.id),
+            p.match_url("https://youtu.be/dQw4w9WgXcQ?si=x")
+                .map(|t| t.id),
             Some("dQw4w9WgXcQ".to_string())
         );
         assert_eq!(
@@ -154,7 +180,9 @@ mod tests {
         assert!(p.match_url("dQw4w9WgXcQ").is_none());
         assert!(p.match_url("https://twitch.tv/somechannel").is_none());
         // A channel/handle page has no video id.
-        assert!(p.match_url("https://www.youtube.com/@somechannel").is_none());
+        assert!(p
+            .match_url("https://www.youtube.com/@somechannel")
+            .is_none());
     }
 
     #[test]

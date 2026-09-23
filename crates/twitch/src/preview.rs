@@ -96,31 +96,19 @@ impl LinkPreviewProvider for TwitchClipPreviewProvider {
 /// and `(www|m).twitch.tv/clip/<slug>`. A slug is the first path segment after the
 /// marker, stripped of any query string.
 fn clip_slug(url: &str) -> Option<String> {
-    let lower = url.to_ascii_lowercase();
-    // `clips.twitch.tv/<slug>`
-    if let Some(rest) = split_after(&lower, url, "clips.twitch.tv/") {
-        return first_segment(rest);
-    }
-    // `.../clip/<slug>` (channel clip page or the m. short form).
-    if let Some(rest) = split_after(&lower, url, "/clip/") {
-        // Only on a twitch.tv host — avoid claiming some unrelated `/clip/` path.
-        if lower.contains("twitch.tv/") {
-            return first_segment(rest);
-        }
-    }
-    None
-}
-
-/// Locates `marker` (case-insensitively via `lower`) in `url` and returns the
-/// original-cased remainder after it.
-fn split_after<'a>(lower: &str, url: &'a str, marker: &str) -> Option<&'a str> {
-    lower.find(marker).map(|i| &url[i + marker.len()..])
-}
-
-/// The first path segment of `rest` (up to `/`, `?`, or `#`), if non-empty.
-fn first_segment(rest: &str) -> Option<String> {
-    let seg = rest.split(['/', '?', '#']).next()?;
-    (!seg.is_empty()).then(|| seg.to_string())
+    let url = bks_preview::web_url(url)?;
+    let segments: Vec<_> = url.path().trim_matches('/').split('/').collect();
+    let slug = match (url.host_str()?, segments.as_slice()) {
+        ("clips.twitch.tv", [slug]) => *slug,
+        ("twitch.tv" | "www.twitch.tv" | "m.twitch.tv", ["clip", slug])
+        | ("twitch.tv" | "www.twitch.tv" | "m.twitch.tv", [_, "clip", slug]) => *slug,
+        _ => return None,
+    };
+    (!slug.is_empty()
+        && slug
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)))
+    .then(|| slug.to_string())
 }
 
 #[derive(Deserialize)]
@@ -160,6 +148,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_spoofed_hosts_and_non_web_links() {
+        let provider = TwitchClipPreviewProvider::new();
+        for url in [
+            "https://example.org/clips.twitch.tv/RealClipSlug",
+            "https://clips.twitch.tv.evil.example/RealClipSlug",
+            "https://evil.example/?next=https://twitch.tv/user/clip/RealClipSlug",
+            "https://clips.twitch.tv@evil.example/RealClipSlug",
+            "ftp://clips.twitch.tv/RealClipSlug",
+            "https://clips.twitch.tv:8443/RealClipSlug",
+        ] {
+            assert!(
+                provider.match_url(url).is_none(),
+                "unexpected preview for {url}"
+            );
+        }
+    }
+
+    #[test]
     fn matches_clip_url_forms() {
         let p = provider();
         assert_eq!(
@@ -188,7 +194,9 @@ mod tests {
         // A plain channel page is not a clip.
         assert!(p.match_url("https://www.twitch.tv/somestreamer").is_none());
         // A VOD is not a clip.
-        assert!(p.match_url("https://www.twitch.tv/videos/123456789").is_none());
+        assert!(p
+            .match_url("https://www.twitch.tv/videos/123456789")
+            .is_none());
         // A `/clip/` path on some other host must not be claimed.
         assert!(p.match_url("https://example.com/clip/whatever").is_none());
         // A YouTube link is the other provider's job.

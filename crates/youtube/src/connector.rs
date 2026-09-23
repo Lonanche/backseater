@@ -21,7 +21,6 @@ use bks_core::Platform;
 use bks_platform::{ChannelMeta, ChatEvent, ChatSink, ChatSource, ChatStream};
 use chrono::Utc;
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
 
 use crate::api::{InnertubeContext, GET_LIVE_CHAT_URL, NEXT_URL, PLAYER_URL, UPDATED_METADATA_URL};
 use crate::builder::{item_to_event, parse_runs_text};
@@ -50,11 +49,17 @@ impl YouTubeSource {
 impl ChatSource for YouTubeSource {
     async fn join(&self, channel: &str) -> anyhow::Result<ChatStream> {
         let channel = channel.trim().to_string();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = bks_platform::chat_channel();
 
         tokio::spawn(async move {
-            if let Err(err) = run(channel.clone(), tx.clone()).await {
-                let _ = tx.send(ChatEvent::Error(format!("youtube failed: {err:#}")));
+            let result = tokio::select! {
+                _ = tx.closed() => return,
+                result = run(channel.clone(), tx.clone()) => result,
+            };
+            if let Err(err) = result {
+                let _ = tx
+                    .send(ChatEvent::Error(format!("youtube failed: {err:#}")))
+                    .await;
             }
         });
 
@@ -84,7 +89,7 @@ async fn run(source: String, tx: ChatSink) -> anyhow::Result<()> {
                 if !offline_sent {
                     offline_sent = true;
                     let last = crate::streams::fetch_last_stream(&source).await;
-                    let _ = tx.send(offline_live(last));
+                    let _ = tx.send(offline_live(last)).await;
                 }
                 if sleep_or_stop(&tx, OFFLINE_RETRY).await {
                     return Ok(());
@@ -98,7 +103,7 @@ async fn run(source: String, tx: ChatSink) -> anyhow::Result<()> {
             Ok(Outcome::StreamEnded) => {
                 offline_sent = true;
                 let last = crate::streams::fetch_last_stream(&source).await;
-                let _ = tx.send(offline_live(last));
+                let _ = tx.send(offline_live(last)).await;
                 if sleep_or_stop(&tx, OFFLINE_RETRY).await {
                     return Ok(());
                 }
@@ -155,21 +160,24 @@ async fn watch_live_chat(source: &str, video_id: &str, tx: &ChatSink) -> anyhow:
             id: owner_id,
             name: source.to_string(),
         }))
+        .await
         .is_err()
     {
         return Ok(Outcome::Stopped);
     }
-    let _ = tx.send(ChatEvent::Live {
-        platform: Platform::YouTube,
-        live: true,
-        title,
-        game: String::new(),
-        started_at,
-        last_stream: None,
-        // The stream's own watch link — a YouTube live is a specific video, so
-        // the tab tooltip can open it directly instead of the channel page.
-        link: Some(format!("https://www.youtube.com/watch?v={video_id}")),
-    });
+    let _ = tx
+        .send(ChatEvent::Live {
+            platform: Platform::YouTube,
+            live: true,
+            title,
+            game: String::new(),
+            started_at,
+            last_stream: None,
+            // The stream's own watch link — a YouTube live is a specific video, so
+            // the tab tooltip can open it directly instead of the channel page.
+            link: Some(format!("https://www.youtube.com/watch?v={video_id}")),
+        })
+        .await;
 
     let mut seen: HashSet<String> = HashSet::new();
     // Skip the first page's backlog so we don't dump a wall of old messages on
@@ -189,10 +197,12 @@ async fn watch_live_chat(source: &str, video_id: &str, tx: &ChatSink) -> anyhow:
                 tracing::debug!("youtube viewer count for {source}: {fetched:?}");
                 if viewers != fetched {
                     viewers = fetched;
-                    let _ = tx.send(ChatEvent::Viewers {
-                        platform: Platform::YouTube,
-                        count: viewers,
-                    });
+                    let _ = tx
+                        .send(ChatEvent::Viewers {
+                            platform: Platform::YouTube,
+                            count: viewers,
+                        })
+                        .await;
                 }
             }
         }
@@ -217,7 +227,7 @@ async fn watch_live_chat(source: &str, video_id: &str, tx: &ChatSink) -> anyhow:
                     continue;
                 }
                 if let Some(event) = item_to_event(source, item) {
-                    if tx.send(event).is_err() {
+                    if tx.send(event).await.is_err() {
                         return Ok(Outcome::Stopped);
                     }
                 }
@@ -365,7 +375,11 @@ async fn player_started_at(
 /// response carries no viewership (clear the shown count).
 async fn fetch_viewer_count(ctx: &InnertubeContext, video_id: &str) -> Option<Option<u64>> {
     let resp = ctx
-        .post(UPDATED_METADATA_URL, video_id, json!({ "videoId": video_id }))
+        .post(
+            UPDATED_METADATA_URL,
+            video_id,
+            json!({ "videoId": video_id }),
+        )
         .await
         .ok()?;
     Some(viewership_count(&resp))

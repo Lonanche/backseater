@@ -89,36 +89,25 @@ impl LinkPreviewProvider for KickClipPreviewProvider {
 /// `kick.com/<channel>/clips/<id>` and `kick.com/<channel>?clip=<id>` (the two
 /// forms the site produces). A Kick clip id looks like `clip_XXXXXXXX`.
 fn clip_id(url: &str) -> Option<String> {
-    let lower = url.to_ascii_lowercase();
-    if !lower.contains("kick.com/") {
+    let url = bks_preview::web_url(url)?;
+    if !matches!(url.host_str()?, "kick.com" | "www.kick.com") {
         return None;
     }
-    // `.../clips/<id>` path form.
-    if let Some(rest) = split_after(&lower, url, "/clips/") {
-        if let Some(id) = first_segment(rest) {
-            return Some(id);
-        }
-    }
-    // `?clip=<id>` / `&clip=<id>` query form.
-    if let Some(rest) = split_after(&lower, url, "clip=") {
-        if let Some(id) = first_segment(rest) {
-            return Some(id);
-        }
-    }
-    None
-}
-
-/// Locates `marker` (case-insensitively via `lower`) in `url` and returns the
-/// original-cased remainder after it.
-fn split_after<'a>(lower: &str, url: &'a str, marker: &str) -> Option<&'a str> {
-    lower.find(marker).map(|i| &url[i + marker.len()..])
-}
-
-/// The first path/query segment of `rest` (up to `/`, `?`, `&`, or `#`), if
-/// non-empty.
-fn first_segment(rest: &str) -> Option<String> {
-    let seg = rest.split(['/', '?', '&', '#']).next()?;
-    (!seg.is_empty()).then(|| seg.to_string())
+    let segments: Vec<_> = url.path().trim_matches('/').split('/').collect();
+    let id = match segments.as_slice() {
+        [_, "clips", id] | ["clips", id] => (*id).to_string(),
+        [_] => url
+            .query_pairs()
+            .find(|(key, _)| key == "clip")?
+            .1
+            .into_owned(),
+        _ => return None,
+    };
+    (!id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)))
+    .then_some(id)
 }
 
 // ---- Raw Kick clip JSON (tolerant; only the fields we render) ---------------
@@ -211,6 +200,23 @@ mod tests {
     }
 
     #[test]
+    fn rejects_spoofed_hosts_and_non_web_links() {
+        let provider = KickClipPreviewProvider::new();
+        for url in [
+            "https://example.org/kick.com/user/clips/clip_123",
+            "https://kick.com.evil.example/user/clips/clip_123",
+            "https://kick.com@evil.example/user?clip=clip_123",
+            "ftp://kick.com/user?clip=clip_123",
+            "https://kick.com/user?notclip=clip_123",
+        ] {
+            assert!(
+                provider.match_url(url).is_none(),
+                "unexpected preview for {url}"
+            );
+        }
+    }
+
+    #[test]
     fn matches_clip_url_forms() {
         let p = provider();
         assert_eq!(
@@ -252,7 +258,10 @@ mod tests {
         assert_eq!(clip.title.as_deref(), Some("huge play"));
         assert_eq!(clip.view_count(), Some(12500));
         assert_eq!(clip.channel.as_ref().unwrap().best_name(), "SomeStreamer");
-        assert_eq!(clip.thumbnail().as_deref(), Some("https://clips.kick.com/x.jpg"));
+        assert_eq!(
+            clip.thumbnail().as_deref(),
+            Some("https://clips.kick.com/x.jpg")
+        );
     }
 
     #[test]
@@ -284,7 +293,10 @@ mod tests {
         let clip = body.clip.unwrap();
         // `view_count` present, `views` absent → still resolves.
         assert_eq!(clip.view_count(), Some(900));
-        assert_eq!(clip.thumbnail().as_deref(), Some("https://clips.kick.com/y.jpg"));
+        assert_eq!(
+            clip.thumbnail().as_deref(),
+            Some("https://clips.kick.com/y.jpg")
+        );
         // Falls back to the slug when there's no username.
         assert_eq!(clip.channel.as_ref().unwrap().best_name(), "onlyslug");
     }

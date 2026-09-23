@@ -25,8 +25,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use bks_core::{Message, Platform};
-use chrono::{DateTime, Utc};
 use bks_platform::{ChatEvent, SuspiciousStatus};
+use chrono::{DateTime, Utc};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, EventEmitter, Global, Task, WeakEntity};
 
@@ -42,6 +42,25 @@ use crate::{MAX_EVENTS, MAX_ROWS};
 /// The two arrive over separate sockets a beat apart; a couple seconds covers
 /// the skew without holding an unpaired message visibly long.
 const REWARD_PAIR_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+const MAX_EVENTS_PER_UPDATE: usize = 64;
+
+fn drain_batch(
+    first: ChatEvent,
+    rx: &smol::channel::Receiver<ChatEvent>,
+    mut push: impl FnMut(ChatEvent),
+) {
+    let started = std::time::Instant::now();
+    push(first);
+    for _ in 1..MAX_EVENTS_PER_UPDATE {
+        if started.elapsed() >= std::time::Duration::from_millis(4) {
+            break;
+        }
+        let Ok(event) = rx.try_recv() else {
+            break;
+        };
+        push(event);
+    }
+}
 
 /// A public channel event (sub/gift/raid/…) held in the model's retained
 /// [`events`](ChannelModel::events) buffer, which — unlike the chat ring buffer —
@@ -393,7 +412,11 @@ impl ChannelModel {
     }
 
     /// The cosmetics resolved for a chatter, if any (applied at render time).
-    pub fn cosmetics_for(&self, platform: Platform, user_id: &str) -> Option<&bks_emotes::Cosmetics> {
+    pub fn cosmetics_for(
+        &self,
+        platform: Platform,
+        user_id: &str,
+    ) -> Option<&bks_emotes::Cosmetics> {
         // Per visible row per frame; the nested map borrows `user_id` as `&str`
         // so this allocates nothing even once cosmetics are resolved.
         if self.cosmetics.is_empty() || user_id.is_empty() {
@@ -1013,10 +1036,7 @@ impl ChannelModel {
                 // entry the offline `Live` just cleared.
                 let changed = match count {
                     Some(n) => {
-                        let live = self
-                            .live_status
-                            .get(&platform)
-                            .is_none_or(|s| s.live);
+                        let live = self.live_status.get(&platform).is_none_or(|s| s.live);
                         live && self.viewer_counts.insert(platform, n) != Some(n)
                     }
                     None => self.viewer_counts.remove(&platform).is_some(),
@@ -1148,16 +1168,14 @@ fn build_model(
         let drain = cx.spawn(async move |weak: WeakEntity<ChannelModel>, cx| {
             while let Ok(event) = rx.recv().await {
                 let ok = weak.update(cx, |model, cx| {
-                    model.push(event, cx);
-                    // Coalesce a burst: apply every queued event before yielding, so
-                    // a busy channel repaints once per burst (via the notifies above).
-                    while let Ok(event) = rx.try_recv() {
-                        model.push(event, cx);
-                    }
+                    drain_batch(event, &rx, |event| model.push(event, cx));
                 });
                 if ok.is_err() {
                     break; // model dropped (last view closed)
                 }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(1))
+                    .await;
             }
         });
         ChannelModel {
@@ -1239,6 +1257,25 @@ mod tests {
     use super::*;
     use bks_platform::EventDetails;
 
+    #[test]
+    fn bursts_are_processed_in_bounded_ordered_batches() {
+        let (tx, rx) = smol::channel::bounded(MAX_EVENTS_PER_UPDATE * 3);
+        for i in 0..MAX_EVENTS_PER_UPDATE * 3 {
+            tx.try_send(ChatEvent::Notice(i.to_string())).unwrap();
+        }
+        let mut received = Vec::new();
+        while let Ok(first) = rx.try_recv() {
+            let before = received.len();
+            drain_batch(first, &rx, |event| {
+                if let ChatEvent::Notice(text) = event {
+                    received.push(text.parse::<usize>().unwrap());
+                }
+            });
+            assert!(received.len() - before <= MAX_EVENTS_PER_UPDATE);
+        }
+        assert_eq!(received, (0..MAX_EVENTS_PER_UPDATE * 3).collect::<Vec<_>>());
+    }
+
     fn summary(gifter: &str, count: u32) -> EventDetails {
         EventDetails {
             gift_count: Some(count),
@@ -1291,12 +1328,7 @@ mod tests {
         );
         // Events without gift data never touch the map.
         assert_eq!(
-            gift_group(
-                &mut pending,
-                &EventDetails::default(),
-                Platform::Twitch,
-                4
-            ),
+            gift_group(&mut pending, &EventDetails::default(), Platform::Twitch, 4),
             None
         );
     }

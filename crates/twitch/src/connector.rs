@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use bks_core::{plural, Author, Badge, Color, Message, MessageElement, Platform, ReplyParent};
 use bks_platform::{ChannelMeta, ChatEvent, ChatSource, ChatStream, EventDetails, EventKind};
 use std::sync::Mutex;
-use tokio::sync::mpsc;
 
 use crate::builder::build_privmsg_elements;
 use crate::irc_manager::{self, Registration};
@@ -65,7 +64,7 @@ impl TwitchSource {
 impl ChatSource for TwitchSource {
     async fn join(&self, channel: &str) -> anyhow::Result<ChatStream> {
         let channel = normalize_channel(channel);
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = bks_platform::chat_channel();
         let reg = irc_manager::register(self.auth.clone(), channel, tx);
         *self.registration.lock().unwrap() = Some(reg);
         Ok(rx)
@@ -240,10 +239,7 @@ const ANON_GIFTER: &str = "ananonymousgifter";
 /// mass gift's individual events to their announcement. Events without
 /// structured data (announcements, rituals, …) get only the actor — the panel
 /// falls back to the full `system-msg` text.
-fn usernotice_details(
-    un: &tmi::msg::UserNotice<'_>,
-    milestone_value: Option<u64>,
-) -> EventDetails {
+fn usernotice_details(un: &tmi::msg::UserNotice<'_>, milestone_value: Option<u64>) -> EventDetails {
     use tmi::msg::user_notice::Event;
     let actor = un.sender().map(|s| s.name().to_string());
     if un.event_id() == "viewermilestone" {
@@ -377,7 +373,6 @@ fn tier_suffix(plan: &str) -> &'static str {
     }
 }
 
-
 /// Classifies a USERNOTICE into an [`EventKind`] so the UI can filter events.
 /// tmi's `Event` enum splits the common cases; the watch-streak milestone has no
 /// tmi variant (it parses as `Unknown`), so we key it off the raw `event_id`
@@ -497,7 +492,6 @@ impl SelfState {
             .any(|b| b.id.split('/').next().unwrap_or("") == "broadcaster")
     }
 }
-
 
 /// Converts one tmi badge into our `set-id/version` keyed [`Badge`] (url filled
 /// in later). Kept separate so the id format can be unit-tested against the
@@ -844,7 +838,10 @@ mod tests {
                    :tmi.twitch.tv USERNOTICE #posty :hi";
         let details = usernotice_details_raw(raw);
         assert_eq!(details.actor.as_deref(), Some("viewer67"));
-        assert_eq!(details.compact.as_deref(), Some("watch streak · 80 streams"));
+        assert_eq!(
+            details.compact.as_deref(),
+            Some("watch streak · 80 streams")
+        );
     }
 
     #[test]
@@ -859,7 +856,10 @@ mod tests {
                    :tmi.twitch.tv USERNOTICE #qaixx :peepoEvil";
         let details = usernotice_details_raw(raw);
         assert_eq!(details.actor.as_deref(), Some("Oilrats"));
-        assert_eq!(details.compact.as_deref(), Some("resubbed · 12 mo · Tier 1"));
+        assert_eq!(
+            details.compact.as_deref(),
+            Some("resubbed · 12 mo · Tier 1")
+        );
         assert_eq!(details.gift_count, None);
         assert_eq!(details.gifter, None);
     }
@@ -903,5 +903,4 @@ mod tests {
         assert_eq!(details.recipient.as_deref(), Some("Lucky"));
         assert_eq!(details.gift_count, None);
     }
-
 }

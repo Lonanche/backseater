@@ -14,7 +14,6 @@ use bks_platform::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::api::{self, parse_kick_time, PinnedInfo, SubscriberBadge};
@@ -41,7 +40,7 @@ impl KickSource {
 impl ChatSource for KickSource {
     async fn join(&self, channel: &str) -> anyhow::Result<ChatStream> {
         let channel = api::slugify(channel);
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = bks_platform::chat_channel();
 
         // A failed connection (network drop, Pusher hiccup) is retried with
         // capped exponential backoff instead of leaving the tab dead. The task
@@ -49,48 +48,57 @@ impl ChatSource for KickSource {
         // full history backlog; reconnects gap-fill just the disconnect window
         // (bounded by `last_seen`, parsed as live — see `run_client`).
         tokio::spawn(async move {
-            let mut attempt: u32 = 0;
-            let mut first_attempt = true;
-            // When the last chat message arrived — the `after` bound for a
-            // reconnect's gap-fill (everything since was missed).
-            let mut last_seen = chrono::Utc::now();
-            loop {
-                let started = std::time::Instant::now();
-                let result =
-                    run_client(channel.clone(), tx.clone(), first_attempt, &mut last_seen).await;
-                first_attempt = false;
-                if tx.is_closed() {
-                    break; // tab gone — no retry
-                }
-                // `Ok` here means the server closed the socket cleanly while the
-                // tab is still alive (Pusher does drop idle connections):
-                // reconnect too, just without an error row.
-                let err = result.err();
-                // A connection that held for a while is a fresh outage, not a
-                // continuation of the previous backoff.
-                if started.elapsed() > std::time::Duration::from_secs(60) {
-                    attempt = 0;
-                }
-                let delay = bks_core::reconnect_delay(attempt);
-                match (&err, attempt) {
-                    // First failure of an outage is user-visible; the retries
-                    // behind it are just logged so a flapping network doesn't
-                    // fill the chat with error rows.
-                    (Some(err), 0) => {
-                        let _ = tx.send(ChatEvent::Error(format!(
-                            "kick error: {err:#} — reconnecting in {}s",
-                            delay.as_secs()
-                        )));
+            let connection = async {
+                let mut attempt: u32 = 0;
+                let mut first_attempt = true;
+                // When the last chat message arrived — the `after` bound for a
+                // reconnect's gap-fill (everything since was missed).
+                let mut last_seen = chrono::Utc::now();
+                loop {
+                    let started = std::time::Instant::now();
+                    let result =
+                        run_client(channel.clone(), tx.clone(), first_attempt, &mut last_seen)
+                            .await;
+                    first_attempt = false;
+                    if tx.is_closed() {
+                        break; // tab gone — no retry
                     }
-                    (Some(err), _) => {
-                        tracing::warn!("kick reconnect attempt {attempt} failed: {err:#}")
+                    // `Ok` here means the server closed the socket cleanly while the
+                    // tab is still alive (Pusher does drop idle connections):
+                    // reconnect too, just without an error row.
+                    let err = result.err();
+                    // A connection that held for a while is a fresh outage, not a
+                    // continuation of the previous backoff.
+                    if started.elapsed() > std::time::Duration::from_secs(60) {
+                        attempt = 0;
                     }
-                    (None, _) => {
-                        tracing::warn!("kick connection to {channel} closed; reconnecting")
+                    let delay = bks_core::reconnect_delay(attempt);
+                    match (&err, attempt) {
+                        // First failure of an outage is user-visible; the retries
+                        // behind it are just logged so a flapping network doesn't
+                        // fill the chat with error rows.
+                        (Some(err), 0) => {
+                            let _ = tx
+                                .send(ChatEvent::Error(format!(
+                                    "kick error: {err:#} — reconnecting in {}s",
+                                    delay.as_secs()
+                                )))
+                                .await;
+                        }
+                        (Some(err), _) => {
+                            tracing::warn!("kick reconnect attempt {attempt} failed: {err:#}")
+                        }
+                        (None, _) => {
+                            tracing::warn!("kick connection to {channel} closed; reconnecting")
+                        }
                     }
+                    attempt += 1;
+                    tokio::time::sleep(delay).await;
                 }
-                attempt += 1;
-                tokio::time::sleep(delay).await;
+            };
+            tokio::select! {
+                _ = tx.closed() => {},
+                _ = connection => {},
             }
         });
 
@@ -386,12 +394,16 @@ async fn run_client(
             .with_context(|| format!("subscribing to {channel_name}"))?;
     }
 
-    let _ = tx.send(ChatEvent::System(format!("connected to kick #{channel}")));
-    let _ = tx.send(ChatEvent::Channel(ChannelMeta {
-        platform: Platform::Kick,
-        id: info.user_id.to_string(),
-        name: channel.clone(),
-    }));
+    let _ = tx
+        .send(ChatEvent::System(format!("connected to kick #{channel}")))
+        .await;
+    let _ = tx
+        .send(ChatEvent::Channel(ChannelMeta {
+            platform: Platform::Kick,
+            id: info.user_id.to_string(),
+            name: channel.clone(),
+        }))
+        .await;
 
     // Seed the initial live state from the join lookup: when live, so opening a tab
     // on an already-live stream shows it immediately (the live poll's first check
@@ -410,15 +422,17 @@ async fn run_client(
                 title: ls.title.clone(),
                 game: ls.category.clone(),
             });
-        let _ = tx.send(ChatEvent::Live {
-            platform: Platform::Kick,
-            live: info.is_live,
-            title: info.livestream_title.clone(),
-            game: info.livestream_category.clone(),
-            started_at: info.livestream_started_at,
-            last_stream,
-            link: None,
-        });
+        let _ = tx
+            .send(ChatEvent::Live {
+                platform: Platform::Kick,
+                live: info.is_live,
+                title: info.livestream_title.clone(),
+                game: info.livestream_category.clone(),
+                started_at: info.livestream_started_at,
+                last_stream,
+                link: None,
+            })
+            .await;
     }
 
     // The pinned banner is seeded from the history payload's `pinned_message`
@@ -450,7 +464,7 @@ async fn run_client(
             match events {
                 Ok(events) => {
                     for event in events {
-                        if tx.send(event).is_err() {
+                        if tx.send(event).await.is_err() {
                             return; // UI dropped the stream.
                         }
                     }
@@ -529,10 +543,12 @@ async fn run_client(
             "pusher_internal:subscription_succeeded" => {}
             // A failed subscribe — surface it so a wrong channel id is obvious.
             "pusher:error" | "pusher:subscription_error" => {
-                let _ = tx.send(ChatEvent::Error(format!(
-                    "kick: subscription error: {}",
-                    envelope.data
-                )));
+                let _ = tx
+                    .send(ChatEvent::Error(format!(
+                        "kick: subscription error: {}",
+                        envelope.data
+                    )))
+                    .await;
             }
             "ChatMessageEvent" => {
                 let Ok(chat) = serde_json::from_str::<KickChatMessage>(&envelope.data) else {
@@ -540,7 +556,11 @@ async fn run_client(
                 };
                 let message = build_message(&channel, &info.subscriber_badges, chat);
                 *last_seen = chrono::Utc::now();
-                if tx.send(ChatEvent::Message(Box::new(message))).is_err() {
+                if tx
+                    .send(ChatEvent::Message(Box::new(message)))
+                    .await
+                    .is_err()
+                {
                     break; // UI dropped the stream.
                 }
             }
@@ -548,32 +568,36 @@ async fn run_client(
             // notice naming the moderator + duration when known.
             "UserBannedEvent" => {
                 if let Ok(ev) = serde_json::from_str::<UserBannedEvent>(&envelope.data) {
-                    let _ = tx.send(ChatEvent::ClearChat {
-                        platform: Platform::Kick,
-                        user: Some(ev.user.username.clone()),
-                        historical: false,
-                        timestamp: None,
-                    });
-                    let _ = tx.send(ChatEvent::Notice(ban_notice(&ev)));
+                    let _ = tx
+                        .send(ChatEvent::ClearChat {
+                            platform: Platform::Kick,
+                            user: Some(ev.user.username.clone()),
+                            historical: false,
+                            timestamp: None,
+                        })
+                        .await;
+                    let _ = tx.send(ChatEvent::Notice(ban_notice(&ev))).await;
                 }
             }
             // Unban/untimeout: a notice naming who was unbanned by whom. Past
             // messages stay struck (we don't un-fade them).
             "UserUnbannedEvent" => {
                 if let Ok(ev) = serde_json::from_str::<UserUnbannedEvent>(&envelope.data) {
-                    let _ = tx.send(ChatEvent::Notice(unban_notice(&ev)));
+                    let _ = tx.send(ChatEvent::Notice(unban_notice(&ev))).await;
                 }
             }
             // A single deleted message: strike + fade that row, and note when AI
             // moderation removed it (with the rules it flagged, if any).
             "MessageDeletedEvent" => {
                 if let Ok(ev) = serde_json::from_str::<MessageDeletedEvent>(&envelope.data) {
-                    let _ = tx.send(ChatEvent::DeleteMessage {
-                        platform: Platform::Kick,
-                        message_id: ev.message.id.clone(),
-                    });
+                    let _ = tx
+                        .send(ChatEvent::DeleteMessage {
+                            platform: Platform::Kick,
+                            message_id: ev.message.id.clone(),
+                        })
+                        .await;
                     if let Some(notice) = deletion_notice(&ev) {
-                        let _ = tx.send(ChatEvent::Notice(notice));
+                        let _ = tx.send(ChatEvent::Notice(notice)).await;
                     }
                 }
             }
@@ -588,58 +612,66 @@ async fn run_client(
                         .map(|pending| {
                             Box::new(sub_message(&channel, &info.subscriber_badges, pending))
                         });
-                    let _ = tx.send(ChatEvent::Event {
-                        platform: Platform::Kick,
-                        kind: EventKind::Sub,
-                        text: sub_event_text(&ev),
-                        timestamp: chrono::Utc::now(),
-                        message,
-                        details: sub_event_details(&ev),
-                    });
+                    let _ = tx
+                        .send(ChatEvent::Event {
+                            platform: Platform::Kick,
+                            kind: EventKind::Sub,
+                            text: sub_event_text(&ev),
+                            timestamp: chrono::Utc::now(),
+                            message,
+                            details: sub_event_details(&ev),
+                        })
+                        .await;
                 }
             }
             "GiftedSubscriptionsEvent" => {
                 if let Ok(ev) = serde_json::from_str::<GiftedSubscriptionsEvent>(&envelope.data) {
                     if let Some(text) = gift_event_text(&ev) {
-                        let _ = tx.send(ChatEvent::Event {
-                            platform: Platform::Kick,
-                            kind: EventKind::Gift,
-                            text,
-                            timestamp: chrono::Utc::now(),
-                            message: None,
-                            details: gift_event_details(&ev),
-                        });
+                        let _ = tx
+                            .send(ChatEvent::Event {
+                                platform: Platform::Kick,
+                                kind: EventKind::Gift,
+                                text,
+                                timestamp: chrono::Utc::now(),
+                                message: None,
+                                details: gift_event_details(&ev),
+                            })
+                            .await;
                     }
                 }
             }
             // Host: another channel hosting this one (Kick's equivalent of a raid).
             "StreamHostEvent" => {
                 if let Ok(ev) = serde_json::from_str::<StreamHostEvent>(&envelope.data) {
-                    let _ = tx.send(ChatEvent::Event {
-                        platform: Platform::Kick,
-                        kind: EventKind::Raid,
-                        text: host_event_text(&ev),
-                        timestamp: chrono::Utc::now(),
-                        message: None,
-                        details: EventDetails {
-                            actor: Some(ev.host_username.clone()),
-                            compact: Some(format!("hosted · {} viewers", ev.number_viewers)),
-                            ..Default::default()
-                        },
-                    });
+                    let _ = tx
+                        .send(ChatEvent::Event {
+                            platform: Platform::Kick,
+                            kind: EventKind::Raid,
+                            text: host_event_text(&ev),
+                            timestamp: chrono::Utc::now(),
+                            message: None,
+                            details: EventDetails {
+                                actor: Some(ev.host_username.clone()),
+                                compact: Some(format!("hosted · {} viewers", ev.number_viewers)),
+                                ..Default::default()
+                            },
+                        })
+                        .await;
                 }
             }
             // Kicks gifted: Kick's bits/cheer equivalent.
             "KicksGifted" => {
                 if let Ok(ev) = serde_json::from_str::<KicksGiftedEvent>(&envelope.data) {
-                    let _ = tx.send(ChatEvent::Event {
-                        platform: Platform::Kick,
-                        kind: EventKind::Bits,
-                        text: kicks_event_text(&ev),
-                        timestamp: chrono::Utc::now(),
-                        message: None,
-                        details: kicks_event_details(&ev),
-                    });
+                    let _ = tx
+                        .send(ChatEvent::Event {
+                            platform: Platform::Kick,
+                            kind: EventKind::Bits,
+                            text: kicks_event_text(&ev),
+                            timestamp: chrono::Utc::now(),
+                            message: None,
+                            details: kicks_event_details(&ev),
+                        })
+                        .await;
                 }
             }
             // A mod pinned a message: the payload's `message` is a full chat
@@ -649,7 +681,7 @@ async fn run_client(
                 match serde_json::from_str::<PinnedInfo>(&envelope.data) {
                     Ok(pin) => {
                         let event = pin_event(&channel, &info.subscriber_badges, pin, true);
-                        let _ = tx.send(event);
+                        let _ = tx.send(event).await;
                     }
                     Err(err) => {
                         tracing::debug!("unparsed kick pin event ({err}): {}", envelope.data)
@@ -658,29 +690,36 @@ async fn run_client(
             }
             // The pin was removed (its data is empty) — clear the banner.
             "PinnedMessageDeletedEvent" => {
-                let _ = tx.send(ChatEvent::UnpinMessage {
-                    platform: Platform::Kick,
-                });
+                let _ = tx
+                    .send(ChatEvent::UnpinMessage {
+                        platform: Platform::Kick,
+                    })
+                    .await;
             }
             // Channel-point reward redemption.
             "RewardRedeemedEvent" => {
                 if let Ok(ev) = serde_json::from_str::<RewardRedeemedEvent>(&envelope.data) {
-                    let _ = tx.send(ChatEvent::Event {
-                        platform: Platform::Kick,
-                        kind: EventKind::Reward,
-                        text: reward_event_text(&ev),
-                        timestamp: chrono::Utc::now(),
-                        message: None,
-                        details: EventDetails {
-                            actor: Some(ev.username.clone()),
-                            compact: Some(format!("redeemed {}", if ev.reward_title.is_empty() {
-                                "a reward"
-                            } else {
-                                &ev.reward_title
-                            })),
-                            ..Default::default()
-                        },
-                    });
+                    let _ = tx
+                        .send(ChatEvent::Event {
+                            platform: Platform::Kick,
+                            kind: EventKind::Reward,
+                            text: reward_event_text(&ev),
+                            timestamp: chrono::Utc::now(),
+                            message: None,
+                            details: EventDetails {
+                                actor: Some(ev.username.clone()),
+                                compact: Some(format!(
+                                    "redeemed {}",
+                                    if ev.reward_title.is_empty() {
+                                        "a reward"
+                                    } else {
+                                        &ev.reward_title
+                                    }
+                                )),
+                                ..Default::default()
+                            },
+                        })
+                        .await;
                 }
             }
             // Stream going live: emit a `Live` transition (the broker live poll
@@ -689,30 +728,34 @@ async fn run_client(
             // so `game` is empty (the tab tooltip just won't show one).
             "StreamerIsLive" => {
                 if let Ok(ev) = serde_json::from_str::<StreamerIsLiveEvent>(&envelope.data) {
-                    let _ = tx.send(ChatEvent::Live {
-                        platform: Platform::Kick,
-                        live: true,
-                        title: ev.livestream.session_title,
-                        game: String::new(),
-                        started_at: parse_kick_time(&ev.livestream.created_at),
-                        last_stream: None,
-                        link: None,
-                    });
+                    let _ = tx
+                        .send(ChatEvent::Live {
+                            platform: Platform::Kick,
+                            live: true,
+                            title: ev.livestream.session_title,
+                            game: String::new(),
+                            started_at: parse_kick_time(&ev.livestream.created_at),
+                            last_stream: None,
+                            link: None,
+                        })
+                        .await;
                 }
             }
             // Stream ending → an offline `Live` transition (no title/start when off).
             // The last-stream tooltip info isn't in this event; it's refreshed on the
             // next join (the VOD isn't published the instant the stream ends anyway).
             "StopStreamBroadcast" => {
-                let _ = tx.send(ChatEvent::Live {
-                    platform: Platform::Kick,
-                    live: false,
-                    title: String::new(),
-                    game: String::new(),
-                    started_at: None,
-                    last_stream: None,
-                    link: None,
-                });
+                let _ = tx
+                    .send(ChatEvent::Live {
+                        platform: Platform::Kick,
+                        live: false,
+                        title: String::new(),
+                        game: String::new(),
+                        started_at: None,
+                        last_stream: None,
+                        link: None,
+                    })
+                    .await;
             }
             // The sibling frame that carries a resub's typed message. Buffer it by
             // username so the paired `SubscriptionEvent` (which arrives right after)
@@ -743,10 +786,12 @@ async fn run_client(
             // A full snapshot; the store dedupes the no-op case.
             "ChatroomUpdatedEvent" => {
                 if let Ok(ev) = serde_json::from_str::<ChatroomUpdatedEvent>(&envelope.data) {
-                    let _ = tx.send(ChatEvent::ChatModes {
-                        platform: Platform::Kick,
-                        modes: ev.to_modes(),
-                    });
+                    let _ = tx
+                        .send(ChatEvent::ChatModes {
+                            platform: Platform::Kick,
+                            modes: ev.to_modes(),
+                        })
+                        .await;
                 }
             }
             // Deliberately ignored.
@@ -915,7 +960,11 @@ fn kicks_event_details(ev: &KicksGiftedEvent) -> EventDetails {
     let compact = if ev.gift.name.is_empty() {
         format!("gifted {n} {}", plural(n, "Kick", "Kicks"))
     } else {
-        format!("gifted {} · {n} {}", ev.gift.name, plural(n, "Kick", "Kicks"))
+        format!(
+            "gifted {} · {n} {}",
+            ev.gift.name,
+            plural(n, "Kick", "Kicks")
+        )
     };
     EventDetails {
         actor: Some(ev.sender.username.clone()),
@@ -938,7 +987,11 @@ fn sub_message(
         channel,
         sub_badges,
         KickChatMessage {
-            id: format!("kick-sub-{}-{}", pending.user_id, chrono::Utc::now().timestamp_millis()),
+            id: format!(
+                "kick-sub-{}-{}",
+                pending.user_id,
+                chrono::Utc::now().timestamp_millis()
+            ),
             content: pending.text,
             created_at: None,
             sender: crate::builder::Sender {
@@ -1153,7 +1206,12 @@ mod tests {
         // A subscribe action with no message → nothing to buffer.
         let empty = r#"{"message":{"action":"subscribe","optional_message":null},"user":{"id":1,"username":"Bob"}}"#;
         let ev: ChatMessageSentEvent = serde_json::from_str(empty).unwrap();
-        assert!(ev.message.optional_message.unwrap_or_default().trim().is_empty());
+        assert!(ev
+            .message
+            .optional_message
+            .unwrap_or_default()
+            .trim()
+            .is_empty());
     }
 
     #[test]

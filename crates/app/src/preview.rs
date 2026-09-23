@@ -18,6 +18,7 @@ use tokio::runtime::Handle;
 /// The one app-wide preview cache. Providers are registered on first use.
 /// **Adding a provider (e.g. Twitch clips) = one more entry here.**
 static CACHE: OnceLock<Arc<PreviewCache>> = OnceLock::new();
+static FETCHES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 
 /// The shared preview cache, initializing it (and its providers) on first call.
 pub fn cache() -> &'static Arc<PreviewCache> {
@@ -72,11 +73,16 @@ pub fn peek(url: &str) -> PreviewState {
 /// re-query the now-`Ready` cache). Returns the current state to render.
 pub fn lookup(url: &str, rt: &Handle, notify: smol::channel::Sender<String>) -> PreviewState {
     let result = cache().lookup(url);
-    if let Some((target, provider_ix)) = result.to_fetch {
+    if let Some(request) = result.to_fetch {
         let url = url.to_string();
         rt.spawn(async move {
-            let outcome = cache().fetch(&target, provider_ix).await;
-            cache().store(&url, outcome);
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                let _permit = FETCHES.acquire().await?;
+                cache().fetch(&request).await
+            })
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("preview fetch timed out")));
+            cache().store(request, outcome);
             // Wake the view; it re-queries the cache (now Ready/Failed).
             let _ = notify.send(url).await;
         });

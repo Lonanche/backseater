@@ -106,7 +106,11 @@ fn manager() -> &'static Arc<ManagerInner> {
 /// all (no scopes — nothing to connect for).
 ///
 /// Must run on the tokio runtime (it spawns the socket task on first use).
-pub fn register(auth: EventsubAuth, broadcaster_id: String, sink: ChatSink) -> Option<Registration> {
+pub fn register(
+    auth: EventsubAuth,
+    broadcaster_id: String,
+    sink: ChatSink,
+) -> Option<Registration> {
     if !auth.feed_available() {
         tracing::info!(
             "twitch token lacks the moderator-feed scopes; log in again with Full \
@@ -176,10 +180,13 @@ async fn socket_task(auth: EventsubAuth, mut commands: mpsc::UnboundedReceiver<C
         for ch in channels.values_mut() {
             if ch.moderate_active {
                 ch.moderate_active = false;
-                let _ = ch.sink.send(ChatEvent::ModFeed {
-                    platform: Platform::Twitch,
-                    active: false,
-                });
+                let _ = ch
+                    .sink
+                    .send(ChatEvent::ModFeed {
+                        platform: Platform::Twitch,
+                        active: false,
+                    })
+                    .await;
             }
             ch.sub_ids.clear();
         }
@@ -258,10 +265,13 @@ async fn run_session(
                 ch.sub_ids = sub_ids;
                 if moderate_active && !ch.moderate_active {
                     ch.moderate_active = true;
-                    let _ = ch.sink.send(ChatEvent::ModFeed {
-                        platform: Platform::Twitch,
-                        active: true,
-                    });
+                    let _ = ch
+                        .sink
+                        .send(ChatEvent::ModFeed {
+                            platform: Platform::Twitch,
+                            active: true,
+                        })
+                        .await;
                 }
             }
             Err(err) if is_transport_limit(&err) => return SessionOutcome::TransportLimit,
@@ -286,7 +296,7 @@ async fn run_session(
                                 let _ = ch.sink.send(ChatEvent::ModFeed {
                                     platform: Platform::Twitch,
                                     active: true,
-                                });
+                                }).await;
                             }
                             channels.insert(broadcaster_id, ch);
                         }
@@ -323,7 +333,7 @@ async fn run_session(
                 };
                 match frame {
                     WsMessage::Text(t) => {
-                        if let Some(outcome) = handle_frame(&t, channels) {
+                        if let Some(outcome) = handle_frame(&t, channels).await {
                             return outcome;
                         }
                     }
@@ -341,7 +351,10 @@ async fn run_session(
 /// Parses a notification/reconnect/revocation text frame, routing notifications
 /// to the owning channel's sink. Returns `Some(outcome)` when the session should
 /// end (Twitch moved the session), else `None` to keep pumping.
-fn handle_frame(text: &str, channels: &mut HashMap<String, Channel>) -> Option<SessionOutcome> {
+async fn handle_frame(
+    text: &str,
+    channels: &mut HashMap<String, Channel>,
+) -> Option<SessionOutcome> {
     let frame: Frame = serde_json::from_str(text).ok()?;
     match frame.metadata.message_type.as_str() {
         "notification" => {
@@ -356,7 +369,7 @@ fn handle_frame(text: &str, channels: &mut HashMap<String, Channel>) -> Option<S
             if let Some(ch) = channels.get(broadcaster_id) {
                 let event = &frame.payload["event"];
                 for ev in notification_events(sub_type, event, Utc::now()) {
-                    let _ = ch.sink.send(ev);
+                    let _ = ch.sink.send(ev).await;
                 }
             }
             None
@@ -390,7 +403,16 @@ async fn subscribe_channel(
     let mut moderate_active = false;
 
     if auth.wants_moderate() {
-        match subscribe(client, auth, session_id, broadcaster_id, "channel.moderate", "2").await? {
+        match subscribe(
+            client,
+            auth,
+            session_id,
+            broadcaster_id,
+            "channel.moderate",
+            "2",
+        )
+        .await?
+        {
             SubResult::Created(id) => {
                 sub_ids.push(id);
                 moderate_active = true;

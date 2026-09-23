@@ -51,7 +51,7 @@ pub fn connect(
     kick_channel: &str,
     youtube_channel: &str,
 ) -> (smol::channel::Receiver<ChatEvent>, Controller) {
-    let (tx, rx) = smol::channel::unbounded::<ChatEvent>();
+    let (tx, rx) = smol::channel::bounded::<ChatEvent>(1024);
     let twitch = bks_core::strip_channel(twitch_channel).to_string();
     let kick = bks_core::strip_channel(kick_channel).to_string();
     // YouTube's source is a handle/URL/video ref, not a `#channel`, so it's passed
@@ -77,28 +77,44 @@ pub fn connect(
     // (real-time, no poll) — but its viewer *count* has no push event, so that one
     // number is polled from the lightweight livestream endpoint.
     if !twitch.is_empty() {
-        runtime().spawn(poll_twitch_live(twitch.clone(), tx.clone()));
+        spawn_connection(&tx, poll_twitch_live(twitch.clone(), tx.clone()));
     }
 
     // Kick: emotes arrive inline, so messages forward unchanged. We also record
     // each chatter's id with the controller so Kick moderation can target them.
     if !kick.is_empty() {
-        runtime().spawn(poll_kick_viewers(kick.clone(), tx.clone()));
-        runtime().spawn(run_kick(
-            Arc::new(KickSource::new()),
-            kick,
-            tx.clone(),
-            controller.clone(),
-        ));
+        spawn_connection(&tx, poll_kick_viewers(kick.clone(), tx.clone()));
+        spawn_connection(
+            &tx,
+            run_kick(
+                Arc::new(KickSource::new()),
+                kick,
+                tx.clone(),
+                controller.clone(),
+            ),
+        );
     }
 
     // YouTube: anonymous InnerTube read. Like Kick, emotes arrive inline (custom
     // channel emojis), so on top of that we only add 7TV. No moderation yet.
     if !youtube.is_empty() {
-        runtime().spawn(run_youtube(Arc::new(YouTubeSource::new()), youtube, tx));
+        spawn_connection(
+            &tx,
+            run_youtube(Arc::new(YouTubeSource::new()), youtube, tx.clone()),
+        );
     }
 
     (rx, controller)
+}
+
+fn spawn_connection(tx: &Sink, work: impl std::future::Future<Output = ()> + Send + 'static) {
+    let tx = tx.clone();
+    runtime().spawn(async move {
+        tokio::select! {
+            _ = tx.closed() => {},
+            _ = work => {},
+        }
+    });
 }
 
 /// How often to re-check a channel's live status (Chatterino's 30s).
@@ -164,7 +180,9 @@ async fn poll_twitch_live(channel: String, tx: Sink) {
                         }
                         Ok(None) => {}
                         Err(err) => {
-                            tracing::debug!("twitch viewer-count seed failed for {channel}: {err:#}");
+                            tracing::debug!(
+                                "twitch viewer-count seed failed for {channel}: {err:#}"
+                            );
                         }
                     }
                 }
@@ -459,8 +477,7 @@ pub async fn run_twitch(
                             let gap_secs =
                                 (now - last_seen).num_seconds().clamp(0, i64::MAX) as usize;
                             let limit = ((gap_secs + 1) * 10).min(HISTORY_LIMIT);
-                            tokio::time::sleep(std::time::Duration::from_millis(jitter_ms()))
-                                .await;
+                            tokio::time::sleep(std::time::Duration::from_millis(jitter_ms())).await;
                             bks_twitch::fetch_gap(&meta.name, limit, last_seen, now).await
                         } else {
                             bks_twitch::fetch_recent(&meta.name, HISTORY_LIMIT).await
@@ -661,7 +678,7 @@ async fn emit_history(
 /// has no smol dep); a tiny forwarder drains that into the smol `tx`. Both tasks
 /// register with `guard` so they die with the IRC connection that spawned them.
 fn spawn_pubsub(channel_id: String, tx: Sink, guard: &mut TaskGuard) {
-    let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<ChatEvent>();
+    let (ptx, mut prx) = bks_platform::chat_channel();
     guard.add(runtime().spawn(async move {
         // Channel points are nice-to-have: reconnect quietly with backoff on any
         // failure (no error rows), and stop once the UI side is gone.
@@ -700,7 +717,7 @@ fn spawn_pubsub(channel_id: String, tx: Sink, guard: &mut TaskGuard) {
 /// guard lives on `guard`, so dropping it (IRC connection end) unregisters this
 /// channel and frees its subscription slots.
 fn spawn_eventsub(auth: EventsubAuth, broadcaster_id: String, tx: Sink, guard: &mut TaskGuard) {
-    let (etx, mut erx) = tokio::sync::mpsc::unbounded_channel::<ChatEvent>();
+    let (etx, mut erx) = bks_platform::chat_channel();
     // The manager owns the socket + reconnect loop; `etx` receives this channel's
     // routed notifications. `None` = the token can't power the feed at all.
     let registration = bks_twitch::register_eventsub(auth, broadcaster_id, etx);
@@ -821,7 +838,7 @@ async fn run_kick(source: Arc<KickSource>, channel: String, tx: Sink, controller
                     controller.note_kick_user(msg.author.login.clone(), id);
                 }
                 // Our own messages carry our badges — the freshest mod signal.
-                controller.sync_kick_mod_from_message(&msg);
+                controller.sync_kick_mod_from_message(&msg).await;
                 if !registry.is_empty() {
                     msg.elements = registry.resolve_elements(&msg.channel, msg.elements);
                 }

@@ -69,6 +69,7 @@ pub fn twitch_scope_missing(required: &[&str]) -> bool {
 pub struct LoginState {
     pub twitch: Option<String>,
     pub kick: Option<String>,
+    pub twitch_generation: u64,
 }
 
 impl LoginState {
@@ -88,6 +89,7 @@ impl LoginState {
 /// broadcast snapshot.
 #[derive(Default)]
 struct State {
+    twitch_generation: u64,
     twitch_actions: Option<Arc<TwitchActions>>,
     twitch_auth: Option<TwitchAuth>,
     /// Credentials for the EventSub moderator feed (token + granted scopes) —
@@ -102,6 +104,7 @@ impl State {
         LoginState {
             twitch: self.twitch_auth.as_ref().map(|a| a.login.clone()),
             kick: self.kick_login.clone(),
+            twitch_generation: self.twitch_generation,
         }
     }
 }
@@ -118,6 +121,16 @@ pub struct Session {
 }
 
 impl Session {
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        let (changes, _) = watch::channel(LoginState::default());
+        Self {
+            state: Arc::new(Mutex::new(State::default())),
+            rt: Handle::current(),
+            changes,
+            twitch_client_id: "test-client".into(),
+        }
+    }
     /// Builds the session, synchronously loading any saved logins so tabs connect
     /// authenticated from their very first join (no anonymous→authed reconnect
     /// race at startup).
@@ -220,15 +233,18 @@ impl Session {
             let creds = match bks_auth::twitch::login(&this.twitch_client_id, choice).await {
                 Ok(c) => c,
                 Err(err) => {
-                    let _ =
-                        events.try_send(ChatEvent::Error(format!("twitch login failed: {err:#}")));
+                    let _ = events
+                        .send(ChatEvent::Error(format!("twitch login failed: {err:#}")))
+                        .await;
                     return;
                 }
             };
             if let Err(err) = bks_auth::twitch::save(&creds) {
-                let _ = events.try_send(ChatEvent::Error(format!(
-                    "could not save Twitch login: {err:#}"
-                )));
+                let _ = events
+                    .send(ChatEvent::Error(format!(
+                        "could not save Twitch login: {err:#}"
+                    )))
+                    .await;
             }
             this.apply_twitch(creds).await;
         });
@@ -243,6 +259,7 @@ impl Session {
                 s.twitch_actions = None;
                 s.twitch_auth = None;
                 s.twitch_eventsub = None;
+                s.twitch_generation += 1;
             }
             // Cleared here, with the auth state, not synchronously at the call
             // site — else a repaint between the two would render "Logged in as
@@ -260,15 +277,18 @@ impl Session {
             let creds = match bks_auth::kick::login(&broker).await {
                 Ok(c) => c,
                 Err(err) => {
-                    let _ =
-                        events.try_send(ChatEvent::Error(format!("kick login failed: {err:#}")));
+                    let _ = events
+                        .send(ChatEvent::Error(format!("kick login failed: {err:#}")))
+                        .await;
                     return;
                 }
             };
             if let Err(err) = bks_auth::kick::save(&creds) {
-                let _ = events.try_send(ChatEvent::Error(format!(
-                    "could not save Kick login: {err:#}"
-                )));
+                let _ = events
+                    .send(ChatEvent::Error(format!(
+                        "could not save Kick login: {err:#}"
+                    )))
+                    .await;
             }
             this.apply_kick(creds).await;
         });
@@ -309,6 +329,7 @@ impl Session {
             s.twitch_auth = Some(auth);
             s.twitch_eventsub = Some(eventsub);
             s.twitch_actions = Some(actions);
+            s.twitch_generation += 1;
         }
         self.broadcast(&format!("logged in to Twitch as {}", creds.login))
             .await;
@@ -331,7 +352,7 @@ impl Session {
     async fn broadcast(&self, notice: &str) {
         tracing::info!("{notice}");
         let snapshot = self.state.lock().await.snapshot();
-        let _ = self.changes.send(snapshot);
+        self.changes.send_replace(snapshot);
     }
 }
 
@@ -369,5 +390,35 @@ pub fn twitch_source(auth: Option<TwitchAuth>) -> Arc<TwitchSource> {
     match auth {
         Some(auth) => Arc::new(TwitchSource::authenticated(auth)),
         None => Arc::new(TwitchSource::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn same_account_relogin_publishes_a_new_generation_without_subscribers() {
+        let session = Session::for_test();
+        let mut creds = bks_auth::twitch::Credentials {
+            access_token: "old-token".into(),
+            login: "test-user".into(),
+            user_id: "1".into(),
+            scopes: vec![],
+        };
+        session.apply_twitch(creds.clone()).await;
+        let first = session.login_state();
+        let mut changes = session.subscribe();
+        creds.access_token = "new-token".into();
+        creds.scopes.push("chat:read".into());
+        session.apply_twitch(creds).await;
+        changes.changed().await.unwrap();
+        let second = changes.borrow_and_update().clone();
+        assert_eq!(first.twitch, second.twitch);
+        assert!(second.twitch_generation > first.twitch_generation);
+        assert_eq!(
+            session.twitch_auth().await.unwrap().oauth_pass,
+            "oauth:new-token"
+        );
     }
 }
