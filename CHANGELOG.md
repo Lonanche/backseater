@@ -3,6 +3,47 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.6.1
+
+### Features
+
+- Animated Twitch subscriber GIFs now display in chat, including history,
+  reconnect backfill, pinned messages and suspicious-user messages. GIF captions
+  remain available for copying and searching. This adds receiving and display;
+  sending GIFs is not yet supported.
+
+### Fixes
+
+- Reconnecting to Twitch now picks up a fresh login or changed permissions even
+  when you sign back into the same account. Old connections are cancelled before
+  replacements start, and closing the last view of a channel stops its background
+  connection tasks.
+- Concurrent Kick requests now share a single token refresh. Temporary refresh
+  failures preserve the login instead of signing you out; expired or revoked
+  refresh tokens still require logging in again.
+- Chat queues and the amount of work processed per UI update are now bounded,
+  preventing unbounded backlogs and long processing bursts in busy chats while
+  preserving queued moderation events.
+- Image downloads and animation decoding now have size and work limits, with
+  still-image fallbacks for animations that exceed the decoding budget.
+- Link previews now limit cached entries and simultaneous requests, time out
+  stalled fetches, and share cached results for links to the same video or clip.
+  Twitch, Kick and YouTube previews validate the actual host and URL structure
+  instead of matching lookalike links.
+- Twitch now shows the reason when a chat message is rejected or held for
+  moderation, including slow mode, subscriber/follower restrictions, verification
+  requirements, timeouts and rate limits. Press Up to recall the message for
+  editing and retry; a newer draft is preserved.
+
+### Development
+
+- Windows CI now runs headless GUI interaction tests covering input history and
+  draft restoration, keyboard completion and focus, autocomplete, and the emote
+  picker. Regression coverage also checks rejected-message feedback and retry.
+- Updated the `time` dependency to 0.3.47; building from source now requires
+  Rust 1.88 or newer.
+- Added a Twitch feature comparison and roadmap in `docs/TWITCH_FEATURE_REVIEW.md`.
+
 ## v0.6.0-beta.3
 
 ### Fixes

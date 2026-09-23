@@ -643,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "backseater"
-version = "0.6.0-beta.3"
+version = "0.6.1-beta.1"
 dependencies = [
  "anyhow",
  "async-lock",
@@ -804,7 +804,7 @@ dependencies = [
 
 [[package]]
 name = "bks-auth"
-version = "0.6.0-beta.3"
+version = "0.6.1-beta.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -822,7 +822,7 @@ dependencies = [
 
 [[package]]
 name = "bks-core"
-version = "0.6.0-beta.3"
+version = "0.6.1-beta.1"
 dependencies = [
  "chrono",
  "regex",
@@ -832,7 +832,7 @@ dependencies = [
 
 [[package]]
 name = "bks-emotes"
-version = "0.6.0-beta.3"
+version = "0.6.1-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "bks-kick"
-version = "0.6.0-beta.3"
+version = "0.6.1-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "bks-platform"
-version = "0.6.0-beta.3"
+version = "0.6.1-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -882,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "bks-preview"
-version = "0.6.0-beta.3"
+version = "0.6.1-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "bks-twitch"
-version = "0.6.0-beta.3"
+version = "0.6.1-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "bks-youtube"
-version = "0.6.0-beta.3"
+version = "0.6.1-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
