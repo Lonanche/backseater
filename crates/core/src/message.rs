@@ -243,6 +243,12 @@ pub fn normalize_username(raw: &str) -> &str {
 pub enum MessageElement {
     Text { text: String, color: Option<Color> },
     Emote(std::sync::Arc<Emote>),
+    /// An inline GIF, with its original caption for selection and search.
+    Gif {
+        id: String,
+        url: String,
+        text: String,
+    },
     Badge(Badge),
     Mention { login: String },
     Link { url: String, text: String },

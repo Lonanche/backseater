@@ -491,6 +491,12 @@ fn suspicious_message(event: &Value, now: DateTime<Utc>) -> Option<ChatEvent> {
     if let Some(fragments) = body["fragments"].as_array() {
         for fragment in fragments {
             let frag_text = fragment["text"].as_str().unwrap_or_default();
+            if let Some(gif) = fragment["gif"]["id"].as_str().and_then(|id| {
+                crate::builder::gif_element(id, fragment["gif"]["url"].as_str()?, frag_text)
+            }) {
+                elements.push(gif);
+                continue;
+            }
             match fragment["emote"]["id"].as_str() {
                 Some(emote_id) if !emote_id.is_empty() => {
                     elements.push(bks_core::MessageElement::Emote(std::sync::Arc::new(
@@ -892,6 +898,23 @@ mod tests {
             }
             other => panic!("expected Suspicious, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn suspicious_message_preserves_gif_fragments() {
+        let event = json!({
+            "low_trust_status": "restricted",
+            "message": { "message_id": "gif-1", "text": "[Hi]", "fragments": [
+                { "type": "gif", "text": "[Hi]", "gif": {
+                    "id": "hi", "url": "https://media.giphy.com/hi.gif?cid=keep"
+                }}
+            ]}
+        });
+        let Some(ChatEvent::Suspicious { message, .. }) = suspicious_message(&event, Utc::now()) else {
+            panic!("expected suspicious message");
+        };
+        assert!(matches!(&message.elements[..], [bks_core::MessageElement::Gif { id, url, text }]
+            if id == "hi" && url.ends_with("?cid=keep") && text == "[Hi]"));
     }
 
     #[test]

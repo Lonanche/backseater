@@ -152,6 +152,16 @@ struct PinFragment {
     text: String,
     #[serde(default)]
     emote: Option<PinEmote>,
+    #[serde(default)]
+    gif: Option<PinGif>,
+}
+
+#[derive(Default, Deserialize)]
+struct PinGif {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    url: String,
 }
 
 #[derive(Default, Deserialize)]
@@ -315,6 +325,14 @@ fn pin_event(data: PinData) -> Option<ChatEvent> {
     let msg = data.message?;
     let mut elements: Vec<MessageElement> = Vec::new();
     for fragment in &msg.content.fragments {
+        if let Some(gif) = fragment
+            .gif
+            .as_ref()
+            .and_then(|gif| crate::builder::gif_element(&gif.id, &gif.url, &fragment.text))
+        {
+            elements.push(gif);
+            continue;
+        }
         match &fragment.emote {
             Some(emote) if !emote.id.is_empty() => {
                 elements.push(MessageElement::Emote(std::sync::Arc::new(
@@ -521,6 +539,22 @@ mod tests {
             serde_json::from_value(serde_json::json!({"id": "pin-1", "ends_at": 1700001200}))
                 .unwrap();
         assert!(pin_event(data).is_none());
+    }
+
+    #[test]
+    fn pin_message_preserves_gif_fragments() {
+        let data: PinData = serde_json::from_value(serde_json::json!({
+            "message": {"id": "gif-1", "content": {"text": "[Hi]", "fragments": [
+                {"text": "[Hi]", "gif": {"id": "hi", "url": "https://media.giphy.com/hi.gif?cid=keep"}}
+            ]}}
+        })).unwrap();
+        let ChatEvent::PinMessage { message, .. } = pin_event(data).unwrap() else {
+            panic!("expected pin message");
+        };
+        assert!(
+            matches!(&message.elements[..], [MessageElement::Gif { id, url, text }]
+            if id == "hi" && url.ends_with("?cid=keep") && text == "[Hi]")
+        );
     }
 
     #[test]

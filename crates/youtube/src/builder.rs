@@ -474,6 +474,7 @@ fn elements_to_text(elements: &[MessageElement]) -> String {
         match el {
             MessageElement::Text { text, .. } => out.push_str(text),
             MessageElement::Emote(e) => out.push_str(&e.name),
+            MessageElement::Gif { text, .. } => out.push_str(text),
             MessageElement::Mention { login } => {
                 out.push('@');
                 out.push_str(login);

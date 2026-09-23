@@ -15,8 +15,8 @@ creature comforts of a mature chat client.
   a tab can be popped out into its own OS window (a live mirror sharing the same
   buffer and connection).
 - **Twitch** — chat over IRC (one shared read + one shared write connection for
-  the whole app), native emotes, sub/VIP/mod badges, recent-message backlog on
-  join, send + `/ban` `/timeout` `/unban` `/delete` via Helix, an EventSub
+  the whole app), native emotes, animated subscriber GIFs, sub/VIP/mod badges,
+  recent-message backlog on join, send + `/ban` `/timeout` `/unban` `/delete` via Helix, an EventSub
   moderator feed (rich mod notices + AutoMod allow/deny), pinned messages,
   viewer list (mod-only, per Twitch's API rules), and usercards with follow/sub
   age.

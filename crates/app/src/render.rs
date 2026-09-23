@@ -612,6 +612,8 @@ const BASELINE_FONT: f32 = 18.0;
 const EMOTE_HEIGHT: f32 = 26.0;
 const PLATFORM_ICON_SIZE: f32 = 16.0;
 const BADGE_SIZE: f32 = 18.0;
+const GIF_HEIGHT: f32 = 80.0;
+const GIF_MAX_WIDTH: f32 = 160.0;
 
 /// Extra leading added to the line box on top of the font's ascent + descent, as
 /// a fraction of the font size. The row body applies the resulting line height to
@@ -1713,6 +1715,26 @@ pub fn render_message(
                     ))
                     .into_any_element(),
                 );
+            }
+            MessageElement::Gif { url, text, .. } => {
+                let ord = *ordinal;
+                *ordinal += 1;
+                let caption = SharedString::from(format!("{text}\nGIPHY GIF"));
+                tokens.push(
+                    div()
+                        .id(ids.emote(ord))
+                        .mx_px()
+                        .tooltip(move |window, cx| Tooltip::new(caption.clone()).build(window, cx))
+                        .child(SelectableImage::new(
+                            ids.token(ord),
+                            ord,
+                            text.clone(),
+                            selection.clone(),
+                            gif_image(ids.emote(emote_index), url),
+                        ))
+                        .into_any_element(),
+                );
+                emote_index += 1;
             }
             MessageElement::Mention { login } => {
                 // Clickable when the view supplies the handler: opens the
@@ -3114,6 +3136,18 @@ fn event_message_line(
         ))
 }
 
+fn gif_image(id: impl Into<gpui::ElementId>, url: &str) -> impl IntoElement {
+    // Reserve the full box before loading so the virtualized row keeps its height.
+    div()
+        .flex()
+        .flex_none()
+        .w(px(GIF_MAX_WIDTH))
+        .h(px(GIF_HEIGHT))
+        .items_center()
+        .justify_center()
+        .child(animated_img(id, url.to_string(), px(GIF_HEIGHT)).max_w(px(GIF_MAX_WIDTH)))
+}
+
 /// Renders a message's token stream as inline elements (words + inline emote
 /// images), the shared core of the event row and the reply preview. `seed` gives
 /// each emote a stable element id (so GPUI animates it); the per-row part is the
@@ -3154,6 +3188,15 @@ fn inline_tokens(
                             emote.url.clone(),
                             px(scale.emote),
                         ))
+                        .into_any_element(),
+                );
+                emote_index += 1;
+            }
+            MessageElement::Gif { url, .. } => {
+                tokens.push(
+                    div()
+                        .mx_px()
+                        .child(gif_image((seed.0, seed.1.wrapping_add(emote_index)), url))
                         .into_any_element(),
                 );
                 emote_index += 1;

@@ -585,7 +585,12 @@ async fn handle_read(
                 ch.channel_id = Some(pm.channel_id().to_string());
                 send_pending_meta(ch, pm.channel()).await;
                 let first_message = msg.tag(tmi::Tag::FirstMsg) == Some("1");
-                let message = privmsg_to_message(pm.channel(), &pm, first_message);
+                let message = privmsg_to_message(
+                    pm.channel(),
+                    &pm,
+                    first_message,
+                    msg.tag("gifs").unwrap_or_default(),
+                );
                 fan_out(ch, ChatEvent::Message(Box::new(message))).await;
             }
         }

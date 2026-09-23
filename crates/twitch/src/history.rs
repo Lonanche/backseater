@@ -108,6 +108,7 @@ fn history_url(
 /// live traffic.
 fn parse_history_line(channel: &str, line: &str, historical: bool) -> Option<ChatEvent> {
     let irc = IrcMessageRef::parse(line)?;
+    let raw_gifs = irc.tag("gifs").unwrap_or_default();
     // `msg-param-value` (the watch-streak length) is dropped by tmi's parse, so
     // read it off the raw line before `from_irc` consumes it — same value the
     // live loop reads.
@@ -121,7 +122,7 @@ fn parse_history_line(channel: &str, line: &str, historical: bool) -> Option<Cha
             // privmsg_to_message) is kept, though: unlike an ephemeral event row,
             // a highlighted message is a real chat line that stays highlighted in
             // scrollback (Twitch web keeps it too).
-            let mut msg = privmsg_to_message(channel, &pm, false);
+            let mut msg = privmsg_to_message(channel, &pm, false, raw_gifs);
             msg.historical = historical;
             Some(ChatEvent::Message(Box::new(msg)))
         }
@@ -148,6 +149,27 @@ fn parse_history_line(channel: &str, line: &str, historical: bool) -> Option<Cha
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn twitch_documented_gif_message_survives_history_and_gap_fill() {
+        let url = "https://media4.giphy.com/media/joSNxeswxuc74Juo8X/giphy.gif?cid=095d7a5dzizsiwgabonagkmigggv8v1spfai91ac3x0dsiy0&ep=v1_gifs_trending&rid=giphy.gif&ct=g";
+        let caption = "[Y A Y Yes GIF by Djemilah Birnie]";
+        let raw = format!(
+            "@badge-info=subscriber/30;badges=broadcaster/1,subscriber/0;color=#033700;display-name=TwitchDev;emotes=;first-msg=0;flags=;gifs=0-33|joSNxeswxuc74Juo8X|{url};id=401abf17-7e99-45d6-9bdf-43934e839327;mod=0;returning-chatter=0;room-id=12826;subscriber=1;tmi-sent-ts=1783632907018;turbo=0;user-id=141981764;user-type= :twitchdev!twitchdev@twitchdev.tmi.twitch.tv PRIVMSG #twitch :{caption}"
+        );
+        for historical in [true, false] {
+            let Some(ChatEvent::Message(message)) = parse_history_line("twitch", &raw, historical)
+            else {
+                panic!("expected GIF chat message");
+            };
+            assert_eq!(message.historical, historical);
+            assert_eq!(message.raw_text, caption);
+            assert!(
+                matches!(&message.elements[..], [bks_core::MessageElement::Gif { id, url: actual, text }]
+                if id == "joSNxeswxuc74Juo8X" && actual == url && text == caption)
+            );
+        }
+    }
 
     #[test]
     fn parses_privmsg_history_line() {

@@ -399,6 +399,7 @@ pub(crate) fn privmsg_to_message(
     channel: &str,
     pm: &tmi::msg::Privmsg<'_>,
     first_message: bool,
+    raw_gifs: &str,
 ) -> Message {
     let color = pm.color().and_then(Color::from_hex);
 
@@ -432,7 +433,12 @@ pub(crate) fn privmsg_to_message(
     // tag positions are indexed against the full text *including* that prefix, so
     // stripping it here would misalign every emote range. The reply context above
     // it is the cue; the leading mention is harmless.
-    let elements: Vec<MessageElement> = build_privmsg_elements(pm.text(), pm.raw_emotes(), None);
+    let elements: Vec<MessageElement> = crate::builder::build_privmsg_elements_with_gifs(
+        pm.text(),
+        pm.raw_emotes(),
+        raw_gifs,
+        None,
+    );
 
     Message {
         id: pm.id().to_string(),
@@ -522,6 +528,21 @@ mod tests {
     }
 
     #[test]
+    fn action_message_gif_ranges_follow_the_stripped_action_prefix() {
+        let raw = "@badge-info=;badges=;color=;display-name=Chatter;emotes=25:5-9;\
+                   gifs=0-3|hi|https://media.giphy.com/hi.gif?cid=keep;id=gif-action;\
+                   mod=0;room-id=1;subscriber=1;tmi-sent-ts=1783632907018;user-id=2 \
+                   :chatter!chatter@chatter.tmi.twitch.tv PRIVMSG #test :\x01ACTION [Hi] Kappa\x01";
+        let irc = IrcMessageRef::parse(raw).unwrap();
+        let gifs = irc.tag("gifs").unwrap();
+        let message = privmsg_to_message("test", &parse_privmsg(raw), false, gifs);
+        assert_eq!(message.raw_text, "[Hi] Kappa");
+        assert!(matches!(&message.elements[..], [
+            MessageElement::Gif { text, url, .. }, MessageElement::Text { .. }, MessageElement::Emote(emote)
+        ] if text == "[Hi]" && url.ends_with("?cid=keep") && emote.name == "Kappa"));
+    }
+
+    #[test]
     fn reply_parent_is_captured() {
         // Real-shape reply line (from tmi's own snapshot tests).
         let raw = "@badge-info=;badges=;client-nonce=cd56193132f934ac71b4d5ac488d4bd6;\
@@ -535,7 +556,7 @@ mod tests {
                    room-id=37940952;subscriber=0;tmi-sent-ts=1673925983585;turbo=0;\
                    user-id=133651738;user-type= \
                    :qaixx!qaixx@qaixx.tmi.twitch.tv PRIVMSG #posty :@Posty yes";
-        let msg = privmsg_to_message("#posty", &parse_privmsg(raw), false);
+        let msg = privmsg_to_message("#posty", &parse_privmsg(raw), false, "");
         let reply = msg.reply.expect("reply parent");
         assert_eq!(reply.author, "Posty");
         assert_eq!(reply.text, "hello");
@@ -557,7 +578,7 @@ mod tests {
                    room-id=164774298;subscriber=0;tmi-sent-ts=1709298826724;\
                    turbo=0;user-id=164774298;user-type= \
                    :vesdeg!vesdeg@vesdeg.tmi.twitch.tv PRIVMSG #vesdeg :my message";
-        let msg = privmsg_to_message("#vesdeg", &parse_privmsg(raw), false);
+        let msg = privmsg_to_message("#vesdeg", &parse_privmsg(raw), false, "");
         assert_eq!(
             msg.reward_id.as_deref(),
             Some("be22f712-8fd9-426a-90df-c13eae6cc6dc")
@@ -571,7 +592,7 @@ mod tests {
                    room-id=164774298;subscriber=0;tmi-sent-ts=1709298826724;\
                    turbo=0;user-id=164774298;user-type= \
                    :vesdeg!vesdeg@vesdeg.tmi.twitch.tv PRIVMSG #vesdeg :look at me";
-        let msg = privmsg_to_message("#vesdeg", &parse_privmsg(raw), false);
+        let msg = privmsg_to_message("#vesdeg", &parse_privmsg(raw), false, "");
         assert!(msg.highlighted);
         assert!(msg.reward_id.is_none());
     }
@@ -582,7 +603,7 @@ mod tests {
                    mod=0;room-id=11148817;subscriber=0;tmi-sent-ts=1594555275886;\
                    turbo=0;user-id=40286300;user-type= \
                    :qaixx!qaixx@qaixx.tmi.twitch.tv PRIVMSG #lonanche :hi";
-        assert!(!privmsg_to_message("#lonanche", &parse_privmsg(raw), false).highlighted);
+        assert!(!privmsg_to_message("#lonanche", &parse_privmsg(raw), false, "").highlighted);
     }
 
     #[test]
@@ -591,7 +612,7 @@ mod tests {
                    mod=0;room-id=11148817;subscriber=0;tmi-sent-ts=1594555275886;\
                    turbo=0;user-id=40286300;user-type= \
                    :qaixx!qaixx@qaixx.tmi.twitch.tv PRIVMSG #lonanche :hi";
-        let msg = privmsg_to_message("#lonanche", &parse_privmsg(raw), false);
+        let msg = privmsg_to_message("#lonanche", &parse_privmsg(raw), false, "");
         assert!(msg.reward_id.is_none());
     }
 
@@ -601,7 +622,7 @@ mod tests {
                    id=abc;mod=0;room-id=11148817;subscriber=0;\
                    tmi-sent-ts=1594555275886;turbo=0;user-id=40286300;user-type= \
                    :qaixx!qaixx@qaixx.tmi.twitch.tv PRIVMSG #lonanche :just chatting";
-        let msg = privmsg_to_message("#lonanche", &parse_privmsg(raw), false);
+        let msg = privmsg_to_message("#lonanche", &parse_privmsg(raw), false, "");
         assert!(msg.reply.is_none());
     }
 
