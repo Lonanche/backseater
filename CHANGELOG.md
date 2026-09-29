@@ -3,6 +3,34 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.6.2
+
+### Features
+
+- Twitch subscriber badge tooltips now identify Tier 2 and Tier 3 subscriptions,
+  including when the badge image falls back to a lower month milestone.
+- Links in event descriptions and attached messages are now clickable, using
+  the same confirmation dialog as chat links.
+- Attached messages in the events panel now show a clickable, colored author
+  name inside an inset block, making them easier to distinguish from event details.
+
+### Fixes
+
+- Chat metadata updates now remeasure only the affected rows, preserving the
+  scroll position while viewer counts, moderation marks and cosmetics change.
+- Local and app-wide mentions feeds now render only visible rows, preserve the
+  reading position as older entries expire, and use the configured chat font size.
+- Incoming chat no longer rebuilds an open emote picker. Animated emote previews
+  share downloads with their full animations while loading a still frame first.
+- 7TV cosmetics lookups now share requests across channels, limit concurrent
+  work and cache growth, and run without blocking incoming chat. Per-channel
+  moderation and cosmetics records are also pruned as messages leave the buffer.
+
+### Development
+
+- Added regression coverage for chat scroll preservation, mentions rendering,
+  emote-picker stability, shared image downloads and bounded cosmetics caches.
+
 ## v0.6.1
 
 ### Features
