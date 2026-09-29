@@ -2713,8 +2713,8 @@ fn event_name_login(word: &str, actor: Option<&str>) -> Option<String> {
 /// user's name (`actor`) and any `@mention` clickable when a [`MentionClick`] is
 /// supplied — clicking opens that user's usercard, exactly like a chat mention.
 /// `muted` tints the words (the events panel's condensed detail text); the actor,
-/// when it appears, stays at full color so a clickable name reads as one. Non-name
-/// words are plain, non-interactive `div`s (unchanged from the old inline tokens).
+/// when it appears, stays at full color so a clickable name reads as one. URLs
+/// use the same link detection and confirmation dialog as chat messages.
 fn event_word_tokens(
     text: &str,
     actor: Option<&str>,
@@ -2723,18 +2723,35 @@ fn event_word_tokens(
     mention_click: Option<&MentionClick>,
 ) -> Vec<gpui::AnyElement> {
     let p = palette();
-    split_words(text)
-        .into_iter()
-        .filter(|word| !word.trim().is_empty())
-        .enumerate()
-        .map(|(i, word)| {
+    let elements = bks_core::linkify(vec![MessageElement::Text {
+        text: text.to_string(),
+        color: None,
+    }]);
+    let mut tokens = Vec::new();
+    for element in elements {
+        let text = match element {
+            MessageElement::Link { url, text } => {
+                tokens.push(
+                    inline_link(
+                        ("event-link", row_id.wrapping_add(tokens.len() as u64)),
+                        &url,
+                        &text,
+                    )
+                    .into_any_element(),
+                );
+                continue;
+            }
+            MessageElement::Text { text, .. } => text,
+            _ => continue,
+        };
+        for word in split_words(&text) {
             let base = div().when(muted, |d| d.text_color(rgb(p.timestamp)));
-            match (mention_click, event_name_login(word, actor)) {
+            let token = match (mention_click, event_name_login(word, actor)) {
                 (Some(cb), Some(login)) => {
                     let cb = cb.clone();
                     // The id base is the row's text hash, so a clickable name in
                     // one event row can't collide with one in another.
-                    base.id(("event-name", row_id.wrapping_add(i as u64)))
+                    base.id(("event-name", row_id.wrapping_add(tokens.len() as u64)))
                         // A clickable name stays full-strength even in muted
                         // detail text, and underlines on hover like a mention.
                         .when(muted, |d| d.text_color(rgb(p.link)))
@@ -2746,10 +2763,14 @@ fn event_word_tokens(
                         .child(SharedString::from(word.to_string()))
                         .into_any_element()
                 }
-                _ => base.child(SharedString::from(word.to_string())).into_any_element(),
-            }
-        })
-        .collect()
+                _ => base
+                    .child(SharedString::from(word.to_string()))
+                    .into_any_element(),
+            };
+            tokens.push(token);
+        }
+    }
+    tokens
 }
 
 /// A public channel event (sub/gift/raid/watch-streak): a highlighted row with
@@ -3133,6 +3154,7 @@ fn event_message_line(
             scale,
             ("event-emote", row_id),
             mention_click,
+            true,
         ))
 }
 
@@ -3148,17 +3170,41 @@ fn gif_image(id: impl Into<gpui::ElementId>, url: &str) -> impl IntoElement {
         .child(animated_img(id, url.to_string(), px(GIF_HEIGHT)).max_w(px(GIF_MAX_WIDTH)))
 }
 
+fn inline_link(id: impl Into<gpui::ElementId>, url: &str, text: &str) -> gpui::Stateful<gpui::Div> {
+    let url = url.to_string();
+    h_flex()
+        .id(id)
+        .min_w_0()
+        .flex_wrap()
+        .items_start()
+        .text_color(rgb(palette().link))
+        .cursor_pointer()
+        .hover(|s| s.underline())
+        // A link inside an expandable gift row must not toggle its recipients.
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            confirm_open_url(url.clone(), window, cx);
+        })
+        .children(
+            break_long_word(text)
+                .into_iter()
+                .map(|piece| div().child(piece)),
+        )
+}
+
 /// Renders a message's token stream as inline elements (words + inline emote
 /// images), the shared core of the event row and the reply preview. `seed` gives
 /// each emote a stable element id (so GPUI animates it); the per-row part is the
 /// caller's, the index is added per emote here. When `mention_click` is supplied
 /// (the event message line), `@mention` tokens open the mentioned user's
-/// usercard; the reply preview passes `None`, keeping the preview inert.
+/// usercard. Event messages enable links; reply previews keep them inert.
 fn inline_tokens(
     message: &[MessageElement],
     scale: Scale,
     seed: (&'static str, u64),
     mention_click: Option<&MentionClick>,
+    clickable_links: bool,
 ) -> Vec<gpui::AnyElement> {
     let mut tokens: Vec<gpui::AnyElement> = Vec::new();
     let mut emote_index = 0u64;
@@ -3219,6 +3265,17 @@ fn inline_tokens(
                     None => token.into_any_element(),
                 });
             }
+            MessageElement::Link { url, text } if clickable_links => {
+                tokens.push(
+                    inline_link(
+                        (seed.0, seed.1.wrapping_add(0x2000_0000 + i as u64)),
+                        url,
+                        text,
+                    )
+                    .mr_1()
+                    .into_any_element(),
+                );
+            }
             MessageElement::Link { text, .. } => {
                 tokens.push(
                     div()
@@ -3251,6 +3308,7 @@ pub fn render_reply_preview(
             scale,
             ("reply-preview-emote", id_seed),
             None,
+            false,
         ))
 }
 
@@ -3315,6 +3373,7 @@ pub fn render_thread_line(
                     scale,
                     ("thread-line-emote", id_seed),
                     None,
+                    false,
                 ))),
         )
 }
