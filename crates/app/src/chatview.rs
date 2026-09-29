@@ -761,8 +761,7 @@ pub(crate) struct ChatView {
     /// changed. Invalidated on a matcher change ([`set_mentions`]) and a channel
     /// swap ([`reconnect`] — a fresh model's generation could collide).
     /// `RefCell` because it's filled from the render path.
-    mentions_panel_cache:
-        std::cell::RefCell<Option<(u64, Vec<std::sync::Arc<Message>>)>>,
+    mentions_panel_cache: std::cell::RefCell<Option<(u64, Vec<std::sync::Arc<Message>>)>>,
     /// While dragging a layout divider: which one, the two adjacent shares, and
     /// the pointer position at grab time, so each move applies a delta. `None`
     /// when not resizing.
@@ -783,9 +782,9 @@ pub(crate) struct ChatView {
     /// rebuilt wholesale on a filter change or reconnect.
     events_shown: std::collections::VecDeque<u64>,
     /// Scroll position of the mentions panel (tailed like the events panel).
-    mentions_scroll: gpui::ScrollHandle,
-    /// Set when a new mention arrived; the mentions panel tails on next render.
-    mentions_new: bool,
+    mentions_list_state: ListState,
+    mentions_feed: crate::mentions::FeedList,
+    pending_row_changes: Vec<crate::channel_store::RowChange>,
     /// Scroll position of the thread panel's message list, so it opens at the
     /// newest message with older ones scrollable above (chat order).
     thread_scroll: gpui::ScrollHandle,
@@ -805,6 +804,8 @@ pub(crate) struct ChatView {
     channel_native_emotes: Vec<bks_core::Emote>,
     /// Whether the emote picker panel is open (toggled by its input-bar button).
     picker_open: bool,
+    #[cfg(test)]
+    picker_refresh_count: usize,
     /// Which platform's emotes the picker is currently showing (its tab).
     picker_tab: bks_core::Platform,
     /// Search box filtering the emote picker by name (substring, ci).
@@ -854,9 +855,7 @@ pub(crate) struct ChatView {
     /// Only ever engaged while following the tail — a view the user scrolled up
     /// doesn't move on appends anyway.
     log_paused: bool,
-    /// A [`ChannelEvent::Changed`] arrived while paused: its full re-measure
-    /// (`list_state.reset`) would snap the frozen view to the live bottom, so
-    /// it's deferred to the unpause.
+    /// An ignore-filter change while paused is applied when the log resumes.
     paused_needs_reset: bool,
     /// The model `rows_generation` this view's `list_state` seed covered.
     /// ⚠️ Replay guard: gpui delivers queued `cx.emit`s to subscribers created
@@ -1000,8 +999,7 @@ impl ChatView {
         // and swept of off-screen images on a single timer (see `crate::image_cache`).
         let image_cache = LruImageCache::shared(EMOTE_LIFETIME, EMOTE_SWEEP_INTERVAL, cx);
 
-        let _mention_sub = cx.observe(&mention_store, |this, _, cx| {
-            this.mentions_new = true;
+        let _mention_sub = cx.observe(&mention_store, |_, _, cx| {
             cx.notify();
         });
 
@@ -1077,14 +1075,17 @@ impl ChatView {
             grid_bounds: std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default())),
             events_list_state,
             events_shown,
-            mentions_scroll: gpui::ScrollHandle::new(),
+            mentions_list_state: crate::mentions::list_state(),
+            mentions_feed: crate::mentions::FeedList::default(),
+            pending_row_changes: Vec::new(),
             thread_scroll: gpui::ScrollHandle::new(),
             reply_chain_scroll: gpui::ScrollHandle::new(),
             scroll_to_newest: ScrollToNewest::default(),
-            mentions_new: false,
             personal_emotes: Vec::new(),
             channel_native_emotes: Vec::new(),
             picker_open: false,
+            #[cfg(test)]
+            picker_refresh_count: 0,
             picker_tab,
             picker_search,
             picker_list_state,
@@ -1290,25 +1291,19 @@ impl ChatView {
                     self.events_list_state.splice(0..1, 0);
                 }
             }
-            // A row's content changed height in place (an AutoMod row resolved),
-            // or channel state a render reads changed (strikes/cosmetics/pins).
-            // Re-measure so a changed row's new height is picked up (rare event).
-            ChannelEvent::Changed => {
-                if self.log_paused {
-                    // The reset would sync the withheld tail in and snap to the
-                    // bottom — defer it to the unpause (the repaint below still
-                    // shows in-place changes like strikes).
-                    self.paused_needs_reset = true;
-                } else {
-                    // Re-measure at the VIEW's current count — NOT the model's
-                    // len. A `Changed` can interleave a delivery burst (a ban
-                    // fade or cosmetics landing mid-history-load), when the
-                    // model is already ahead of the still-queued row events;
-                    // resetting to its len jumped this list past them, and each
-                    // pending append then spliced a phantom trailing item (the
-                    // invisible-day-divider bug's second head).
-                    self.list_state.reset(self.list_state.item_count());
+            ChannelEvent::RowsChanged(change) => {
+                self.queue_row_remeasure(change.clone(), cx);
+            }
+            ChannelEvent::EmotesChanged => {
+                if self.picker_open {
+                    self.refresh_picker_filter(cx);
                 }
+                self.refresh_emote_popup(cx);
+                cx.notify();
+                return;
+            }
+            ChannelEvent::Repaint => {}
+            ChannelEvent::PinsChanged => {
                 // Pins may have changed: drop dismissals whose pin is gone
                 // (unpinned/replaced/expired) so the restore chip only ever
                 // represents — and restores — pins that are still active.
@@ -1327,7 +1322,7 @@ impl ChatView {
             // cached log) reads it — repaint without touching the log's
             // measurements or its cached paint. This fires every ~30s per live
             // platform, so it must stay this cheap.
-            ChannelEvent::ViewersChanged => {
+            ChannelEvent::ViewersChanged | ChannelEvent::StatusChanged => {
                 cx.notify();
                 return;
             }
@@ -1349,17 +1344,43 @@ impl ChatView {
                 return;
             }
         }
-        // An emote (re)load may have changed the picker's source. The picker is
-        // per-view, so each view refilters its own when open; the picker reads
-        // emotes live from the model, so refiltering on any change is correct
-        // (skipped entirely while the picker is closed). Pin-expiry wakeups are
-        // scheduled by the model itself (it owns the pins).
-        if self.picker_open {
-            self.refresh_picker_filter(cx);
-        }
         self.flush_pending_mentions(cx);
         self.refresh_log(cx);
         cx.notify();
+    }
+
+    fn queue_row_remeasure(
+        &mut self,
+        change: crate::channel_store::RowChange,
+        cx: &mut Context<Self>,
+    ) {
+        let scheduled = !self.pending_row_changes.is_empty();
+        self.pending_row_changes.push(change);
+        if scheduled {
+            return;
+        }
+        let weak = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let _ = weak.update(cx, |this, cx| {
+                let changes = std::mem::take(&mut this.pending_row_changes);
+                let model = this.channel.read(cx);
+                let mut start = None;
+                let count = this.list_state.item_count().min(model.rows.len());
+                for ix in 0..=count {
+                    let changed =
+                        ix < count && changes.iter().any(|change| change.matches(&model.rows[ix]));
+                    if changed {
+                        start.get_or_insert(ix);
+                    } else if let Some(first) = start.take() {
+                        this.list_state.remeasure_items(first..ix);
+                    }
+                }
+                this.search_list_state.remeasure();
+                this.mentions_list_state.remeasure();
+                this.refresh_log(cx);
+                cx.notify();
+            });
+        });
     }
 
     /// A newly-added message row (carried on its `Appended`/`Inserted` event —
@@ -1377,7 +1398,6 @@ impl ChatView {
         if msg.historical || !self.mentions.matches(&msg.raw_text) {
             return;
         }
-        self.mentions_new = true;
         let sound = self.mentions.sound_for(&msg.raw_text);
         self.pending_mentions.push((msg.clone(), sound));
     }
@@ -1409,6 +1429,7 @@ impl ChatView {
         // Caches keyed on the old model's `rows_generation` would collide with
         // the new model's (each model counts from 0).
         *self.mentions_panel_cache.borrow_mut() = None;
+        self.mentions_list_state.reset(0);
         *self.thread_cache.borrow_mut() = None;
         self._channel_sub = cx.subscribe(&channel, Self::on_channel_event);
         self.channel_key = key;
@@ -1434,6 +1455,7 @@ impl ChatView {
             self.config.collapse_gift_subs,
         );
         self.events_list_state.reset(self.events_shown.len());
+        self.mentions_list_state.remeasure();
         // The rebuild snapshots the buffer wholesale, so re-arm the replay
         // watermark — a queued `EventAppended` the snapshot already includes
         // would otherwise append its seq a second time.
@@ -1446,6 +1468,7 @@ impl ChatView {
         self.mentions = mentions;
         // The mentions panel's cached matches were computed with the old terms.
         *self.mentions_panel_cache.borrow_mut() = None;
+        self.mentions_list_state.reset(0);
     }
 
     /// Updates the ignore list. The log filters every row against this at render
@@ -1543,7 +1566,7 @@ impl ChatView {
     /// structural events still queued behind it (gpui flushes emits late) must
     /// be skipped — without the re-arm each would splice a phantom item on top
     /// of rows the reset already counted. ⚠️ Every reset-to-model-len goes
-    /// through here; only [`ChannelEvent::Changed`]'s in-place re-measure keeps
+    /// through here; in-place row remeasurement keeps
     /// the view's own count (see its comment).
     fn resync_log_to_model(&mut self, cx: &mut Context<Self>) {
         let model = self.channel.read(cx);
@@ -1609,8 +1632,8 @@ impl ChatView {
 
     /// Ends hover-pause: splices the withheld tail into the list (the follow
     /// mode does the rest — still tail-following snaps to the newest row, a
-    /// mid-pause manual scroll keeps its place), or runs the re-measure a
-    /// `Changed` deferred.
+    /// mid-pause manual scroll keeps its place), or applies a deferred
+    /// ignore-filter change.
     fn unpause_log(&mut self, cx: &mut Context<Self>) {
         self.log_paused = false;
         let len = self.channel.read(cx).len();
@@ -1650,6 +1673,8 @@ impl ChatView {
         self.paused_needs_reset = false;
         self.resync_log_to_model(cx);
         self.events_list_state.reset(self.events_shown.len());
+        self.mentions_list_state.remeasure();
+        self.mentions_feed.remeasure();
         self.refresh_log(cx);
         cx.notify();
     }
@@ -4910,37 +4935,6 @@ impl ChatView {
         self.aux_panel("events-panel", "Events", tabs::PanelKind::Events, body, cx)
     }
 
-    /// The scrollable rows column of an aux panel: a `relative` wrapper holding
-    /// the scrolling column plus an absolute scrollbar over the same handle, so
-    /// dragging the thumb scrolls the panel. The horizontal inset around the
-    /// rows is exactly the visible gap on each side (event pills render `flush`,
-    /// no negative-margin bleed — see `render_event`). No scrollbar gutter
-    /// (unlike the log, whose right-edge hover buttons must clear the thumb):
-    /// the panel rarely overflows, and when it does the thumb overlays the row
-    /// edge like a standard overlay scrollbar.
-    fn panel_scroll_list(
-        &self,
-        id: &'static str,
-        scroll: &gpui::ScrollHandle,
-        rows: Vec<gpui::AnyElement>,
-    ) -> gpui::AnyElement {
-        div()
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .child(
-                div()
-                    .id(id)
-                    .size_full()
-                    .overflow_y_scroll()
-                    .track_scroll(scroll)
-                    .text_size(px(self.font_size))
-                    .child(v_flex().gap_1().px(px(6.0)).children(rows)),
-            )
-            .vertical_scrollbar(scroll)
-            .into_any_element()
-    }
-
     /// The shared chrome of an aux panel (events/mentions): a full-size column
     /// on the chat log's (lighter) background — so the panels read as one
     /// surface with it — with the pinned [`panel_header`](Self::panel_header)
@@ -5062,31 +5056,14 @@ impl ChatView {
     fn render_mentions_panel(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let font_size = self.font_size;
         let all_tabs = self.config.mentions_all_tabs;
-        let rows: Vec<gpui::AnyElement> = if all_tabs {
-            crate::mentions::feed_rows(&self.mention_store, font_size, cx)
+        let body = if all_tabs {
+            self.mentions_feed
+                .render(&self.mention_store, font_size, cx)
         } else {
-            let entity = cx.entity();
-            // The panel isn't part of the log's drag-select; give its rows their
-            // own throwaway selection context (same as the usercard's message list).
-            let selection = selectable::Selection::new();
-            selection.begin_frame();
-            let mut ordinal = 0usize;
             let model = self.channel.read(cx);
-            // The matched set is cached by `rows_generation`: this runs on every
-            // ChatView render — at animation rate while the picker is open (a
-            // cell tick dirties this view) — and re-scanning the whole ring
-            // buffer through the matcher each time was the panel's dominant
-            // cost. Chat rows and a sub/resub event's attached chatter message
-            // both count as mention sources; the join backlog stays out (a
-            // days-old mention would misread as new). Event-attached messages
-            // are interned into `Arc` once, at rebuild.
             let generation = model.rows_generation();
-            let stale = self
-                .mentions_panel_cache
-                .borrow()
-                .as_ref()
-                .is_none_or(|(g, _)| *g != generation);
-            if stale {
+            let mut cache = self.mentions_panel_cache.borrow_mut();
+            if cache.as_ref().is_none_or(|(g, _)| *g != generation) {
                 let matched: Vec<std::sync::Arc<Message>> = model
                     .rows
                     .iter()
@@ -5107,50 +5084,74 @@ impl ChatView {
                         })
                     })
                     .collect();
-                *self.mentions_panel_cache.borrow_mut() = Some((generation, matched));
+                let keys = |rows: &[std::sync::Arc<Message>]| {
+                    rows.iter()
+                        .map(|m| (m.platform, m.id.clone()))
+                        .collect::<Vec<_>>()
+                };
+                let old = cache
+                    .as_ref()
+                    .map(|(_, rows)| keys(rows))
+                    .unwrap_or_default();
+                crate::mentions::sync_list(&self.mentions_list_state, &old, &keys(&matched));
+                *cache = Some((generation, matched));
             }
-            let cache = self.mentions_panel_cache.borrow();
-            let (_, matched) = cache.as_ref().expect("cache filled above");
-            // Struck + cosmetics resolve against the live model per render (both
-            // can change without a structural row edit); `decorate` only clones a
-            // message when its author actually has cosmetics (Cow).
-            matched
-                .iter()
-                .map(|msg| {
-                    let struck = model.is_struck(msg);
-                    let decorated = log::decorate(msg, model);
-                    render::render_message(
-                        &decorated,
-                        render::RowFlags {
-                            struck,
-                            mentioned: true,
-                            hide_timestamp: !crate::settings::show_timestamps_mentions(),
-                            ..Default::default()
-                        },
-                        font_size,
-                        &selection,
-                        &mut ordinal,
-                        render::RowHandlers {
-                            name_click: Some(name_click_for(&entity, msg)),
-                            mention_click: Some(mention_click_for(&entity, msg)),
-                            ..Default::default()
-                        },
-                    )
+            let empty = cache.as_ref().is_none_or(|(_, rows)| rows.is_empty());
+            drop(cache);
+            if empty {
+                div()
+                    .px_2()
+                    .text_size(px(font_size * 0.85))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("No mentions yet.")
                     .into_any_element()
+            } else {
+                let entity = cx.entity();
+                let content = gpui::list(self.mentions_list_state.clone(), move |ix, _, cx| {
+                    let this = entity.read(cx);
+                    let cache = this.mentions_panel_cache.borrow();
+                    let Some(msg) = cache.as_ref().and_then(|(_, rows)| rows.get(ix)) else {
+                        return div().into_any_element();
+                    };
+                    let model = this.channel.read(cx);
+                    let decorated = log::decorate(msg, model);
+                    let selection = selectable::Selection::new();
+                    let mut ordinal = 0;
+                    div()
+                        .debug_selector({
+                            let id = msg.id.clone();
+                            move || format!("local-mention-{id}")
+                        })
+                        .px(px(6.))
+                        .pb_1()
+                        .child(render::render_message(
+                            &decorated,
+                            render::RowFlags {
+                                struck: model.is_struck(msg),
+                                mentioned: true,
+                                hide_timestamp: !crate::settings::show_timestamps_mentions(),
+                                ..Default::default()
+                            },
+                            font_size,
+                            &selection,
+                            &mut ordinal,
+                            render::RowHandlers {
+                                name_click: Some(name_click_for(&entity, msg)),
+                                mention_click: Some(mention_click_for(&entity, msg)),
+                                ..Default::default()
+                            },
+                        ))
+                        .into_any_element()
                 })
-                .collect()
-        };
-        tail_panel(&mut self.mentions_new, &self.mentions_scroll);
-
-        let body = if rows.is_empty() {
-            div()
-                .px_2()
-                .text_size(px(font_size * 0.85))
-                .text_color(cx.theme().muted_foreground)
-                .child(SharedString::from("No mentions yet."))
-                .into_any_element()
-        } else {
-            self.panel_scroll_list("mentions-panel-list", &self.mentions_scroll, rows)
+                .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
+                .size_full();
+                crate::mentions::list_body(
+                    "mentions-panel-list",
+                    &self.mentions_list_state,
+                    font_size,
+                    content,
+                )
+            }
         };
         let label = if all_tabs {
             "Mentions — all tabs"
@@ -6775,12 +6776,6 @@ fn filtered_event_seqs(
         .collect()
 }
 
-/// Tails an aux panel like the chat log: if a new row arrived (`new_flag`,
-/// consumed here) and the panel was already scrolled to the bottom (or isn't
-/// yet overflowing), snap to the newest row; otherwise leave the user's scroll
-/// position alone so they can read history. `offset.y` grows more negative as
-/// you scroll down, reaching `-max_offset.y` at the bottom (a small epsilon
-/// absorbs rounding).
 /// A fresh Bottom-aligned, tail-following list state for the search window's
 /// virtualized results — one per window open, so it starts glued to the newest
 /// row (a Bottom list with no scroll history shows its end) like the log.
@@ -6788,16 +6783,6 @@ fn fresh_search_list_state() -> ListState {
     let state = ListState::new(0, ListAlignment::Bottom, px(200.));
     state.set_follow_mode(FollowMode::Tail);
     state
-}
-
-pub(crate) fn tail_panel(new_flag: &mut bool, scroll: &gpui::ScrollHandle) {
-    if std::mem::take(new_flag) {
-        let offset = scroll.offset().y;
-        let max = scroll.max_offset().y;
-        if offset <= -max + px(2.) {
-            scroll.scroll_to_bottom();
-        }
-    }
 }
 
 /// Sizes a layout column/panel by its fractional share: `flex_grow` on a zero

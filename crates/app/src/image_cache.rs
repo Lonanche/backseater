@@ -262,9 +262,8 @@ fn cache_file(url: &str) -> Option<PathBuf> {
 /// but decode **only the first frame**. Decoding an animated emote's full frame
 /// set is what dominated CPU while fast-scrolling the picker (the thumbnails are
 /// static, yet every scrolled-past emote paid the whole-animation decode); a
-/// poster is ~1/frame-count of that work. The picker renders static cells from
-/// `poster://<url>` and switches to the real URL (a separate cache slot, full
-/// decode) only for the hovered, animating cell.
+/// poster can display before the full animation finishes decoding. Both entries
+/// share their in-flight compressed bytes through `image_bytes`.
 pub(crate) const POSTER_PREFIX: &str = "poster://";
 
 /// Frames taller than this (device px) are downscaled at decode time, preserving
@@ -434,32 +433,7 @@ async fn load_poster(
     cache: Option<PathBuf>,
 ) -> Result<Arc<RenderImage>, ImageCacheError> {
     let _load = load_semaphore().acquire().await;
-    // Disk bytes when present + readable; a read failure falls back to the
-    // network like a plain miss (an unreadable file must not pin the poster
-    // to a failure loop).
-    let disk_bytes = match &cache {
-        Some(path) if path.exists() => {
-            touch(path);
-            read_cached_bytes(path)
-                .inspect_err(|err| {
-                    tracing::warn!("image: poster disk read failed for {url} ({err:#})")
-                })
-                .ok()
-        }
-        _ => None,
-    };
-    let bytes = match disk_bytes {
-        Some(bytes) => bytes,
-        None => {
-            let bytes = fetch_bytes(&url).await?;
-            if let Some(path) = &cache {
-                if let Err(err) = std::fs::write(path, &bytes) {
-                    tracing::warn!("image: disk write failed for {url} → {path:?} ({err:#})");
-                }
-            }
-            bytes
-        }
-    };
+    let bytes = image_bytes(&url, cache.clone()).await?;
     let _permit = poster_decode_semaphore().acquire().await;
     let result = decode_poster(&bytes);
     if result.is_err() {
@@ -519,49 +493,71 @@ async fn load_cached(
     cache: Option<PathBuf>,
 ) -> Result<Arc<RenderImage>, ImageCacheError> {
     let _load = load_semaphore().acquire().await;
+    let bytes = image_bytes(&url, cache.clone()).await?;
+    let _permit = decode_semaphore().acquire().await;
+    let result = decode_frames(&bytes, &url);
+    if result.is_err() {
+        if let Some(path) = cache {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    result.inspect_err(|err| tracing::warn!("image: decode failed for {url} ({err:#})"))
+}
+
+type ByteFuture = futures::future::BoxFuture<'static, Result<Arc<Vec<u8>>, Arc<str>>>;
+
+/// Poster and animation entries share one disk read/download for the real URL.
+/// Weak futures neither retain compressed bytes nor keep abandoned downloads alive.
+async fn image_bytes(url: &str, cache: Option<PathBuf>) -> anyhow::Result<Arc<Vec<u8>>> {
+    static PENDING: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, futures::future::WeakShared<ByteFuture>>>,
+    > = std::sync::OnceLock::new();
+    let pending = PENDING.get_or_init(Default::default);
+    let future = {
+        let mut pending = pending.lock().unwrap();
+        pending.retain(|_, task| task.upgrade().is_some());
+        if let Some(task) = pending.get(url).and_then(|task| task.upgrade()) {
+            task
+        } else {
+            let key = url.to_string();
+            let url = key.clone();
+            let task: ByteFuture = async move {
+                read_image_bytes(&url, cache)
+                    .await
+                    .map(Arc::new)
+                    .map_err(|err| Arc::<str>::from(format!("{err:#}")))
+            }
+            .boxed();
+            let task = task.shared();
+            pending.insert(key, task.downgrade().expect("unpolled future"));
+            task
+        }
+    };
+    future.await.map_err(|err| anyhow::anyhow!("{err}"))
+}
+
+async fn read_image_bytes(url: &str, cache: Option<PathBuf>) -> anyhow::Result<Vec<u8>> {
     if let Some(path) = &cache {
-        // Disk hit: decode from the file, no network. Touch its mtime so the
-        // age-based prune (see [`prune_disk_cache`]) treats it as recently used.
         if path.exists() {
-            touch(path);
             match read_cached_bytes(path) {
                 Ok(bytes) => {
-                    let _permit = decode_semaphore().acquire().await;
-                    let result = decode_frames(&bytes, &url);
-                    if let Err(err) = &result {
-                        // A decode error on an existing cache file means the file is
-                        // corrupt (truncated/partial write). Delete it so the next
-                        // attempt re-fetches.
-                        tracing::warn!(
-                            "image: disk-cache decode failed for {url} ({err:#}); deleting {path:?}"
-                        );
-                        let _ = std::fs::remove_file(path);
-                    }
-                    return result;
+                    touch(path);
+                    return Ok(bytes);
                 }
-                // An unreadable file (locked, permissions) would otherwise fail
-                // every retry forever — drop it and fall through to a fresh fetch.
                 Err(err) => {
-                    tracing::warn!(
-                        "image: disk-cache read failed for {url} ({err:#}); deleting {path:?} and re-fetching"
-                    );
+                    tracing::warn!("image: disk read failed for {url}: {err:#}");
                     let _ = std::fs::remove_file(path);
                 }
             }
         }
     }
-    // Disk miss: fetch, write through (best-effort), decode the fetched bytes.
-    let bytes = fetch_bytes(&url)
-        .await
-        .inspect_err(|err| tracing::warn!("image: fetch failed for {url} ({err:#})"))?;
-    if let Some(path) = &cache {
-        if let Err(err) = std::fs::write(path, &bytes) {
-            tracing::warn!("image: disk write failed for {url} → {path:?} ({err:#})");
+    let bytes = fetch_bytes(url).await?;
+    if let Some(path) = cache {
+        if let Err(err) = std::fs::write(&path, &bytes) {
+            tracing::warn!("image: disk write failed for {url}: {err:#}");
         }
     }
-    let _permit = decode_semaphore().acquire().await;
-    decode_frames(&bytes, &url)
-        .inspect_err(|err| tracing::warn!("image: decode failed for {url} ({err:#})"))
+    Ok(bytes)
 }
 
 /// One shared `reqwest::Client` for image downloads, with connection pooling +
@@ -684,7 +680,7 @@ impl ImageCache for LruImageCache {
         let task = match resource {
             // Poster: the picker's static thumbnails — shared bytes, first-frame
             // decode (see [`POSTER_PREFIX`]). Its own slot (the hash covers the
-            // prefix), so the hovered cell's full animation is a separate entry.
+            // prefix), so the cell's full animation is a separate entry.
             Resource::Uri(uri) if uri.starts_with(POSTER_PREFIX) => {
                 let url = uri[POSTER_PREFIX.len()..].to_string();
                 let file = cache_file(&url);
@@ -756,6 +752,42 @@ mod tests {
             }
         }
         bytes
+    }
+
+    #[tokio::test]
+    async fn poster_and_animation_share_one_cold_download() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/emote.gif", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let bytes = gif(8, 8, 2);
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let mut read = 0;
+                while !request[..read].ends_with(b"\r\n\r\n") {
+                    let received = socket.read(&mut request[read..]).await.unwrap();
+                    assert!(received > 0, "incomplete HTTP request");
+                    read += received;
+                }
+                count.fetch_add(1, Ordering::Relaxed);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    bytes.len()
+                );
+                socket.write_all(header.as_bytes()).await.unwrap();
+                socket.write_all(&bytes).await.unwrap();
+            }
+        });
+        let (poster, animation) =
+            tokio::join!(load_poster(url.clone(), None), load_cached(url, None));
+        assert_eq!(poster.unwrap().frame_count(), 1);
+        assert_eq!(animation.unwrap().frame_count(), 2);
+        assert_eq!(requests.load(Ordering::Relaxed), 1);
+        server.abort();
     }
 
     #[test]

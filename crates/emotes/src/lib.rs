@@ -10,7 +10,7 @@ pub use bttv::BttvProvider;
 pub use ffz::FfzProvider;
 pub use paints::{
     enabled as paints_enabled, resolve as resolve_cosmetics, set_enabled as set_paints_enabled,
-    Cosmetics,
+    Cosmetics, COSMETICS_TTL,
 };
 pub use registry::{EmoteMap, EmoteRegistry};
 pub use seventv::SeventvProvider;

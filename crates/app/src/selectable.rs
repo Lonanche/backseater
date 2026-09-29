@@ -27,6 +27,13 @@ use gpui::{
     Window,
 };
 
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct TextStyleSamples(pub RefCell<Vec<(SharedString, Pixels)>>);
+
+#[cfg(test)]
+impl gpui::Global for TextStyleSamples {}
+
 /// Highlight color painted behind selected text (a translucent blue).
 fn selection_color() -> Hsla {
     Hsla {
@@ -416,6 +423,13 @@ impl Element for SelectableText {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let (layout_id, ()) = self.styled.request_layout(None, inspector_id, window, cx);
+        #[cfg(test)]
+        if let Some(samples) = cx.try_global::<TextStyleSamples>() {
+            samples.0.borrow_mut().push((
+                self.text.clone(),
+                window.text_style().font_size.to_pixels(window.rem_size()),
+            ));
+        }
         (layout_id, ())
     }
 

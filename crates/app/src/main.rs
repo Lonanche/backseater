@@ -50,7 +50,6 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::scroll::ScrollableElement;
 use gpui_component::searchable_list::SearchableVec;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
@@ -793,13 +792,11 @@ pub(crate) struct BackseaterApp {
     /// instead of a normal tab. Session-only; selecting any tab clears it.
     mentions_tab_selected: bool,
     /// Scroll position of the global Mentions tab's feed (tailed like the panels).
-    mentions_scroll: ScrollHandle,
+    mentions_feed: mentions::FeedList,
     /// Scroll positions of the settings content panes, so their scrollbars can be
     /// driven persistently (always visible when the content overflows).
     settings_scroll: ScrollHandle,
     tab_settings_scroll: ScrollHandle,
-    /// Set when a mention arrived; the global Mentions tab tails on next render.
-    mentions_new: bool,
     /// A mention arrived while the Mentions tab wasn't the active view. Drives
     /// the bold-name unread cue on its chip (like a normal tab's `unread`);
     /// cleared when the Mentions tab is selected.
@@ -907,7 +904,6 @@ impl BackseaterApp {
             }),
             // Tail + repaint the global Mentions tab when a mention arrives.
             cx.observe(&mention_store, |this, _, cx| {
-                this.mentions_new = true;
                 // Mark the Mentions chip unread unless its feed is what's showing.
                 if !(this.settings.mentions_tab && this.mentions_tab_selected) {
                     this.mentions_unread = true;
@@ -1076,10 +1072,9 @@ impl BackseaterApp {
             window_title: String::new(),
             mention_store,
             mentions_tab_selected: false,
-            mentions_scroll: ScrollHandle::new(),
+            mentions_feed: mentions::FeedList::default(),
             settings_scroll: ScrollHandle::new(),
             tab_settings_scroll: ScrollHandle::new(),
-            mentions_new: false,
             mentions_unread: false,
             _mention_subs,
             twitch_perm_open: false,
@@ -3793,6 +3788,7 @@ impl BackseaterApp {
     /// Re-measures every tab's log — for process-wide changes that alter row
     /// layout outside the rows' own data (the mod-button strip).
     fn remeasure_tabs(&self, cx: &mut Context<Self>) {
+        self.mentions_feed.remeasure();
         for tab in &self.tabs {
             tab.view.update(cx, |view, cx| view.remeasure(cx));
         }
@@ -4629,9 +4625,7 @@ impl BackseaterApp {
         self.settings.font_family = family;
         self.settings.save();
         apply_font(self.settings.font_family.as_deref(), cx);
-        for tab in &self.tabs {
-            tab.view.update(cx, |view, cx| view.remeasure(cx));
-        }
+        self.remeasure_tabs(cx);
         cx.notify();
     }
 
@@ -5335,36 +5329,9 @@ impl BackseaterApp {
     /// popped-out Mentions window ([`popout::MentionsWindow`]) can render it too.
     pub(crate) fn mentions_tab_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let font_size = self.settings.font_size;
-        let rows = mentions::feed_rows(&self.mention_store, font_size, cx);
-        chatview::tail_panel(&mut self.mentions_new, &self.mentions_scroll);
-
-        let body: gpui::AnyElement = if rows.is_empty() {
-            div()
-                .px_3()
-                .py_2()
-                .text_size(px(font_size * 0.85))
-                .text_color(cx.theme().muted_foreground)
-                .child(SharedString::from(
-                    "No mentions yet — messages that mention you, from any tab, collect here.",
-                ))
-                .into_any_element()
-        } else {
-            div()
-                .relative()
-                .flex_1()
-                .min_h_0()
-                .child(
-                    div()
-                        .id("mentions-tab-list")
-                        .size_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.mentions_scroll)
-                        .text_size(px(font_size))
-                        .child(v_flex().gap_1().px(px(6.0)).py_2().children(rows)),
-                )
-                .vertical_scrollbar(&self.mentions_scroll)
-                .into_any_element()
-        };
+        let body = self
+            .mentions_feed
+            .render(&self.mention_store, font_size, cx);
         v_flex()
             .size_full()
             .min_h_0()

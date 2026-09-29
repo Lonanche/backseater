@@ -171,28 +171,73 @@ pub enum ChannelEvent {
     /// run after the whole update burst, when `events.back()` may already be a
     /// later event. Views append it to their events panel if it passes their
     /// kind filter.
-    EventAppended { seq: u64 },
+    EventAppended {
+        seq: u64,
+    },
     /// The events buffer trimmed old entries past `MAX_EVENTS` (`events_base`
     /// advanced). Views drop shown sequence numbers below the new base.
     EventsTrimmed,
-    /// A non-structural change (a row's content updated in place, e.g. an AutoMod
-    /// row resolved, or side-table state changed) — views just repaint.
-    Changed,
-    /// A viewer count changed. Split from [`Changed`](Self::Changed) because it
+    /// Only the matching rows need new measurements; other updates just repaint.
+    RowsChanged(RowChange),
+    Repaint,
+    PinsChanged,
+    EmotesChanged,
+    StatusChanged,
+    /// A viewer count changed. Split from [`RowsChanged`](Self::RowsChanged) because it
     /// fires steadily (every ~30s per live platform) and only the status bar /
     /// tooltip read it — views answer with a bare repaint, NOT the log re-measure
-    /// `Changed` triggers.
+    /// `RowsChanged` triggers.
     ViewersChanged,
     /// A platform's chat-restriction modes changed (follower-only, emote-only,
     /// slow, ...). Like [`ViewersChanged`](Self::ViewersChanged): only the mode
     /// bar above the composer reads it, so views answer with a bare repaint,
-    /// never the log re-measure `Changed` triggers.
+    /// never the log re-measure `RowsChanged` triggers.
     ChatModesChanged,
     /// A platform's stream just transitioned to live (the `live` flag flipped
     /// false→true). Fired alongside the `Row::Live` push so the tab strip can
     /// flash the chip; a mere in-place `Live` update (a late start time, an
     /// offline seed) does not fire it.
-    WentLive { platform: bks_core::Platform },
+    WentLive {
+        platform: bks_core::Platform,
+    },
+}
+
+/// Match identities after the structural event batch has settled; indices in an
+/// emitted event can already be stale when a ring-buffer trim is delivered.
+#[derive(Clone)]
+pub enum RowChange {
+    All,
+    Message(Platform, String),
+    Author(Platform, String),
+}
+
+impl RowChange {
+    pub fn matches(&self, row: &Row) -> bool {
+        if matches!(self, Self::All) {
+            return true;
+        }
+        if let Row::AutoMod { message_id, .. } = row {
+            return matches!(self, Self::Message(Platform::Twitch, id) if id == message_id);
+        }
+        let Some(msg) = borrowed_message(row) else {
+            return false;
+        };
+        match self {
+            Self::All => true,
+            Self::Message(platform, id) => *platform == msg.platform && *id == msg.id,
+            Self::Author(platform, id) => *platform == msg.platform && *id == msg.author.user_id,
+        }
+    }
+}
+
+fn borrowed_message(row: &Row) -> Option<&Message> {
+    match row {
+        Row::Message { msg } => Some(msg),
+        Row::Event {
+            message: Some(msg), ..
+        } => Some(msg),
+        _ => None,
+    }
 }
 
 /// One channel's shared model: the message buffer + connection + per-channel state.
@@ -228,7 +273,7 @@ pub struct ChannelModel {
     /// Nested (not a `(Platform, String)` tuple key) so the per-row/per-frame
     /// [`is_struck`](Self::is_struck) lookup probes the inner set with a borrowed
     /// `&str` — no key `String` allocation on the hot render path.
-    struck_ids: HashMap<Platform, HashSet<String>>,
+    struck_ids: HashMap<Platform, HashMap<String, ((), std::time::Instant)>>,
     /// Ban/timeout fades keyed platform → (lowercased login → cutoff time): only
     /// that author's messages *at or before* the cutoff are struck. The cutoff is
     /// the clear's server-side timestamp (falling back to "now"), so once the
@@ -236,7 +281,7 @@ pub struct ChannelModel {
     /// we joined — the user's newer messages render normally (the fade doesn't
     /// leak onto future chat). Nested for the same borrowed-`&str` lookup as
     /// `struck_ids`.
-    struck_authors: HashMap<Platform, HashMap<String, DateTime<Utc>>>,
+    struck_authors: HashMap<Platform, HashMap<String, (DateTime<Utc>, std::time::Instant)>>,
     /// Suspicious-user (Twitch "Low Trust") marks keyed platform → (msg id →
     /// mark), resolved at render like `struck_ids` (nested for the same
     /// borrowed-`&str` probe). Entries are pruned with their row on ring trim;
@@ -247,7 +292,8 @@ pub struct ChannelModel {
     /// render time. Nested so the per-row lookup borrows `user_id` as `&str`
     /// (cosmetics resolve for most active chatters, so this ran per visible row
     /// per frame with a `to_string` on the old tuple key).
-    cosmetics: HashMap<Platform, HashMap<String, bks_emotes::Cosmetics>>,
+    cosmetics: HashMap<Platform, HashMap<String, (bks_emotes::Cosmetics, std::time::Instant)>>,
+    retention_tick: u8,
     /// Active pinned message per platform (shown as a banner).
     pub pins: HashMap<Platform, ActivePin>,
     /// Latest live status per platform (for the tab strip's hover tooltip).
@@ -380,7 +426,7 @@ impl ChannelModel {
         if self
             .struck_ids
             .get(&msg.platform)
-            .is_some_and(|ids| ids.contains(msg.id.as_str()))
+            .is_some_and(|ids| ids.contains_key(msg.id.as_str()))
         {
             return true;
         }
@@ -399,7 +445,7 @@ impl ChannelModel {
         } else {
             authors.get(login.as_str())
         };
-        cutoff.is_some_and(|&cutoff| msg.timestamp <= cutoff)
+        cutoff.is_some_and(|&(cutoff, _)| msg.timestamp <= cutoff)
     }
 
     /// The suspicious-user mark on a message, if any (resolved at render time
@@ -422,13 +468,70 @@ impl ChannelModel {
         if self.cosmetics.is_empty() || user_id.is_empty() {
             return None;
         }
-        self.cosmetics.get(&platform)?.get(user_id)
+        self.cosmetics
+            .get(&platform)?
+            .get(user_id)
+            .map(|(value, _)| value)
+    }
+
+    fn prune_side_tables(&mut self) {
+        if self.struck_ids.is_empty() && self.struck_authors.is_empty() && self.cosmetics.is_empty()
+        {
+            return;
+        }
+        let mut ids = HashSet::new();
+        let mut authors = HashSet::new();
+        let mut users = HashSet::new();
+        let messages = self
+            .rows
+            .iter()
+            .filter_map(borrowed_message)
+            .chain(
+                self.events
+                    .iter()
+                    .filter_map(|event| event.message.as_deref()),
+            )
+            .chain(self.pins.values().map(|pin| pin.message.as_ref()));
+        for msg in messages {
+            ids.insert((msg.platform, msg.id.as_str()));
+            if !self.struck_authors.is_empty() {
+                authors.insert((msg.platform, msg.author.login.to_lowercase()));
+            }
+            users.insert((msg.platform, msg.author.user_id.as_str()));
+        }
+        let authors: HashSet<_> = authors
+            .iter()
+            .map(|(p, name)| (*p, name.as_str()))
+            .collect();
+        let now = std::time::Instant::now();
+        prune_records(
+            &mut self.struck_ids,
+            now,
+            RECORD_GRACE,
+            MAX_PENDING_RECORDS,
+            |platform, key| ids.contains(&(platform, key)),
+        );
+        prune_records(
+            &mut self.struck_authors,
+            now,
+            RECORD_GRACE,
+            MAX_PENDING_RECORDS,
+            |platform, key| authors.contains(&(platform, key)),
+        );
+        // Keep resolved styles at least as long as the bridge deduplicates authors.
+        prune_records(
+            &mut self.cosmetics,
+            now,
+            bks_emotes::COSMETICS_TTL,
+            4096,
+            |platform, key| users.contains(&(platform, key)),
+        );
     }
 
     /// Forgets all resolved cosmetics (7TV-cosmetics toggle turned off).
     pub fn clear_cosmetics(&mut self, cx: &mut Context<Self>) {
         self.cosmetics.clear();
-        cx.emit(ChannelEvent::Changed);
+        cx.emit(ChannelEvent::RowsChanged(RowChange::All));
         cx.notify();
     }
 
@@ -703,16 +806,16 @@ impl ChannelModel {
         self.struck_authors
             .entry(platform)
             .or_default()
-            .insert(login.to_lowercase(), cutoff);
-        cx.emit(ChannelEvent::Changed);
+            .insert(login.to_lowercase(), (cutoff, std::time::Instant::now()));
+        cx.emit(ChannelEvent::Repaint);
     }
 
     fn mark_deleted(&mut self, platform: Platform, message_id: &str, cx: &mut Context<Self>) {
         self.struck_ids
             .entry(platform)
             .or_default()
-            .insert(message_id.to_string());
-        cx.emit(ChannelEvent::Changed);
+            .insert(message_id.to_string(), ((), std::time::Instant::now()));
+        cx.emit(ChannelEvent::Repaint);
     }
 
     /// Resolves a held AutoMod row in place (a status line replaces its buttons).
@@ -732,7 +835,10 @@ impl ChannelModel {
             {
                 if id == message_id {
                     *resolved = Some((status, moderator));
-                    cx.emit(ChannelEvent::Changed);
+                    cx.emit(ChannelEvent::RowsChanged(RowChange::Message(
+                        Platform::Twitch,
+                        message_id.to_string(),
+                    )));
                     break;
                 }
             }
@@ -763,7 +869,7 @@ impl ChannelModel {
                     .is_some_and(|p| p.message.id == msg_id && p.expired());
                 if expired {
                     model.pins.remove(&platform);
-                    cx.emit(ChannelEvent::Changed);
+                    cx.emit(ChannelEvent::PinsChanged);
                     cx.notify();
                 }
             });
@@ -909,7 +1015,10 @@ impl ChannelModel {
                 if already_shown {
                     // The monitored user's copy is already in the log — the mark
                     // adds the corner pill (a height change), so re-measure.
-                    cx.emit(ChannelEvent::Changed);
+                    cx.emit(ChannelEvent::RowsChanged(RowChange::Message(
+                        platform,
+                        message.id.clone(),
+                    )));
                 } else if status == SuspiciousStatus::Restricted {
                     // A restricted user's message is withheld from the normal
                     // read connection — this carried copy is the only one.
@@ -926,7 +1035,7 @@ impl ChannelModel {
                 is_mod,
                 is_broadcaster,
             } => {
-                // Only a real flip re-measures the log (`Changed` resets every
+                // Only a real flip re-measures the log (`RowsChanged` remeasures every
                 // view's list) — Kick re-asserts this from each of our own
                 // messages, and Twitch on every reconnect.
                 let changed = match platform {
@@ -945,7 +1054,7 @@ impl ChannelModel {
                     _ => false,
                 };
                 if changed {
-                    cx.emit(ChannelEvent::Changed);
+                    cx.emit(ChannelEvent::RowsChanged(RowChange::All));
                 }
             }
             ChatEvent::DeleteMessage {
@@ -966,7 +1075,7 @@ impl ChannelModel {
                         ends_at,
                     },
                 );
-                cx.emit(ChannelEvent::Changed);
+                cx.emit(ChannelEvent::PinsChanged);
                 // A timed pin needs a wakeup to clear the banner when it expires,
                 // even if chat is otherwise quiet. The model owns the pins, so it
                 // schedules this itself (not per-view).
@@ -976,7 +1085,7 @@ impl ChannelModel {
             }
             ChatEvent::UnpinMessage { platform } => {
                 self.pins.remove(&platform);
-                cx.emit(ChannelEvent::Changed);
+                cx.emit(ChannelEvent::PinsChanged);
             }
             ChatEvent::Live {
                 platform,
@@ -1025,7 +1134,7 @@ impl ChannelModel {
                         cx.emit(ChannelEvent::WentLive { platform });
                     }
                 } else {
-                    cx.emit(ChannelEvent::Changed);
+                    cx.emit(ChannelEvent::StatusChanged);
                 }
             }
             ChatEvent::Viewers { platform, count } => {
@@ -1064,9 +1173,7 @@ impl ChannelModel {
                     Platform::YouTube => self.emotes_youtube = emotes,
                     _ => self.emotes_twitch = emotes,
                 }
-                // Views refilter their open picker on this Changed (picker reads
-                // emotes live from the model).
-                cx.emit(ChannelEvent::Changed);
+                cx.emit(ChannelEvent::EmotesChanged);
             }
             ChatEvent::Cosmetics {
                 platform,
@@ -1074,11 +1181,16 @@ impl ChannelModel {
                 paint,
                 badge,
             } => {
-                self.cosmetics
-                    .entry(platform)
-                    .or_default()
-                    .insert(user_id, bks_emotes::Cosmetics { paint, badge });
-                cx.emit(ChannelEvent::Changed);
+                self.cosmetics.entry(platform).or_default().insert(
+                    user_id.clone(),
+                    (
+                        bks_emotes::Cosmetics { paint, badge },
+                        std::time::Instant::now(),
+                    ),
+                );
+                cx.emit(ChannelEvent::RowsChanged(RowChange::Author(
+                    platform, user_id,
+                )));
             }
             ChatEvent::Channel(_) => {}
         }
@@ -1086,8 +1198,43 @@ impl ChannelModel {
         while self.rows.len() > MAX_ROWS {
             self.row_pop_front(cx);
         }
+        self.retention_tick = (self.retention_tick + 1) % 64;
+        if self.retention_tick == 0 {
+            self.prune_side_tables();
+        }
         cx.notify();
     }
+}
+
+// Keep a short, bounded grace window for records arriving before their message.
+const RECORD_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
+const MAX_PENDING_RECORDS: usize = 1024;
+
+fn prune_records<T>(
+    maps: &mut HashMap<Platform, HashMap<String, (T, std::time::Instant)>>,
+    now: std::time::Instant,
+    grace: std::time::Duration,
+    capacity: usize,
+    referenced: impl Fn(Platform, &str) -> bool,
+) {
+    for (platform, records) in maps.iter_mut() {
+        records
+            .retain(|key, (_, at)| referenced(*platform, key) || now.duration_since(*at) < grace);
+        if records.len() > capacity {
+            let mut pending: Vec<_> = records
+                .iter()
+                .filter(|(key, _)| !referenced(*platform, key))
+                .map(|(key, (_, at))| (key.clone(), *at))
+                .collect();
+            if pending.len() > capacity {
+                pending.sort_unstable_by_key(|(_, at)| *at);
+                for (key, _) in pending.iter().take(pending.len() - capacity) {
+                    records.remove(key);
+                }
+            }
+        }
+    }
+    maps.retain(|_, records| !records.is_empty());
 }
 
 /// The message of a new row, cloned to ride its `Appended`/`Inserted` event
@@ -1197,6 +1344,7 @@ fn model_from_connection(
             struck_authors: HashMap::new(),
             suspicious_ids: HashMap::new(),
             cosmetics: HashMap::new(),
+            retention_tick: 0,
             pins: HashMap::new(),
             live_status: HashMap::new(),
             viewer_counts: HashMap::new(),
@@ -1288,6 +1436,66 @@ fn gift_group(
 mod tests {
     use super::*;
     use bks_platform::EventDetails;
+
+    #[test]
+    fn retention_preserves_referenced_records_and_bounds_pending_records() {
+        let now = std::time::Instant::now();
+        let old = now - RECORD_GRACE;
+        let mut entries = HashMap::new();
+        entries.insert("retained".to_string(), ((), old));
+        entries.insert("expired".to_string(), ((), old));
+        for ix in 0..MAX_PENDING_RECORDS + 100 {
+            entries.insert(format!("pending-{ix}"), ((), now));
+        }
+        let mut maps = HashMap::from([(Platform::Twitch, entries)]);
+        prune_records(
+            &mut maps,
+            now,
+            RECORD_GRACE,
+            MAX_PENDING_RECORDS,
+            |_, key| key == "retained",
+        );
+        assert!(maps[&Platform::Twitch].contains_key("retained"));
+        assert!(!maps[&Platform::Twitch].contains_key("expired"));
+        assert_eq!(maps[&Platform::Twitch].len(), MAX_PENDING_RECORDS + 1);
+        prune_records(
+            &mut maps,
+            now + RECORD_GRACE,
+            RECORD_GRACE,
+            MAX_PENDING_RECORDS,
+            |_, key| key == "retained",
+        );
+        assert_eq!(maps[&Platform::Twitch].len(), 1);
+        prune_records(
+            &mut maps,
+            now + RECORD_GRACE,
+            RECORD_GRACE,
+            MAX_PENDING_RECORDS,
+            |_, _| false,
+        );
+        assert!(maps.is_empty());
+    }
+
+    #[test]
+    fn cosmetics_survive_the_lookup_deduplication_window() {
+        let now = std::time::Instant::now();
+        let mut maps = HashMap::from([(
+            Platform::Twitch,
+            HashMap::from([("returning-author".into(), ((), now - RECORD_GRACE))]),
+        )]);
+        prune_records(&mut maps, now, bks_emotes::COSMETICS_TTL, 4096, |_, _| {
+            false
+        });
+        assert!(maps[&Platform::Twitch].contains_key("returning-author"));
+        prune_records(
+            &mut maps,
+            now + bks_emotes::COSMETICS_TTL,
+            bks_emotes::COSMETICS_TTL,
+            4096,
+            |_, _| false,
+        );
+        assert!(maps.is_empty());
+    }
 
     #[test]
     fn bursts_are_processed_in_bounded_ordered_batches() {

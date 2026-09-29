@@ -137,41 +137,20 @@ type LiveSnapshot = (
 /// every transition — including the first observation if the channel is live, so
 /// opening a tab on an already-live stream still shows the notice.
 async fn poll_twitch_live(channel: String, tx: Sink) {
-    // The last-broadcast lookup (a second request) runs once per offline
-    // stretch, not on every 30s poll: the cache holds the fetched result
-    // (`Some(None)` = fetched, channel has no VODs) and is cleared while live so
-    // the fresh VOD is picked up after the stream ends.
-    let last_cache: Arc<tokio::sync::Mutex<Option<Option<LastStream>>>> = Arc::default();
-    // The viewer count is pushed by Hermes, but only every ~30s — seed it once
-    // per live stretch from GQL so the bar doesn't sit at a bare "LIVE" until
-    // the first push (which then takes over).
-    let seeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Seeding waits for the poll *after* the one that first saw the channel
-    // live: `poll_live` emits `Live{live:true}` only after this closure returns,
-    // so seeding on the same iteration sends `Viewers` first and the store drops
-    // it as a count for a still-offline platform. Deferring one poll guarantees
-    // the live transition is recorded before the seed lands.
-    let live_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let seed_tx = tx.clone();
-    poll_live(tx, bks_core::Platform::Twitch, move || {
-        let channel = channel.clone();
-        let last_cache = last_cache.clone();
-        let seeded = seeded.clone();
-        let live_seen = live_seen.clone();
-        let seed_tx = seed_tx.clone();
-        async move {
-            let s = bks_twitch::fetch_live_status(&channel).await?;
-            use std::sync::atomic::Ordering;
-            if s.live {
-                // Only a real number both marks the seed done and is emitted:
-                // GQL lags IVR at go-live (and a hidden count is None forever),
-                // and forwarding that None would delete a count Hermes already
-                // pushed. A miss just retries on the next poll.
-                if live_seen.swap(true, Ordering::Relaxed) && !seeded.load(Ordering::Relaxed) {
+    let mut previous: Option<LiveSnapshot> = None;
+    let mut last_cache: Option<Option<LastStream>> = None;
+    let mut seeded = false;
+    let mut live_seen = false;
+    while !tx.is_closed() {
+        let snapshot: anyhow::Result<LiveSnapshot> = async {
+            let status = bks_twitch::fetch_live_status(&channel).await?;
+            if status.live {
+                // Wait one poll so the Live event precedes its viewer-count seed.
+                if live_seen && !seeded {
                     match bks_twitch::fetch_viewer_count(&channel).await {
                         Ok(Some(count)) => {
-                            seeded.store(true, Ordering::Relaxed);
-                            let _ = seed_tx
+                            seeded = true;
+                            let _ = tx
                                 .send(ChatEvent::Viewers {
                                     platform: bks_core::Platform::Twitch,
                                     count: Some(count),
@@ -179,95 +158,63 @@ async fn poll_twitch_live(channel: String, tx: Sink) {
                                 .await;
                         }
                         Ok(None) => {}
-                        Err(err) => {
-                            tracing::debug!(
-                                "twitch viewer-count seed failed for {channel}: {err:#}"
-                            );
-                        }
+                        Err(err) => tracing::debug!(
+                            "twitch viewer-count seed failed for {channel}: {err:#}"
+                        ),
                     }
                 }
+                live_seen = true;
+                last_cache = None;
             } else {
-                // Re-seed the next live stretch.
-                seeded.store(false, Ordering::Relaxed);
-                live_seen.store(false, Ordering::Relaxed);
-            }
-            let last_stream = if s.live {
-                *last_cache.lock().await = None;
-                None
-            } else {
-                let mut cache = last_cache.lock().await;
-                if cache.is_none() {
-                    // GQL's newest archive VOD has the full picture (start,
-                    // length, category); IVR's `lastBroadcast` (start + title
-                    // only) is the fallback for channels with VODs disabled.
-                    let fetched = bks_twitch::fetch_last_stream(&channel)
-                        .await
-                        .unwrap_or_default()
-                        .or_else(|| {
-                            s.last_started_at.map(|started_at| LastStream {
-                                started_at,
-                                ended_at: None,
-                                title: s.last_title.clone(),
-                                game: String::new(),
-                            })
-                        });
-                    *cache = Some(fetched);
+                seeded = false;
+                live_seen = false;
+                if last_cache.is_none() {
+                    last_cache = Some(
+                        bks_twitch::fetch_last_stream(&channel)
+                            .await
+                            .unwrap_or_default()
+                            .or_else(|| {
+                                status.last_started_at.map(|started_at| LastStream {
+                                    started_at,
+                                    ended_at: None,
+                                    title: status.last_title.clone(),
+                                    game: String::new(),
+                                })
+                            }),
+                    );
                 }
-                cache.clone().flatten()
-            };
-            Ok((s.live, s.title, s.game, s.started_at, last_stream))
+            }
+            Ok((
+                status.live,
+                status.title,
+                status.game,
+                status.started_at,
+                last_cache.clone().flatten(),
+            ))
         }
-    })
-    .await;
-}
-
-/// Generic live-status poll loop (used by Twitch; Kick is push-based via Pusher).
-/// Calls `check` every [`LIVE_POLL_SECS`] (with an immediate first call) and
-/// forwards a `Live` event whenever the live flag changes from the previous
-/// observation. A failed check is logged and skipped (the previous state is kept),
-/// so a transient network blip doesn't spuriously toggle the status. Ends when the
-/// UI drops the receiver. (Twitch's viewer *count* doesn't ride this poll: it's
-/// pushed by the Hermes `video-playback-by-id` topic — see `twitch::pubsub` —
-/// which is fresher than anything IVR/GQL serve.)
-async fn poll_live<F, Fut>(tx: Sink, platform: bks_core::Platform, check: F)
-where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<LiveSnapshot>>,
-{
-    // Track the whole snapshot, not just the live flag: re-emit when the title,
-    // game, or start time changes too (e.g. the start time arrives a poll late, or
-    // the stream's title/category/start updates), so the tab tooltip stays current
-    // without needing a live↔offline flip. The first poll always emits (prev is
-    // `None`).
-    let mut prev: Option<LiveSnapshot> = None;
-    loop {
-        // The send below only fires on a *change*, so without this check a closed
-        // tab would keep polling a stable channel every LIVE_POLL_SECS forever.
-        if tx.is_closed() {
-            break;
-        }
-        match check().await {
-            Ok(snapshot) => {
+        .await;
+        match snapshot {
+            Ok(snapshot) if previous.as_ref() != Some(&snapshot) => {
                 let (live, title, game, started_at, last_stream) = snapshot.clone();
-                if prev.as_ref() != Some(&snapshot) {
-                    prev = Some(snapshot);
-                    let event = ChatEvent::Live {
-                        platform,
+                previous = Some(snapshot);
+                if tx
+                    .send(ChatEvent::Live {
+                        platform: bks_core::Platform::Twitch,
                         live,
                         title,
                         game,
                         started_at,
                         last_stream,
                         link: None,
-                    };
-                    if tx.send(event).await.is_err() {
-                        break; // UI side dropped the receiver.
-                    }
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
             }
-            Err(err) => {
-                tracing::warn!("live-status check failed for {}: {err:#}", platform.label());
-            }
+            Ok(_) => {}
+            Err(err) => tracing::warn!("live-status check failed for Twitch: {err:#}"),
         }
         tokio::time::sleep(std::time::Duration::from_secs(LIVE_POLL_SECS)).await;
     }
@@ -364,9 +311,8 @@ pub async fn run_twitch(
     // channel's own emotes on top.
     let mut registry = EmoteRegistry::with_globals(twitch_globals().await);
     let mut badges = BadgeMap::default();
-    // Chatters whose 7TV cosmetics we've already kicked off a lookup for, so each
-    // user is resolved once per connection (the result is also process-cached).
-    let mut seen_cosmetics: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Recent authors are deduplicated here; results are also process-cached.
+    let mut cosmetics = CosmeticsQueue::new(tx.clone());
 
     let mut stream = match source.join(&channel).await {
         Ok(stream) => stream,
@@ -506,7 +452,7 @@ pub async fn run_twitch(
                     &registry,
                     &badges,
                     raw_history,
-                    &mut seen_cosmetics,
+                    &mut cosmetics,
                     &tx,
                 )
                 .await;
@@ -514,7 +460,7 @@ pub async fn run_twitch(
             }
             ChatEvent::Message(mut msg) => {
                 resolve_message(&mut msg, &registry, &badges);
-                spawn_cosmetics(&mut seen_cosmetics, &msg, &tx);
+                cosmetics.enqueue(&msg.author.user_id, msg.platform);
                 ChatEvent::Message(msg)
             }
             // A sub/resub's attached message (and everything else) is resolved the
@@ -588,39 +534,83 @@ fn resolve_chat_event(registry: &EmoteRegistry, badges: &BadgeMap, event: ChatEv
     }
 }
 
-/// Kicks off a one-shot 7TV cosmetics (paint + badge) lookup for `msg`'s author,
-/// once per chatter per connection. On a hit it emits a `Cosmetics` event the UI
-/// applies to that user's rows. No-op when cosmetics are disabled or the author
-/// has no numeric id. The lookup is async + process-cached, so this never blocks
-/// the message loop and a chatter costs at most one network round-trip per session.
-fn spawn_cosmetics(
-    seen: &mut std::collections::HashSet<String>,
-    msg: &bks_core::Message,
-    tx: &Sink,
-) {
-    if !bks_emotes::paints_enabled() {
-        return;
+// Smaller than the model's cosmetic retention budget, so it cannot suppress a
+// returning author's lookup after the model has evicted their styling.
+const MAX_SEEN_COSMETICS: usize = 1024;
+
+/// Bounded, deduplicated cosmetic lookups that never block the chat reader.
+struct CosmeticsQueue {
+    tx: tokio::sync::mpsc::Sender<(String, bks_core::Platform)>,
+    seen: std::collections::HashSet<String>,
+    order: std::collections::VecDeque<(std::time::Instant, String)>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl CosmeticsQueue {
+    fn new(sink: Sink) -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, bks_core::Platform)>(1024);
+        let task = runtime().spawn(async move {
+            let mut jobs = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = sink.closed() => break,
+                    Some(_) = jobs.join_next(), if !jobs.is_empty() => {},
+                    request = rx.recv(), if jobs.len() < 8 => {
+                        let Some((user_id, platform)) = request else { break };
+                        let sink = sink.clone();
+                        jobs.spawn(async move {
+                            let cosmetics = bks_emotes::resolve_cosmetics(&user_id).await;
+                            if !cosmetics.is_empty() {
+                                let _ = sink.send(ChatEvent::Cosmetics { platform, user_id,
+                                    paint: cosmetics.paint, badge: cosmetics.badge }).await;
+                            }
+                        });
+                    }
+                }
+            }
+        });
+        Self {
+            tx,
+            seen: Default::default(),
+            order: Default::default(),
+            task,
+        }
     }
-    let user_id = msg.author.user_id.clone();
-    if user_id.is_empty() || !seen.insert(user_id.clone()) {
-        return;
-    }
-    let platform = msg.platform;
-    let tx = tx.clone();
-    runtime().spawn(async move {
-        let cosmetics = bks_emotes::resolve_cosmetics(&user_id).await;
-        if cosmetics.is_empty() {
+
+    fn enqueue(&mut self, id: &str, platform: bks_core::Platform) {
+        if !bks_emotes::paints_enabled() || id.is_empty() {
             return;
         }
-        let _ = tx
-            .send(ChatEvent::Cosmetics {
-                platform,
-                user_id,
-                paint: cosmetics.paint,
-                badge: cosmetics.badge,
-            })
-            .await;
-    });
+        let now = std::time::Instant::now();
+        while self
+            .order
+            .front()
+            .is_some_and(|(at, _)| now.duration_since(*at) >= bks_emotes::COSMETICS_TTL)
+        {
+            let (_, id) = self.order.pop_front().unwrap();
+            self.seen.remove(&id);
+        }
+        if self.seen.contains(id) {
+            return;
+        }
+        // Never stall chat for optional cosmetics. A full queue leaves the user
+        // eligible for another attempt the next time they speak.
+        if self.tx.try_send((id.to_owned(), platform)).is_err() {
+            return;
+        }
+        if self.order.len() == MAX_SEEN_COSMETICS {
+            let (_, old) = self.order.pop_front().unwrap();
+            self.seen.remove(&old);
+        }
+        self.seen.insert(id.to_owned());
+        self.order.push_back((now, id.to_owned()));
+    }
+}
+
+impl Drop for CosmeticsQueue {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 /// Applies 3rd-party emotes + badge images to a message (live or history).
@@ -645,7 +635,7 @@ async fn emit_history(
     registry: &EmoteRegistry,
     badges: &BadgeMap,
     raw_history: anyhow::Result<Vec<ChatEvent>>,
-    seen_cosmetics: &mut std::collections::HashSet<String>,
+    cosmetics: &mut CosmeticsQueue,
     tx: &Sink,
 ) {
     let events = match raw_history {
@@ -665,7 +655,7 @@ async fn emit_history(
         // process cache + the connection's `seen` set keep this to at most one
         // lookup per distinct backlog author.
         if let ChatEvent::Message(msg) = &event {
-            spawn_cosmetics(seen_cosmetics, msg, tx);
+            cosmetics.enqueue(&msg.author.user_id, msg.platform);
         }
         if tx.send(event).await.is_err() {
             break; // UI side dropped the receiver.
@@ -1062,4 +1052,45 @@ async fn load_emotes(
         meta.name,
         providers.len()
     );
+}
+
+#[cfg(test)]
+mod cosmetics_queue_tests {
+    use super::*;
+    use bks_core::Platform;
+
+    #[tokio::test]
+    async fn full_queue_retries_and_recent_authors_are_bounded() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let mut queue = CosmeticsQueue {
+            tx,
+            seen: Default::default(),
+            order: Default::default(),
+            task: tokio::spawn(std::future::pending()),
+        };
+        queue.enqueue("first", Platform::Twitch);
+        queue.enqueue("retry", Platform::Twitch);
+        assert!(!queue.seen.contains("retry"));
+        assert_eq!(rx.try_recv().unwrap().0, "first");
+        queue.enqueue("retry", Platform::Twitch);
+        assert_eq!(rx.try_recv().unwrap().0, "retry");
+        queue.enqueue("retry", Platform::Twitch);
+        assert!(rx.try_recv().is_err());
+
+        for ix in 0..MAX_SEEN_COSMETICS {
+            queue.enqueue(&format!("user-{ix}"), Platform::Twitch);
+            rx.try_recv().unwrap();
+        }
+        assert_eq!(queue.seen.len(), MAX_SEEN_COSMETICS);
+        assert_eq!(queue.order.len(), MAX_SEEN_COSMETICS);
+        queue.enqueue("first", Platform::Twitch);
+        assert_eq!(rx.try_recv().unwrap().0, "first");
+
+        for (at, _) in &mut queue.order {
+            *at -= bks_emotes::COSMETICS_TTL;
+        }
+        queue.enqueue("first", Platform::Twitch);
+        assert_eq!(rx.try_recv().unwrap().0, "first");
+        assert_eq!(queue.seen.len(), 1);
+    }
 }

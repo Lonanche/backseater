@@ -53,6 +53,7 @@ const PICKER_EMOTE_PX: f32 = 28.0;
 pub(super) struct EmoteCell {
     name: SharedString,
     url: SharedString,
+    animated: bool,
     /// The owning view, to insert the emote name into its input on click.
     host: WeakEntity<ChatView>,
     /// The app-wide image cache, set on the img directly so the cell renders the
@@ -79,42 +80,49 @@ impl Render for EmoteCell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let host = self.host.clone();
         let name = self.name.clone();
-        // Every cell renders a **poster** (`poster://<url>`, first-frame-only
+        // Animated cells render a **poster** (`poster://<url>`, first-frame-only
         // decode — see `image_cache`; full-animation decodes were most of the
         // CPU while fast-scrolling) with the real animated img *overlaid* — the
         // poster stays visible underneath while the full decode loads, so
         // scrolling fills instantly and the swap doesn't flicker. The animation's
         // repaint notify lands on *this* cell view (see the type doc), so a
         // frame tick repaints just the cell that advanced.
-        let poster =
-            SharedString::from(format!("{}{}", crate::image_cache::POSTER_PREFIX, self.url));
-        let image = div()
-            .relative()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
-                img(poster)
-                    .image_cache(&self.image_cache)
-                    .h(px(PICKER_EMOTE_PX))
-                    .max_w(px(PICKER_CELL_W)),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        crate::animated_img::animated_img(
-                            "img",
-                            self.url.clone(),
-                            px(PICKER_EMOTE_PX),
-                        )
+        let image = if self.animated {
+            let poster =
+                SharedString::from(format!("{}{}", crate::image_cache::POSTER_PREFIX, self.url));
+            div()
+                .relative()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    img(poster)
+                        .image_cache(&self.image_cache)
+                        .h(px(PICKER_EMOTE_PX))
                         .max_w(px(PICKER_CELL_W)),
-                    ),
-            );
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            crate::animated_img::animated_img(
+                                "img",
+                                self.url.clone(),
+                                px(PICKER_EMOTE_PX),
+                            )
+                            .max_w(px(PICKER_CELL_W)),
+                        ),
+                )
+                .into_any_element()
+        } else {
+            crate::animated_img::animated_img("img", self.url.clone(), px(PICKER_EMOTE_PX))
+                .max_w(px(PICKER_CELL_W))
+                .into_any_element()
+        };
         // Fill the fixed cell box (matches `picker_cell_style`) and center the emote.
         div()
             .id("picker-emote")
@@ -211,7 +219,7 @@ impl ChatView {
     /// The emotes for the picker's currently selected platform tab: the channel
     /// emotes (from the shared model) followed (on the Twitch tab) by the user's
     /// personal Twitch emotes and the viewed channel's locked natives. Cloned
-    /// out (cheap `Arc` string data) so no model borrow is held.
+    /// out so no model borrow is held.
     fn picker_tab_emotes(&self, cx: &App) -> Vec<bks_core::Emote> {
         let model = self.channel.read(cx);
         match self.picker_tab {
@@ -258,6 +266,10 @@ impl ChatView {
     /// [`PICKER_COLUMNS`] emotes. Groups keep the order their providers first appear
     /// (channel emotes lead). Re-measures the virtualized list to match.
     pub(super) fn refresh_picker_filter(&mut self, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        {
+            self.picker_refresh_count += 1;
+        }
         let query = self.picker_query(cx);
         // Filter, preserving order; group by provider with first-seen ordering.
         let mut order: Vec<String> = Vec::new();
@@ -289,10 +301,7 @@ impl ChatView {
             }
         }
 
-        // Unchanged grid — bail before the `reset` below, which snaps scroll back
-        // to the top. This runs on *every* channel event while the picker is open
-        // (a new chat message re-triggers it via `on_channel_event`), so without
-        // this the grid jumped to the top whenever anyone chatted.
+        // Preserve scroll if a source refresh produced the same grid.
         if rows == self.picker_rows {
             return;
         }
@@ -301,7 +310,7 @@ impl ChatView {
         // longer shown, then create one per emote we don't already have. Reusing the
         // same `Entity<EmoteCell>` across renders is what lets gpui cache + skip a
         // cell whose emote didn't animate this frame (a fresh view would cache-miss).
-        let shown: Vec<(SharedString, SharedString)> = rows
+        let shown: Vec<(SharedString, SharedString, bool)> = rows
             .iter()
             .filter_map(|row| match row {
                 PickerRow::Emotes(emotes) => Some(emotes),
@@ -312,6 +321,7 @@ impl ChatView {
                 (
                     SharedString::from(e.url.clone()),
                     SharedString::from(e.name.clone()),
+                    e.animated,
                 )
             })
             .collect();
@@ -319,11 +329,11 @@ impl ChatView {
         // update), and a linear `shown.iter().any()` inside `retain` was
         // O(cells × shown) — millions of string compares for a big 7TV set.
         let shown_urls: std::collections::HashSet<&SharedString> =
-            shown.iter().map(|(url, _)| url).collect();
+            shown.iter().map(|(url, _, _)| url).collect();
         self.picker_cells.retain(|url, _| shown_urls.contains(url));
         drop(shown_urls);
         let host = cx.entity().downgrade();
-        for (url, name) in shown {
+        for (url, name, animated) in shown {
             // Not `entry().or_insert_with`: building the cell needs `cx.new`, which
             // can't borrow `cx` while the entry holds `&mut self.picker_cells`.
             #[allow(clippy::map_entry)]
@@ -332,6 +342,7 @@ impl ChatView {
                 let image_cache = self.image_cache.clone();
                 let cell = cx.new(|_| EmoteCell {
                     name,
+                    animated,
                     url: url.clone(),
                     host,
                     image_cache,
@@ -427,15 +438,12 @@ impl ChatView {
                 .children(platforms.iter().map(|p| self.picker_tab_chip(*p, cx)))
         });
 
-        let search = h_flex()
-            .w_full()
-            .px_1()
-            .child(
-                div()
-                    .debug_selector(|| "picker-search".into())
-                    .flex_1()
-                    .child(Input::new(&self.picker_search)),
-            );
+        let search = h_flex().w_full().px_1().child(
+            div()
+                .debug_selector(|| "picker-search".into())
+                .flex_1()
+                .child(Input::new(&self.picker_search)),
+        );
 
         let body = if self.picker_rows.is_empty() {
             let msg = if !self.picker_query(cx).is_empty() {

@@ -4,16 +4,16 @@
 //! user are read from `GET /v3/users/twitch/{twitch_id}` (`user.style.paint_id` /
 //! `style.badge_id`); the definitions are resolved from the v3 GraphQL
 //! `cosmetics(list:)` query. Everything is cached process-wide so a chatter is
-//! looked up once per session and a paint/badge definition once ever.
+//! looked up once per cache lifetime, with bounded retention and shared requests.
 //!
 //! This mirrors the C++ Backseater's `SeventvPaints`/`SeventvBadges`, minus the
 //! real-time EventAPI (we resolve lazily per chatter instead of subscribing to a
 //! cosmetics websocket). URL/image paints can't be drawn as a text gradient, so
 //! they collapse to a representative solid color.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use bks_core::{Badge, NamePaint, PaintKind, PaintStop};
@@ -27,12 +27,13 @@ const GQL_URL: &str = "https://7tv.io/v3/gql";
 
 /// How long a cached user→cosmetic-ids lookup stays fresh. A user rarely changes
 /// their paint mid-session; this just lets a long-running app pick up changes.
-const USER_TTL: Duration = Duration::from_secs(1800);
+pub const COSMETICS_TTL: Duration = Duration::from_secs(1800);
 
 /// Whether 7TV name paints + badges are applied. Flipped by the settings toggle
 /// (process-wide, so already-running connections react without re-plumbing). When
 /// off, [`resolve`] returns nothing immediately and does no network work.
 static ENABLED: AtomicBool = AtomicBool::new(true);
+static FETCHES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 
 /// Sets whether 7TV cosmetics are resolved/applied (the settings toggle).
 pub fn set_enabled(on: bool) {
@@ -59,68 +60,99 @@ impl Cosmetics {
     }
 }
 
-/// A user's active cosmetic ids, cached with a freshness stamp.
 #[derive(Clone, Default)]
 struct UserStyle {
     paint_id: Option<String>,
     badge_id: Option<String>,
 }
 
-/// Process-wide cache of `twitch_id -> (when, UserStyle)`.
-fn user_cache() -> &'static Mutex<HashMap<String, (Instant, UserStyle)>> {
-    static C: OnceLock<Mutex<HashMap<String, (Instant, UserStyle)>>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+/// FIFO expiry keeps both the values and their eviction metadata bounded.
+struct TimedCache<T> {
+    values: HashMap<String, T>,
+    order: VecDeque<(Instant, String)>,
+    capacity: usize,
 }
 
-/// Process-wide cache of resolved paint definitions by paint id (`None` = no such
-/// paint / unrenderable, cached so it isn't re-fetched).
-fn paint_cache() -> &'static Mutex<HashMap<String, Option<NamePaint>>> {
-    static C: OnceLock<Mutex<HashMap<String, Option<NamePaint>>>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+impl<T: Clone> TimedCache<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            values: HashMap::new(),
+            order: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    fn get_or_insert(&mut self, key: &str, now: Instant, create: impl FnOnce() -> T) -> T {
+        while self
+            .order
+            .front()
+            .is_some_and(|(at, _)| now.duration_since(*at) >= COSMETICS_TTL)
+        {
+            let (_, key) = self.order.pop_front().unwrap();
+            self.values.remove(&key);
+        }
+        if let Some(value) = self.values.get(key) {
+            return value.clone();
+        }
+        while self.values.len() >= self.capacity {
+            let (_, key) = self.order.pop_front().unwrap();
+            self.values.remove(&key);
+        }
+        let value = create();
+        self.values.insert(key.to_string(), value.clone());
+        self.order.push_back((now, key.to_string()));
+        value
+    }
 }
 
-/// Process-wide cache of resolved badge definitions by badge id.
-fn badge_cache() -> &'static Mutex<HashMap<String, Option<Badge>>> {
-    static C: OnceLock<Mutex<HashMap<String, Option<Badge>>>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+type Cache<T> = Mutex<TimedCache<Arc<tokio::sync::OnceCell<T>>>>;
+
+fn cache_cell<T>(cache: &Cache<T>, key: &str) -> Arc<tokio::sync::OnceCell<T>> {
+    cache
+        .lock()
+        .unwrap()
+        .get_or_insert(key, Instant::now(), || {
+            Arc::new(tokio::sync::OnceCell::new())
+        })
 }
 
-/// Resolves a chatter's 7TV paint + badge from their Twitch numeric id. Returns
-/// empty cosmetics when disabled, when the id is missing, or on any error (the
-/// feature degrades silently — a chatter just keeps their plain name). All three
-/// network round-trips are cached, so this is cheap on repeat calls.
+async fn cached<T: Clone, F: std::future::Future<Output = T>>(
+    cache: &Cache<T>,
+    key: &str,
+    fetch: impl FnOnce() -> F,
+) -> T {
+    cache_cell(cache, key).get_or_init(fetch).await.clone()
+}
+
+/// A shared pending cell coalesces the same user across channels. The permit
+/// covers the entire resolution, including paint/badge lookups.
 pub async fn resolve(twitch_id: &str) -> Cosmetics {
     if !enabled() || twitch_id.is_empty() {
         return Cosmetics::default();
     }
-    let style = match user_style(twitch_id).await {
-        Some(s) => s,
-        None => return Cosmetics::default(),
-    };
-    let paint = match &style.paint_id {
-        Some(id) => paint_def(id).await,
-        None => None,
-    };
-    let badge = match &style.badge_id {
-        Some(id) => badge_def(id).await,
-        None => None,
-    };
-    Cosmetics { paint, badge }
-}
-
-/// Fetches (and caches) a user's active paint/badge ids. `None` on error.
-async fn user_style(twitch_id: &str) -> Option<UserStyle> {
-    if let Some((at, style)) = user_cache().lock().unwrap().get(twitch_id) {
-        if at.elapsed() < USER_TTL {
-            return Some(style.clone());
-        }
-    }
-    let style = fetch_user_style(twitch_id).await.unwrap_or_default();
-    user_cache()
-        .lock()
-        .unwrap()
-        .insert(twitch_id.to_string(), (Instant::now(), style.clone()));
-    Some(style)
+    static USERS: OnceLock<Cache<Cosmetics>> = OnceLock::new();
+    let cache = USERS.get_or_init(|| Mutex::new(TimedCache::new(4096)));
+    cache_cell(cache, twitch_id)
+        .get_or_try_init(|| async {
+            let _permit = FETCHES.acquire().await.map_err(|_| ())?;
+            // Disabling while queued cancels initialization, so re-enabling can retry.
+            if !enabled() {
+                return Err(());
+            }
+            let style = fetch_user_style(twitch_id).await.unwrap_or_default();
+            let paint = match style.paint_id {
+                Some(id) => paint_def(&id).await,
+                None => None,
+            };
+            let badge = match style.badge_id {
+                Some(id) => badge_def(&id).await,
+                None => None,
+            };
+            Ok(Cosmetics { paint, badge })
+        })
+        .await
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[derive(Deserialize)]
@@ -160,28 +192,23 @@ async fn fetch_user_style(twitch_id: &str) -> anyhow::Result<UserStyle> {
 /// Resolves (and caches) a paint id to a [`NamePaint`], `None` if unknown or it
 /// can't be rendered as a name color.
 async fn paint_def(id: &str) -> Option<NamePaint> {
-    if let Some(cached) = paint_cache().lock().unwrap().get(id) {
-        return cached.clone();
-    }
-    let paint = fetch_cosmetics(id).await.ok().and_then(|c| c.0);
-    paint_cache()
-        .lock()
-        .unwrap()
-        .insert(id.to_string(), paint.clone());
-    paint
+    static CACHE: OnceLock<Cache<Option<NamePaint>>> = OnceLock::new();
+    cached(
+        CACHE.get_or_init(|| Mutex::new(TimedCache::new(1024))),
+        id,
+        || async { fetch_cosmetics(id).await.ok().and_then(|c| c.0) },
+    )
+    .await
 }
 
-/// Resolves (and caches) a badge id to a [`Badge`].
 async fn badge_def(id: &str) -> Option<Badge> {
-    if let Some(cached) = badge_cache().lock().unwrap().get(id) {
-        return cached.clone();
-    }
-    let badge = fetch_cosmetics(id).await.ok().and_then(|c| c.1);
-    badge_cache()
-        .lock()
-        .unwrap()
-        .insert(id.to_string(), badge.clone());
-    badge
+    static CACHE: OnceLock<Cache<Option<Badge>>> = OnceLock::new();
+    cached(
+        CACHE.get_or_init(|| Mutex::new(TimedCache::new(1024))),
+        id,
+        || async { fetch_cosmetics(id).await.ok().and_then(|c| c.1) },
+    )
+    .await
 }
 
 /// The GraphQL cosmetics query: one id at a time (we cache per id, so batching
@@ -341,6 +368,72 @@ fn parse_badge(raw: RawBadge) -> Option<Badge> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_evicts_expired_entries_and_bounds_bookkeeping() {
+        let mut cache = TimedCache::new(2);
+        let now = Instant::now();
+        cache.get_or_insert("a", now, || 1);
+        cache.get_or_insert("b", now, || 2);
+        cache.get_or_insert("c", now, || 3);
+        assert!(!cache.values.contains_key("a"));
+        assert_eq!(cache.order.len(), 2);
+        assert_eq!(cache.get_or_insert("b", now, || 9), 2);
+        cache.get_or_insert("d", now + COSMETICS_TTL, || 4);
+        assert_eq!(cache.values.len(), 1);
+        assert_eq!(cache.order.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn disabling_a_queued_lookup_does_not_cache_empty_cosmetics() {
+        use std::{future::Future, task::Poll};
+
+        let permits = FETCHES.acquire_many(8).await.unwrap();
+        let first = resolve("disabled-while-queued");
+        tokio::pin!(first);
+        std::future::poll_fn(|cx| {
+            assert!(first.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+
+        set_enabled(false);
+        drop(permits);
+        let cancelled = first.await;
+        set_enabled(true);
+        assert!(cancelled.is_empty());
+
+        // Hold every permit again: a retry must wait to fetch, not return cached empty data.
+        let _permits = FETCHES.acquire_many(8).await.unwrap();
+        let retry = resolve("disabled-while-queued");
+        tokio::pin!(retry);
+        std::future::poll_fn(|cx| {
+            assert!(
+                retry.as_mut().poll(cx).is_pending(),
+                "disabled result was cached"
+            );
+            Poll::Ready(())
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn simultaneous_cosmetics_requests_share_the_fetch() {
+        use std::sync::atomic::AtomicUsize;
+        let cache = Mutex::new(TimedCache::new(4));
+        let calls = AtomicUsize::new(0);
+        let fetch = || async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            tokio::task::yield_now().await;
+            42
+        };
+        let (first, second) = tokio::join!(
+            cached(&cache, "same-user", fetch),
+            cached(&cache, "same-user", fetch)
+        );
+        assert_eq!((first, second), (42, 42));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn rgba_to_rgb_drops_alpha() {
