@@ -2912,12 +2912,16 @@ pub struct PanelEvent<'a> {
 /// (emphasized actor, muted detail), falling back to the full pre-formatted
 /// text for events without structured data. A collapsed mass gift shows a
 /// chevron and, while expanded, its recipient list underneath; a sub's
-/// attached message renders as a normal chat line below unless the tab hides
-/// them.
+/// attached message renders in an inset block with its own author, aligned
+/// beneath the event text, unless the tab hides messages.
 pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElement {
     let scale = Scale::new(font_size);
     let p = palette();
     let row_id = stable_id(ev.text);
+    let accent = ev
+        .details
+        .accent
+        .unwrap_or_else(|| event_kind_color(ev.kind));
 
     let dot = (scale.font * 0.45).round().max(5.0);
     let time = ev
@@ -2938,7 +2942,7 @@ pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElem
     // `items_start`, sits lower than the icon/timestamp (the events-tab
     // misalignment). `items_start` matches the prefix boxes' top pin.
     let mut content = h_flex()
-        .flex_1()
+        .w_full()
         .min_w_0()
         .flex_wrap()
         .items_start()
@@ -2973,11 +2977,21 @@ pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElem
                 }
                 None => actor_token.into_any_element(),
             };
-            content
-                .child(actor_el)
-                .children(event_word_tokens(detail, actor, true, row_id, mention_click))
+            content.child(actor_el).children(event_word_tokens(
+                detail,
+                actor,
+                true,
+                row_id,
+                mention_click,
+            ))
         }
-        _ => content.children(event_word_tokens(ev.text, actor, false, row_id, mention_click)),
+        _ => content.children(event_word_tokens(
+            ev.text,
+            actor,
+            false,
+            row_id,
+            mention_click,
+        )),
     };
     if ev.expandable {
         // A visible affordance, not a bare glyph: a small tinted chip in the
@@ -2998,46 +3012,13 @@ pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElem
         );
     }
 
-    let mut col = v_flex()
-        .w_full()
-        .min_w_0()
-        .py_0p5()
-        .text_size(px(scale.font))
-        .child(
-            h_flex()
-                .w_full()
-                .min_w_0()
-                .items_start()
-                .gap_1p5()
-                .child(
-                    image_line_box(scale, dot).flex_none().child(
-                        // The dot takes the event's own accent when the
-                        // platform assigned one (announcement colors).
-                        div().size(px(dot)).rounded_full().bg(rgb(ev
-                            .details
-                            .accent
-                            .unwrap_or_else(|| event_kind_color(ev.kind)))),
-                    ),
-                )
-                .when(crate::settings::show_timestamps_events(), |row| {
-                    row.child(
-                        line_box(scale)
-                            .flex_none()
-                            .text_size(px(scale.small))
-                            .text_color(rgb(p.timestamp))
-                            .child(SharedString::from(time)),
-                    )
-                })
-                .child(platform_badge(ev.platform, scale).flex_none())
-                .child(content),
-        );
+    let mut body = v_flex().flex_1().min_w_0().child(content);
 
     if let Some(names) = ev.expanded_names {
-        col = col.child(
+        body = body.child(
             div()
                 .w_full()
                 .min_w_0()
-                .pl_4()
                 .text_size(px(scale.small))
                 .text_color(rgb(p.timestamp))
                 .child(SharedString::from(format!("→ {}", names.join(", ")))),
@@ -3045,10 +3026,45 @@ pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElem
     }
 
     if let Some(msg) = ev.message {
-        col = col.child(event_message_line(msg, scale, row_id, mention_click, true));
+        body = body.child(
+            div()
+                .w_full()
+                .min_w_0()
+                .mt_1()
+                .mb_1()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .border_l_2()
+                .border_color(rgb(blend(accent, p.chat_bg, 0.45)))
+                .bg(rgb(blend(accent, p.chat_bg, 0.94)))
+                .child(event_message_line(msg, scale, row_id, mention_click, true)),
+        );
     }
 
-    col
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .items_start()
+        .gap_1p5()
+        .py_0p5()
+        .text_size(px(scale.font))
+        .child(
+            image_line_box(scale, dot)
+                .flex_none()
+                .child(div().size(px(dot)).rounded_full().bg(rgb(accent))),
+        )
+        .when(crate::settings::show_timestamps_events(), |row| {
+            row.child(
+                line_box(scale)
+                    .flex_none()
+                    .text_size(px(scale.small))
+                    .text_color(rgb(p.timestamp))
+                    .child(SharedString::from(time)),
+            )
+        })
+        .child(platform_badge(ev.platform, scale).flex_none())
+        .child(body)
 }
 
 /// The chat line shown under a sub/resub/redemption's system text: the chatter's
@@ -3060,10 +3076,8 @@ pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElem
 /// its midpoint color (the full per-char gradient needs the selectable-token
 /// machinery the event row doesn't carry).
 ///
-/// `compact` (the events panel) drops the timestamp, the author's badges, and
-/// the name — the event row already shows who subscribed above, so repeating
-/// their identity before the message is just noise (a badge next to a nameless
-/// line read as a stray); only the message body remains.
+/// `compact` (the events panel) omits the repeated timestamp and badges, but
+/// keeps the colored author so the message reads as something the user said.
 fn event_message_line(
     msg: &Message,
     scale: Scale,
@@ -3124,30 +3138,31 @@ fn event_message_line(
             )
         })
         .children(badges)
-        .when(!compact, |row| {
-            row.child({
-                let name = div()
-                    .mr_1()
-                    .font_weight(NAME_WEIGHT)
-                    .text_color(rgb(name_color))
-                    .child(SharedString::from(format!("{}:", msg.author.display_name)));
-                // The author (the user who typed the attached message) opens their
-                // usercard on click, like their name would in the main log.
-                match mention_click {
-                    Some(cb) => {
-                        let cb = cb.clone();
-                        let login = msg.author.login.clone();
-                        name.id(("event-msg-author", row_id))
-                            .cursor_pointer()
-                            .hover(|s| s.underline())
-                            .on_mouse_up(MouseButton::Left, move |_, window, cx| {
-                                cb(&login, window, cx);
-                            })
-                            .into_any_element()
-                    }
-                    None => name.into_any_element(),
+        .child({
+            let name = div()
+                .mr_1()
+                .font_weight(NAME_WEIGHT)
+                .text_color(rgb(name_color))
+                .child(SharedString::from(format!("{}:", msg.author.display_name)));
+            // The author (the user who typed the attached message) opens their
+            // usercard on click, like their name would in the main log.
+            match mention_click {
+                Some(cb) => {
+                    let cb = cb.clone();
+                    let login = msg.author.login.clone();
+                    name.id(("event-msg-author", row_id))
+                        .cursor_pointer()
+                        .hover(|s| s.underline())
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                            cb(&login, window, cx);
+                        })
+                        .into_any_element()
                 }
-            })
+                None => name.into_any_element(),
+            }
         })
         .children(inline_tokens(
             &msg.elements,
