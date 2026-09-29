@@ -45,11 +45,26 @@ impl BadgeMap {
         self.lookup(set_and_version).map(|b| b.url.as_str())
     }
 
-    /// The title for an IRC badge id like `"subscriber/6"`, if known. Uses the
-    /// same exact-then-nearest-lower-tier resolution as [`url`](Self::url) so a
-    /// fallen-back subscriber badge shows the matching tier's title.
-    pub fn title(&self, set_and_version: &str) -> Option<&str> {
-        self.lookup(set_and_version).map(|b| b.title.as_str())
+    /// The hover title, including Tier 2/3 for subscriber badges. The base title
+    /// follows the image fallback; the subscription tier comes from the IRC id.
+    pub fn title(&self, set_and_version: &str) -> Option<String> {
+        let title = &self.lookup(set_and_version)?.title;
+        // Subscriber versions encode the paid tier in the thousands (e.g. 3072).
+        let tier = set_and_version
+            .strip_prefix("subscriber/")
+            .and_then(|version| version.parse::<u64>().ok())
+            .map(|version| version / 1000);
+        match tier {
+            Some(tier @ (2 | 3)) => {
+                let title = if title.is_empty() {
+                    "Subscriber"
+                } else {
+                    title
+                };
+                Some(format!("{title} · Tier {tier}"))
+            }
+            _ => Some(title.clone()),
+        }
     }
 
     /// Resolves a badge id to its info: exact match, else (for subscribers) the
@@ -256,10 +271,16 @@ mod tests {
                 {"setID":"subscriber","version":"12","title":"1-Year Subscriber","image2x":"s12"}
             ]}}]"#,
         );
-        assert_eq!(map.title("moderator/1"), Some("Moderator"));
-        assert_eq!(map.title("subscriber/12"), Some("1-Year Subscriber")); // exact
-        assert_eq!(map.title("subscriber/30"), Some("1-Year Subscriber")); // → ≤ 30
-        assert_eq!(map.title("subscriber/3"), Some("Subscriber")); // → tier 0
+        assert_eq!(map.title("moderator/1").as_deref(), Some("Moderator"));
+        assert_eq!(
+            map.title("subscriber/12").as_deref(),
+            Some("1-Year Subscriber")
+        ); // exact
+        assert_eq!(
+            map.title("subscriber/30").as_deref(),
+            Some("1-Year Subscriber")
+        ); // → ≤ 30
+        assert_eq!(map.title("subscriber/3").as_deref(), Some("Subscriber")); // → tier 0
         assert_eq!(map.title("vip/1"), None);
     }
 }

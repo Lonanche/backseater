@@ -756,7 +756,7 @@ fn resolve_badges(msg: &mut bks_core::Message, badges: &BadgeMap) {
         .retain_mut(|badge| match badges.url(&badge.id) {
             Some(url) => {
                 badge.url = url.to_string();
-                badge.title = badges.title(&badge.id).map(str::to_string);
+                badge.title = badges.title(&badge.id);
                 true
             }
             None => false,
