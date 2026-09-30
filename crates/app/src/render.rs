@@ -2912,7 +2912,7 @@ pub struct PanelEvent<'a> {
 /// (emphasized actor, muted detail), falling back to the full pre-formatted
 /// text for events without structured data. A collapsed mass gift shows a
 /// chevron and, while expanded, its recipient list underneath; a sub's
-/// attached message renders in an inset block with its own author, aligned
+/// attached message renders in a tinted block with its own author, aligned
 /// beneath the event text, unless the tab hides messages.
 pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElement {
     let scale = Scale::new(font_size);
@@ -3032,11 +3032,9 @@ pub fn render_event_compact(ev: PanelEvent<'_>, font_size: f32) -> impl IntoElem
                 .min_w_0()
                 .mt_1()
                 .mb_1()
-                .px_2()
+                .pr_2()
                 .py_1()
                 .rounded_sm()
-                .border_l_2()
-                .border_color(rgb(blend(accent, p.chat_bg, 0.45)))
                 .bg(rgb(blend(accent, p.chat_bg, 0.94)))
                 .child(event_message_line(msg, scale, row_id, mention_click, true)),
         );
