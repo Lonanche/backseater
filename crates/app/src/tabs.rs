@@ -343,6 +343,8 @@ pub struct TabConfig {
     /// The YouTube source: an `@handle`, channel/watch/live URL, or bare video id.
     #[serde(default)]
     pub youtube_channel: String,
+    #[serde(default)]
+    pub tiktok_channel: String,
     /// Which event kinds appear in the events panel (all enabled by default).
     #[serde(default)]
     pub event_kinds: EventFilter,
@@ -397,6 +399,7 @@ impl TabConfig {
             twitch_channel: String::new(),
             kick_channel: String::new(),
             youtube_channel: String::new(),
+            tiktok_channel: String::new(),
             event_kinds: EventFilter::default(),
             event_sounds: EventSounds::default(),
             events_only: false,
@@ -415,6 +418,11 @@ impl TabConfig {
         !self.twitch_channel.trim().is_empty()
             || !self.kick_channel.trim().is_empty()
             || !self.youtube_channel.trim().is_empty()
+            || !self.tiktok_channel.trim().is_empty()
+    }
+
+    pub fn read_only(&self) -> bool {
+        self.has_channel() && self.twitch_channel.trim().is_empty() && self.kick_channel.trim().is_empty()
     }
 
     /// The label to show on the tab: the user's name if set, else the
@@ -433,12 +441,15 @@ impl TabConfig {
         let twitch = self.twitch_channel.trim();
         let kick = self.kick_channel.trim();
         let youtube = self.youtube_channel.trim();
+        let tiktok = self.tiktok_channel.trim();
         if !twitch.is_empty() {
             twitch.to_string()
         } else if !kick.is_empty() {
             kick.to_string()
         } else if !youtube.is_empty() {
             youtube.to_string()
+        } else if !tiktok.is_empty() {
+            bks_core::normalize_tiktok_channel(tiktok).unwrap_or_else(|| tiktok.to_string())
         } else {
             "New Tab".to_string()
         }
@@ -489,6 +500,23 @@ pub fn save_active(ix: usize) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tiktok_tabs_persist_and_old_configs_still_load() {
+        let legacy: super::TabConfig = serde_json::from_str(r#"{"name":"old","twitch_channel":"fixture"}"#).unwrap();
+        assert!(legacy.tiktok_channel.is_empty());
+        assert!(!legacy.read_only());
+        let mut config = super::TabConfig::empty();
+        config.tiktok_channel = "https://www.tiktok.com/@Creator/live".into();
+        assert!(config.has_channel());
+        assert!(config.read_only());
+        assert_eq!(config.display_name(), "creator");
+        let saved = serde_json::to_string(&config).unwrap();
+        let restored: super::TabConfig = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.tiktok_channel, config.tiktok_channel);
+        config.kick_channel = "another".into();
+        assert!(!config.read_only());
+    }
+
     use super::*;
 
     fn kinds(layout: &Layout) -> Vec<Vec<PanelKind>> {

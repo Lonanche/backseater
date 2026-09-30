@@ -7,10 +7,12 @@ members = [
     "crates/twitch",
     "crates/kick",
     "crates/youtube",
+    "crates/tiktok",
     "crates/emotes",
     "crates/preview",
     "crates/app",
 ]
+exclude = ["vendor/piratetok-live-rs"]
 
 [workspace.package]
 edition = "2021"
@@ -26,6 +28,7 @@ bks-auth = { path = "crates/auth" }
 bks-twitch = { path = "crates/twitch" }
 bks-kick = { path = "crates/kick" }
 bks-youtube = { path = "crates/youtube" }
+bks-tiktok = { path = "crates/tiktok" }
 bks-emotes = { path = "crates/emotes" }
 bks-preview = { path = "crates/preview" }
 

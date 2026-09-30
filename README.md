@@ -4,14 +4,14 @@ A multi-platform live-chat desktop client in Rust + [GPUI](https://www.gpui.rs/)
 (the UI framework behind the Zed editor) with
 [gpui-component](https://github.com/longbridge/gpui-component).
 
-One window, many tabs: each tab merges **Twitch**, **Kick**, and **YouTube** live
-chat into a single feed, with third-party emotes, badges, moderation, and the
+One window, many tabs: each tab merges **Twitch**, **Kick**, **YouTube**, and
+**TikTok LIVE** chat into a single feed, with third-party emotes, badges, moderation, and the
 creature comforts of a mature chat client.
 
 ## Features
 
 - **Tabs** — each tab is an independent channel set (Twitch and/or Kick and/or
-  YouTube), with its own merged feed and send target. Tabs persist and restore;
+  YouTube and/or TikTok), with its own merged feed and send target. Tabs persist and restore;
   a tab can be popped out into its own OS window (a live mirror sharing the same
   buffer and connection).
 - **Twitch** — chat over IRC (one shared read + one shared write connection for
@@ -26,6 +26,10 @@ creature comforts of a mature chat client.
 - **YouTube** — anonymous live-chat reading via InnerTube (no API key, no
   quota): messages, custom channel emojis, membership badges, Super Chats /
   memberships / gifts as event rows.
+- **TikTok LIVE** — anonymous read-only chat by username or LIVE URL, native
+  emote messages and badges, gifts/subscriptions/follows in the event feed,
+  viewer counts and live status, automatic reconnect and offline polling.
+  Uses the unofficial PirateTok connector; no TikTok login or API key is needed.
 - **Emotes** — 7TV, BTTV, and FFZ (global + per-channel), animated emotes play
   at their real cadence (including while the window is unfocused), an emote
   picker with search, tab-completion for emote and chatter names, and 7TV
@@ -60,6 +64,7 @@ crates/
   twitch/    # Twitch: shared IRC, Helix, EventSub, badges, history
   kick/      # Kick: Pusher WebSocket, REST, badges, history
   youtube/   # YouTube: anonymous InnerTube live-chat reader
+  tiktok/    # TikTok: anonymous PirateTok WebSocket reader
   emotes/    # EmoteRegistry + EmoteProvider trait (7TV / BTTV / FFZ)
   auth/      # OAuth flows + JSON persistence
   app/       # GPUI binary: bridge, rendering, tabs, settings, windows
@@ -89,6 +94,23 @@ cargo run -p backseater     # run the app
 Channels are set per tab (right-click a tab → Settings). `/login` starts the
 Twitch OAuth flow, `/kicklogin` the Kick one. `BKS_DEBUG=1` logs received
 messages to stderr.
+
+To add TikTok, enter `@username` or `https://www.tiktok.com/@username/live` in
+the tab's **TikTok channel (read-only)** field and save. Leave the other channel
+fields blank for a TikTok-only tab, or fill them to merge chats. Offline channels
+are checked every 30 seconds. TikTok sending, login, and moderation are not
+supported; private or restricted streams may be unavailable anonymously.
+
+TikTok uses a **locally patched copy** of [PirateTok/live-rs](https://github.com/PirateTok/live-rs), vendored under
+its 0BSD license. We fixed Windows build-script path handling and adjusted connection,
+error, history, and subscription event handling. The exact upstream commit and patches are documented in
+[`vendor/piratetok-live-rs/UPSTREAM.md`](vendor/piratetok-live-rs/UPSTREAM.md).
+It relies on TikTok's unofficial protocol, so service changes can interrupt it.
+The same connector can be tested without opening the GUI:
+
+```sh
+cargo run -p bks-tiktok --example read_chat -- username 60
+```
 
 ## GUI tests
 

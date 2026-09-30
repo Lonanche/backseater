@@ -1,0 +1,23 @@
+[package]
+name = "bks-tiktok"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+bks-core.workspace = true
+bks-platform.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["time"] }
+chrono.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+piratetok-live-rs = { path = "../../vendor/piratetok-live-rs" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "signal"] }
+
+futures-util = "0.3"
+prost = "0.14"
+tokio-tungstenite = "0.26"

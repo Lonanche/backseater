@@ -220,11 +220,12 @@ impl ChatView {
     /// emotes (from the shared model) followed (on the Twitch tab) by the user's
     /// personal Twitch emotes and the viewed channel's locked natives. Cloned
     /// out so no model borrow is held.
-    fn picker_tab_emotes(&self, cx: &App) -> Vec<bks_core::Emote> {
+    pub(super) fn picker_tab_emotes(&self, cx: &App) -> Vec<bks_core::Emote> {
         let model = self.channel.read(cx);
         match self.picker_tab {
             bks_core::Platform::Kick => model.emotes_kick.clone(),
             bks_core::Platform::YouTube => model.emotes_youtube.clone(),
+            bks_core::Platform::TikTok => model.emotes_tiktok.clone(),
             _ => model
                 .emotes_twitch
                 .iter()
@@ -237,7 +238,7 @@ impl ChatView {
 
     /// Which platform tabs the picker shows: only the platforms this tab has a
     /// channel for (so a Twitch-only tab shows no Kick tab, and vice versa).
-    fn picker_platforms(&self) -> Vec<bks_core::Platform> {
+    pub(super) fn picker_platforms(&self) -> Vec<bks_core::Platform> {
         let mut out = Vec::new();
         if !self.config.twitch_channel.is_empty() {
             out.push(bks_core::Platform::Twitch);
@@ -247,6 +248,9 @@ impl ChatView {
         }
         if !self.config.youtube_channel.is_empty() {
             out.push(bks_core::Platform::YouTube);
+        }
+        if !self.config.tiktok_channel.is_empty() {
+            out.push(bks_core::Platform::TikTok);
         }
         out
     }

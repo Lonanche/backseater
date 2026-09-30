@@ -28,7 +28,7 @@ pub use suppress::SuppressList;
 pub use term_rules::{absorb_scoped_user_entries, parse_user_entry, user_entry};
 pub use text::{
     channel_login, contains_ci, encode_url_component, format_count, format_count_compact, plural,
-    strip_channel,
+    strip_channel, normalize_tiktok_channel,
 };
 pub use theme::{is_dark_theme, set_dark_theme};
 pub use time::{format_duration, parse_duration, parse_rfc3339, reconnect_delay};

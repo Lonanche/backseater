@@ -147,6 +147,53 @@ fn emote(name: &str) -> Emote {
 }
 
 #[gpui::test]
+fn gui_tiktok_rows_cannot_be_replied_to_in_a_merged_tab(cx: &mut TestAppContext) {
+    let mut app = Harness::new(cx);
+    app.cx.update(|window, cx| {
+        app.view.update(cx, |view, cx| {
+            view.config.tiktok_channel = "creator".into();
+            assert!(!view.config.read_only());
+            let mut tiktok = chat_message(1);
+            tiktok.platform = Platform::TikTok;
+            view.channel.update(cx, |channel, cx| {
+                channel.push(ChatEvent::Message(tiktok), cx);
+                channel.push(ChatEvent::Message(chat_message(2)), cx);
+            });
+            view.start_reply("1", window, cx);
+            assert!(view.replying_to.is_none());
+            view.start_reply("2", window, cx);
+            assert_eq!(view.replying_to.as_ref().unwrap().platform, Platform::Twitch);
+        });
+    });
+}
+
+#[gpui::test]
+fn gui_tiktok_only_tab_is_read_only_and_keeps_platform_emotes_separate(cx: &mut TestAppContext) {
+    let mut app = Harness::new(cx);
+    app.view.update(&mut app.cx, |view, cx| {
+        view.config.twitch_channel.clear();
+        view.config.tiktok_channel = "creator".into();
+        view.picker_tab = Platform::TikTok;
+        view.channel.update(cx, |channel, cx| channel.push(ChatEvent::Emotes {
+            platform: Platform::TikTok, emotes: vec![emote("TikTokWave")],
+        }, cx));
+        assert_eq!(view.picker_platforms(), vec![Platform::TikTok]);
+        assert_eq!(view.picker_tab_emotes(cx)[0].name, "TikTokWave");
+        assert_eq!(view.channel.read(cx).emotes_twitch[0].name, "Kappa");
+        assert!(view.composer_placeholder().contains("read-only"));
+        cx.notify();
+    });
+    app.draw();
+    app.cx.update(|window, cx| {
+        app.view.update(cx, |view, cx| {
+            view.input.update(cx, |input, cx| input.set_value("must not send", window, cx));
+            view.on_input_event(&view.input.clone(), &InputEvent::PressEnter { secondary: false, shift: false }, window, cx);
+            assert!(view.sent_history.is_empty());
+        });
+    });
+}
+
+#[gpui::test]
 fn gui_history_restores_the_draft_after_browsing_sent_messages(cx: &mut TestAppContext) {
     let mut app = Harness::new(cx);
     app.type_text("first message");

@@ -16,6 +16,7 @@ bks-auth.workspace = true
 bks-twitch.workspace = true
 bks-kick.workspace = true
 bks-youtube.workspace = true
+bks-tiktok.workspace = true
 bks-emotes.workspace = true
 bks-preview.workspace = true
 tracing.workspace = true
@@ -61,4 +62,5 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diag
 winresource = "0.1"
 
 [dev-dependencies]
+serde_json.workspace = true
 gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["test-support"] }

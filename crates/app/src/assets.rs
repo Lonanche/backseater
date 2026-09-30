@@ -41,6 +41,11 @@ const YOUTUBE_ICON: (&str, &[u8]) = (
     include_bytes!("../assets/youtube/youtube.png"),
 );
 
+const TIKTOK_ICON: (&str, &[u8]) = (
+    "tiktok/tiktok.svg",
+    include_bytes!("../assets/tiktok/tiktok.svg"),
+);
+
 /// Bundled lucide icons the kit doesn't ship (same ISC icon set), served next
 /// to the kit's own `icons/` so both come from matching vector art:
 /// `bell-off` (the muted-mention chip toggle) and the moderation-button set.
@@ -130,6 +135,9 @@ impl AssetSource for Assets {
         }
         if path == YOUTUBE_ICON.0 {
             return Ok(Some(Cow::Borrowed(YOUTUBE_ICON.1)));
+        }
+        if path == TIKTOK_ICON.0 {
+            return Ok(Some(Cow::Borrowed(TIKTOK_ICON.1)));
         }
         if let Some((_, bytes)) = APP_ICONS.iter().find(|(p, _)| *p == path) {
             return Ok(Some(Cow::Borrowed(bytes)));

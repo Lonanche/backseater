@@ -400,7 +400,8 @@ impl Render for LogView {
                     };
                     let name_click = name_click_for(&render_entity, msg);
                     let name_right_click = name_right_click_for(&render_entity, msg);
-                    let reply_click = reply_click_for(&render_entity, msg);
+                    let reply_click = matches!(msg.platform, bks_core::Platform::Twitch | bks_core::Platform::Kick)
+                        .then(|| reply_click_for(&render_entity, msg));
                     // A reply's context line is clickable to open the thread panel;
                     // non-reply rows have no context line, so no handler.
                     let thread_click = msg
@@ -471,7 +472,7 @@ impl Render for LogView {
                             link_preview_hover: Some(link_preview_hover.clone()),
                             emote_click: Some(emote_click.clone()),
                             seventv_link_click: Some(seventv_link_click.clone()),
-                            reply_click: Some(reply_click),
+                            reply_click,
                             thread_click,
                             pin_click,
                             mod_strip,

@@ -7,6 +7,11 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 
 ### Features
 
+- Added read-only TikTok LIVE channels to merged tabs, including native emote
+  messages, badges, gifts, subscriptions, follows, viewer counts, live status,
+  reconnects and offline polling. Accepts a username or LIVE URL without login.
+  Uses a locally patched PirateTok library, including a Windows build-script fix;
+  provenance and patch details are recorded in `vendor/piratetok-live-rs/UPSTREAM.md`.
 - Twitch subscriber badge tooltips now identify Tier 2 and Tier 3 subscriptions,
   including when the badge image falls back to a lower month milestone.
 - Links in event descriptions and attached messages are now clickable, using

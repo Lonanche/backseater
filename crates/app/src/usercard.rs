@@ -103,6 +103,8 @@ impl UserCard {
             Platform::YouTube if !self.user_id.is_empty() => {
                 Some(format!("https://www.youtube.com/channel/{}", self.user_id))
             }
+            Platform::TikTok => bks_core::normalize_tiktok_channel(&self.login)
+                .map(|name| format!("https://www.tiktok.com/@{name}")),
             _ => None,
         }
     }

@@ -96,28 +96,30 @@ pub struct SuspiciousMark {
     pub detail: String,
 }
 
-/// Identifies a channel set: the (normalized) Twitch / Kick / YouTube sources a
-/// tab is configured with. Two tabs with the same triple share one model. The
+/// Identifies a channel set: the normalized sources a tab is configured with.
+/// Two tabs with the same sources share one model. The
 /// parts are lowercased/trimmed so case differences don't split the key.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ChannelKey {
     pub twitch: String,
     pub kick: String,
     pub youtube: String,
+    pub tiktok: String,
 }
 
 impl ChannelKey {
-    pub fn new(twitch: &str, kick: &str, youtube: &str) -> Self {
+    pub fn new(twitch: &str, kick: &str, youtube: &str, tiktok: &str) -> Self {
         Self {
             twitch: bks_core::channel_login(twitch),
             kick: bks_core::channel_login(kick),
             youtube: youtube.trim().to_lowercase(),
+            tiktok: bks_core::normalize_tiktok_channel(tiktok).unwrap_or_else(|| tiktok.trim().to_lowercase()),
         }
     }
 
     /// A key with no channels at all — an unconfigured tab, never shared.
     fn is_empty(&self) -> bool {
-        self.twitch.is_empty() && self.kick.is_empty() && self.youtube.is_empty()
+        self.twitch.is_empty() && self.kick.is_empty() && self.youtube.is_empty() && self.tiktok.is_empty()
     }
 }
 
@@ -308,6 +310,7 @@ pub struct ChannelModel {
     pub emotes_twitch: Vec<bks_core::Emote>,
     pub emotes_kick: Vec<bks_core::Emote>,
     pub emotes_youtube: Vec<bks_core::Emote>,
+    pub emotes_tiktok: Vec<bks_core::Emote>,
     /// Whether the logged-in user moderates the Twitch channel (gates usercard
     /// mod actions).
     pub twitch_mod: bool,
@@ -1171,6 +1174,7 @@ impl ChannelModel {
                 match platform {
                     Platform::Kick => self.emotes_kick = emotes,
                     Platform::YouTube => self.emotes_youtube = emotes,
+                    Platform::TikTok => self.emotes_tiktok = emotes,
                     _ => self.emotes_twitch = emotes,
                 }
                 cx.emit(ChannelEvent::EmotesChanged);
@@ -1277,6 +1281,7 @@ pub fn get_or_create(
     config_twitch: &str,
     config_kick: &str,
     config_youtube: &str,
+    config_tiktok: &str,
     session: Session,
     cx: &mut App,
 ) -> Entity<ChannelModel> {
@@ -1292,7 +1297,7 @@ pub fn get_or_create(
         }
     }
 
-    let model = build_model(config_twitch, config_kick, config_youtube, session, cx);
+    let model = build_model(config_twitch, config_kick, config_youtube, config_tiktok, session, cx);
     if !key.is_empty() {
         cx.global_mut::<ChannelStore>()
             .channels
@@ -1307,10 +1312,11 @@ fn build_model(
     twitch: &str,
     kick: &str,
     youtube: &str,
+    tiktok: &str,
     session: Session,
     cx: &mut App,
 ) -> Entity<ChannelModel> {
-    let (rx, controller) = crate::bridge::connect(session, twitch, kick, youtube);
+    let (rx, controller) = crate::bridge::connect(session, twitch, kick, youtube, tiktok);
     model_from_connection(rx, controller, cx)
 }
 
@@ -1352,6 +1358,7 @@ fn model_from_connection(
             emotes_twitch: Vec::new(),
             emotes_kick: Vec::new(),
             emotes_youtube: Vec::new(),
+            emotes_tiktok: Vec::new(),
             twitch_mod: false,
             twitch_broadcaster: false,
             kick_mod: false,
@@ -1387,7 +1394,7 @@ pub(crate) fn register_for_test(
     let mut store = ChannelStore::default();
     store
         .channels
-        .insert(ChannelKey::new(twitch, "", ""), model.downgrade());
+        .insert(ChannelKey::new(twitch, "", "", ""), model.downgrade());
     cx.set_global(store);
     model
 }
@@ -1434,6 +1441,14 @@ fn gift_group(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tiktok_identity_is_normalized_and_part_of_the_shared_channel_key() {
+        let key = super::ChannelKey::new("", "", "", "@Creator");
+        assert!(!key.is_empty());
+        assert_eq!(key, super::ChannelKey::new("", "", "", "https://www.tiktok.com/@creator/live"));
+        assert_ne!(key, super::ChannelKey::new("", "", "", "another"));
+        assert_ne!(key, super::ChannelKey::new("", "", "", ""));
+    }
     use super::*;
     use bks_platform::EventDetails;
 

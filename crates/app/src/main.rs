@@ -130,6 +130,7 @@ enum SettingsInput {
     Twitch,
     Kick,
     YouTube,
+    TikTok,
     Mention,
     Ignore,
     Suppress,
@@ -176,6 +177,7 @@ struct SettingsInputs {
     twitch: Entity<InputState>,
     kick: Entity<InputState>,
     youtube: Entity<InputState>,
+    tiktok: Entity<InputState>,
     mention: Entity<InputState>,
     ignore: Entity<InputState>,
     suppress: Entity<InputState>,
@@ -195,6 +197,7 @@ impl SettingsInputs {
             twitch: settings_input(SettingsInput::Twitch, window, cx),
             kick: settings_input(SettingsInput::Kick, window, cx),
             youtube: settings_input(SettingsInput::YouTube, window, cx),
+            tiktok: settings_input(SettingsInput::TikTok, window, cx),
             mention: settings_input(SettingsInput::Mention, window, cx),
             ignore: settings_input(SettingsInput::Ignore, window, cx),
             suppress: settings_input(SettingsInput::Suppress, window, cx),
@@ -216,6 +219,7 @@ fn settings_input(which: SettingsInput, window: &mut Window, cx: &mut App) -> En
         SettingsInput::Twitch => "Twitch channel (optional)",
         SettingsInput::Kick => "Kick channel (optional)",
         SettingsInput::YouTube => "YouTube handle / URL (optional)",
+        SettingsInput::TikTok => "TikTok @username / LIVE URL (optional)",
         SettingsInput::Mention => "Add a term (e.g. mods)",
         SettingsInput::Ignore | SettingsInput::Suppress => term_placeholder(TermEntryKind::Text),
         SettingsInput::TabMention => "Add a term for this tab",
@@ -2028,6 +2032,8 @@ impl BackseaterApp {
             .update(cx, |s, cx| s.set_value(&cfg.kick_channel, window, cx));
         self.settings_inputs.youtube
             .update(cx, |s, cx| s.set_value(&cfg.youtube_channel, window, cx));
+        self.settings_inputs.tiktok
+            .update(cx, |s, cx| s.set_value(&cfg.tiktok_channel, window, cx));
     }
 
     /// The settings window's content, dispatched on the current panel. The
@@ -2049,13 +2055,16 @@ impl BackseaterApp {
         let twitch = self.settings_inputs.twitch.read(cx).value().trim().to_string();
         let kick = self.settings_inputs.kick.read(cx).value().trim().to_string();
         let youtube = self.settings_inputs.youtube.read(cx).value().trim().to_string();
+        let tiktok_input = self.settings_inputs.tiktok.read(cx).value().trim().to_string();
+        let tiktok = bks_core::normalize_tiktok_channel(&tiktok_input).unwrap_or(tiktok_input);
 
         let Some(tab) = self.tabs.get(ix) else {
             return;
         };
         let channels_changed = tab.config.twitch_channel != twitch
             || tab.config.kick_channel != kick
-            || tab.config.youtube_channel != youtube;
+            || tab.config.youtube_channel != youtube
+            || tab.config.tiktok_channel != tiktok;
         // Adding or removing platforms (no channel *replaced* by a different
         // one)? Then the tab reconnects in place and keeps its log — the other
         // platforms shouldn't visibly drop and reload, and a removed platform's
@@ -2063,12 +2072,14 @@ impl BackseaterApp {
         // rebuilds from scratch (a different channel means a different log).
         let keep_log = channel_kept(&tab.config.twitch_channel, &twitch)
             && channel_kept(&tab.config.kick_channel, &kick)
-            && channel_kept(&tab.config.youtube_channel, &youtube);
+            && channel_kept(&tab.config.youtube_channel, &youtube)
+            && channel_kept(&tab.config.tiktok_channel, &tiktok);
 
         let mut config = tab.config.clone();
         config.twitch_channel = twitch;
         config.kick_channel = kick;
         config.youtube_channel = youtube;
+        config.tiktok_channel = tiktok;
         // Store the name verbatim (blank if unset); the tab strip falls back to
         // the channel name via `display_name`.
         config.name = name;
@@ -2394,6 +2405,7 @@ impl BackseaterApp {
             .child(field("Twitch channel", &self.settings_inputs.twitch))
             .child(field("Kick channel", &self.settings_inputs.kick))
             .child(field("YouTube channel", &self.settings_inputs.youtube))
+            .child(field("TikTok channel (read-only)", &self.settings_inputs.tiktok))
             .child(
                 h_flex().justify_end().mt_2().child(
                     Button::new("save-tab-settings")
@@ -3277,7 +3289,7 @@ impl BackseaterApp {
                         "Flash tab when a channel goes live",
                         Some(
                             "Briefly pulse a tab's chip when one of its Twitch, \
-                             Kick, or YouTube channels starts streaming.",
+                             Kick, YouTube, or TikTok channels starts streaming.",
                         ),
                         Switch::new("flash-tab-on-live")
                             .small()
@@ -4383,7 +4395,8 @@ impl BackseaterApp {
                         .child(all_chip)
                         .child(one_chip(bks_core::Platform::Twitch, "Twitch", cx))
                         .child(one_chip(bks_core::Platform::Kick, "Kick", cx))
-                        .child(one_chip(bks_core::Platform::YouTube, "YouTube", cx)),
+                        .child(one_chip(bks_core::Platform::YouTube, "YouTube", cx))
+                        .child(one_chip(bks_core::Platform::TikTok, "TikTok", cx)),
                 )
             })
             .into_any_element()
@@ -5523,6 +5536,12 @@ impl BackseaterApp {
                         channel: tab.config.youtube_channel.trim().to_string(),
                         status: view.live_status(bks_core::Platform::YouTube, cx),
                         viewers: view.viewer_count(bks_core::Platform::YouTube, cx),
+                    },
+                    TipPlatform {
+                        platform: bks_core::Platform::TikTok,
+                        channel: tab.config.tiktok_channel.trim().to_string(),
+                        status: view.live_status(bks_core::Platform::TikTok, cx),
+                        viewers: view.viewer_count(bks_core::Platform::TikTok, cx),
                     },
                 ];
                 let has_channel = tab.config.has_channel();

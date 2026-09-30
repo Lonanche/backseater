@@ -942,12 +942,14 @@ impl ChatView {
             &config.twitch_channel,
             &config.kick_channel,
             &config.youtube_channel,
+            &config.tiktok_channel,
         );
         let channel = crate::channel_store::get_or_create(
             channel_key.clone(),
             &config.twitch_channel,
             &config.kick_channel,
             &config.youtube_channel,
+            &config.tiktok_channel,
             session.clone(),
             cx,
         );
@@ -991,8 +993,10 @@ impl ChatView {
             bks_core::Platform::Twitch
         } else if !config.kick_channel.is_empty() {
             bks_core::Platform::Kick
-        } else {
+        } else if !config.youtube_channel.is_empty() {
             bks_core::Platform::YouTube
+        } else {
+            bks_core::Platform::TikTok
         };
 
         // The app-wide image cache (shared across all tabs + picker), disk-backed
@@ -1413,12 +1417,14 @@ impl ChatView {
             &self.config.twitch_channel,
             &self.config.kick_channel,
             &self.config.youtube_channel,
+            &self.config.tiktok_channel,
         );
         let channel = crate::channel_store::get_or_create(
             key.clone(),
             &self.config.twitch_channel,
             &self.config.kick_channel,
             &self.config.youtube_channel,
+            &self.config.tiktok_channel,
             self.session.clone(),
             cx,
         );
@@ -1799,6 +1805,7 @@ impl ChatView {
             self.update_input_popup(cx);
         }
         if let InputEvent::PressEnter { .. } = event {
+            if self.config.read_only() { return; }
             let text = state.read(cx).value().to_string();
             let trimmed = text.trim();
             if !trimmed.is_empty() {
@@ -2009,6 +2016,9 @@ impl ChatView {
         let Some(msg) = self.message_by_id(msg_id, cx) else {
             return;
         };
+        if !matches!(msg.platform, bks_core::Platform::Twitch | bks_core::Platform::Kick) {
+            return;
+        }
         self.replying_to = Some(controller::ReplyTo {
             platform: msg.platform,
             message_id: msg.id.clone(),
@@ -2323,6 +2333,7 @@ impl ChatView {
             bks_core::Platform::Twitch,
             bks_core::Platform::Kick,
             bks_core::Platform::YouTube,
+            bks_core::Platform::TikTok,
         ]
         .map(|platform| {
             (
@@ -2339,6 +2350,7 @@ impl ChatView {
             let name = match platform {
                 bks_core::Platform::Kick => self.config.kick_channel.trim(),
                 bks_core::Platform::YouTube => self.config.youtube_channel.trim(),
+                bks_core::Platform::TikTok => self.config.tiktok_channel.trim(),
                 _ => self.config.twitch_channel.trim(),
             };
             if name.is_empty() || !live {
@@ -2479,6 +2491,7 @@ impl ChatView {
             bks_core::Platform::Twitch,
             bks_core::Platform::Kick,
             bks_core::Platform::YouTube,
+            bks_core::Platform::TikTok,
         ] {
             let Some(modes) = model.chat_modes.get(&platform) else {
                 continue;
@@ -6478,7 +6491,7 @@ impl Render for ChatView {
                 .text_color(cx.theme().muted_foreground)
                 .child(SharedString::from("This tab has no channel set."))
                 .child(SharedString::from(
-                    "Right-click the tab → Settings to choose a Twitch or Kick channel.",
+                    "Right-click the tab → Settings to choose a channel.",
                 ));
         }
 
@@ -6553,6 +6566,7 @@ impl ChatView {
     /// hint instead. The leading space keeps the muted text clear of the caret,
     /// which the kit blinks exactly on the first glyph's left edge.
     fn composer_placeholder(&self) -> String {
+        if self.config.read_only() { return " This tab is read-only".into(); }
         let has_twitch = !self.config.twitch_channel.trim().is_empty();
         let has_kick = !self.config.kick_channel.trim().is_empty();
         let twitch = has_twitch && self.controller.twitch_logged_in();
@@ -6577,6 +6591,10 @@ impl ChatView {
     /// toggle and the emote-picker button live *inside* the input box
     /// (prefix/suffix), so there's no button row to misalign.
     fn render_composer(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if self.config.read_only() {
+            return div().px_3().py_2().text_color(cx.theme().muted_foreground)
+                .child("This tab is read-only").into_any_element();
+        }
         // Tab completion. A single-line `Input` binds Tab to its
         // `IndentInline` action, which for a non-indentable input
         // just *propagates* (no-op) — so the keystroke falls through

@@ -600,7 +600,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
 - 246 passing unit tests (`cargo test`).
 
 **Not done yet (designed for, not built):**
-- TikTok connector.
+- **TikTok send / moderation.** Anonymous read-only chat is implemented in `crates/tiktok`. The locally patched PirateTok source (including the Windows build fix) and update instructions are documented in [vendor/piratetok-live-rs/UPSTREAM.md](vendor/piratetok-live-rs/UPSTREAM.md).
 - **YouTube send / moderation.** Reads are done (anonymous InnerTube, above); sending + ban/timeout/delete
   need the **Data API v3** (quota-limited: ~2000 reads/day, which is why *reads* use InnerTube) + **Google
   OAuth** (`youtube.force-ssl`). Google requires a client **secret**, which we won't ship in the binary —

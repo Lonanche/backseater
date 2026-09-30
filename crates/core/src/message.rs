@@ -29,13 +29,13 @@ impl Platform {
     /// not a URL. `None` for platforms without one yet — the UI falls back to
     /// [`glyph`](Self::glyph). We bundle a small PNG rather than fetch the logo SVG:
     /// gpui rasterizes an `img()` SVG at its huge intrinsic size (the Twitch logo →
-    /// ~105 MB decoded for a 16px icon). YouTube/TikTok have no bundled icon yet.
+    /// ~105 MB decoded for a 16px icon). TikTok's SVG is only 24px square.
     pub fn icon_url(self) -> Option<&'static str> {
         match self {
             Platform::Twitch => Some("twitch/twitch.png"),
             Platform::Kick => Some("kick/kick.png"),
             Platform::YouTube => Some("youtube/youtube.png"),
-            Platform::TikTok => None,
+            Platform::TikTok => Some("tiktok/tiktok.svg"),
         }
     }
 
@@ -122,7 +122,10 @@ impl Platform {
                     format!("https://www.youtube.com/@{}", c.trim_start_matches('@'))
                 }
             }
-            Platform::TikTok => format!("https://www.tiktok.com/@{c}"),
+            Platform::TikTok => {
+                let name = crate::normalize_tiktok_channel(c).unwrap_or_default();
+                format!("https://www.tiktok.com/@{name}/live")
+            }
         }
     }
 }

@@ -22,6 +22,7 @@ use bks_kick::KickSource;
 use bks_platform::{ChannelMeta, ChatEvent, ChatSource, LastStream};
 use bks_twitch::{BadgeMap, EventsubAuth, TwitchSource};
 use bks_youtube::YouTubeSource;
+use bks_tiktok::TikTokSource;
 use tokio::runtime::Runtime;
 
 use crate::controller::Controller;
@@ -50,6 +51,7 @@ pub fn connect(
     twitch_channel: &str,
     kick_channel: &str,
     youtube_channel: &str,
+    tiktok_channel: &str,
 ) -> (smol::channel::Receiver<ChatEvent>, Controller) {
     let (tx, rx) = smol::channel::bounded::<ChatEvent>(1024);
     let twitch = bks_core::strip_channel(twitch_channel).to_string();
@@ -57,6 +59,7 @@ pub fn connect(
     // YouTube's source is a handle/URL/video ref, not a `#channel`, so it's passed
     // through verbatim (just trimmed).
     let youtube = youtube_channel.trim().to_string();
+    let tiktok = tiktok_channel.trim().to_string();
 
     let controller = Controller::new(
         session,
@@ -102,6 +105,10 @@ pub fn connect(
             &tx,
             run_youtube(Arc::new(YouTubeSource::new()), youtube, tx.clone()),
         );
+    }
+
+    if !tiktok.is_empty() {
+        spawn_connection(&tx, run_tiktok(tiktok, tx.clone()));
     }
 
     (rx, controller)
@@ -952,6 +959,26 @@ async fn run_youtube(source: Arc<YouTubeSource>, channel: String, tx: Sink) {
         if tx.send(forward).await.is_err() {
             break;
         }
+    }
+}
+
+async fn run_tiktok(channel: String, tx: Sink) {
+    let mut stream = match TikTokSource.join(&channel).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            let _ = tx.send(ChatEvent::Error(format!("TikTok: {err:#}"))).await;
+            return;
+        }
+    };
+    let mut emotes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(event) = stream.recv().await {
+        if let ChatEvent::Message(msg) = &event {
+            if emotes.len() < 1024 && harvest_emotes(msg, &mut emotes, &mut seen) {
+                emit_emotes(bks_core::Platform::TikTok, &emotes, &tx).await;
+            }
+        }
+        if tx.send(event).await.is_err() { break; }
     }
 }
 
