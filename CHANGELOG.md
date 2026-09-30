@@ -17,6 +17,8 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 
 ### Fixes
 
+- Names in attached event-panel messages now line up with the notification
+  above, with the extra left border and indentation removed.
 - Quiet TikTok streams stay connected instead of reconnecting unnecessarily.
 - Invalid TikTok channel URLs show a helpful error, and chatters with missing
   profile details still have a visible name.
