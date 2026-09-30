@@ -3,15 +3,30 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.7.0
+
+### Features
+
+- Added read-only TikTok LIVE chat. Enter a username or LIVE URL in tab settings
+  to follow a channel without logging in. Use a dedicated TikTok tab or merge
+  it with Twitch, Kick and YouTube; your channels are saved for the next launch.
+- TikTok chat includes native emote messages and badges, with gifts,
+  subscription updates and follows shown in the events feed.
+- See TikTok live status, stream titles and viewer counts. Connections recover
+  automatically, and offline channels are checked for new streams.
+
+### Fixes
+
+- Quiet TikTok streams stay connected instead of reconnecting unnecessarily.
+- Invalid TikTok channel URLs show a helpful error, and chatters with missing
+  profile details still have a visible name.
+- Read-only tabs now show a clear status instead of a message input, and
+  unsupported reply buttons are hidden on read-only chat messages.
+
 ## v0.6.2
 
 ### Features
 
-- Added read-only TikTok LIVE channels to merged tabs, including native emote
-  messages, badges, gifts, subscriptions, follows, viewer counts, live status,
-  reconnects and offline polling. Accepts a username or LIVE URL without login.
-  Uses a locally patched PirateTok library, including a Windows build-script fix;
-  provenance and patch details are recorded in `vendor/piratetok-live-rs/UPSTREAM.md`.
 - Twitch subscriber badge tooltips now identify Tier 2 and Tier 3 subscriptions,
   including when the badge image falls back to a lower month milestone.
 - Links in event descriptions and attached messages are now clickable, using
