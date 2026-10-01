@@ -109,7 +109,10 @@ pub fn main_window_options(cx: &mut App) -> WindowOptions {
         window_min_size: Some(MAIN_MIN_SIZE),
         ..Default::default()
     };
-    let Some(bounds) = saved.map(SavedBounds::to_bounds).filter(|b| on_screen(b, cx)) else {
+    let Some(bounds) = saved
+        .map(SavedBounds::to_bounds)
+        .filter(|b| on_screen(b, cx))
+    else {
         return base;
     };
     WindowOptions {
@@ -120,7 +123,7 @@ pub fn main_window_options(cx: &mut App) -> WindowOptions {
         }),
         // ⚠️ Without the display id, gpui validates the bounds against the
         // *primary* monitor and silently swaps them for its default bounds
-        // when their center is elsewhere (same bug as `child_window::open`).
+        // when their center is elsewhere (same bug as `child_window::open_owned`).
         display_id: crate::child_window::resolve_display(bounds, None, cx),
         ..base
     }

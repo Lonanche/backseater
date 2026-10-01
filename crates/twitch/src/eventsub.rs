@@ -102,7 +102,9 @@ fn can_automod(scopes: &[String]) -> bool {
 /// `channel.suspicious_user.message`/`.update` need
 /// `moderator:read:suspicious_users`.
 fn can_suspicious(scopes: &[String]) -> bool {
-    scopes.iter().any(|s| s == "moderator:read:suspicious_users")
+    scopes
+        .iter()
+        .any(|s| s == "moderator:read:suspicious_users")
 }
 
 /// The envelope every EventSub WebSocket frame shares.
@@ -179,7 +181,8 @@ pub(crate) async fn subscribe(
 /// channels onto one socket precisely to stay under that cap, so hitting it means
 /// something is wrong, and retrying opens *another* socket that makes it worse.
 pub(crate) fn is_transport_limit(err: &anyhow::Error) -> bool {
-    err.to_string().contains("websocket transports limit exceeded")
+    err.to_string()
+        .contains("websocket transports limit exceeded")
 }
 
 /// Deletes a subscription by id (best effort — used when a channel unregisters so
@@ -421,6 +424,7 @@ fn automod_held(event: &Value) -> Option<ChatEvent> {
         .unwrap_or_else(Utc::now);
     Some(ChatEvent::AutoModHeld {
         platform: Platform::Twitch,
+        historical: false,
         message_id,
         user: name_of(event, "user_name", "user_login"),
         text,
@@ -598,7 +602,9 @@ fn suspicious_update(event: &Value) -> Option<String> {
     let user = target_name(event);
     Some(match event["low_trust_status"].as_str()? {
         "restricted" => format!("{moderator} restricted {user} as a suspicious user"),
-        "active_monitoring" => format!("{moderator} started monitoring {user} as a suspicious user"),
+        "active_monitoring" => {
+            format!("{moderator} started monitoring {user} as a suspicious user")
+        }
         "none" | "no_treatment" => {
             format!("{moderator} removed {user}'s suspicious-user treatment")
         }
@@ -888,7 +894,12 @@ mod tests {
             "message": { "message_id": "msg-1", "text": "hi", "fragments": [] },
         });
         match suspicious_message(&event, Utc::now()) {
-            Some(ChatEvent::Suspicious { status, detail, message, .. }) => {
+            Some(ChatEvent::Suspicious {
+                status,
+                detail,
+                message,
+                ..
+            }) => {
                 assert_eq!(status, SuspiciousStatus::Monitored);
                 assert_eq!(detail, "");
                 assert!(matches!(
@@ -910,11 +921,14 @@ mod tests {
                 }}
             ]}
         });
-        let Some(ChatEvent::Suspicious { message, .. }) = suspicious_message(&event, Utc::now()) else {
+        let Some(ChatEvent::Suspicious { message, .. }) = suspicious_message(&event, Utc::now())
+        else {
             panic!("expected suspicious message");
         };
-        assert!(matches!(&message.elements[..], [bks_core::MessageElement::Gif { id, url, text }]
-            if id == "hi" && url.ends_with("?cid=keep") && text == "[Hi]"));
+        assert!(
+            matches!(&message.elements[..], [bks_core::MessageElement::Gif { id, url, text }]
+            if id == "hi" && url.ends_with("?cid=keep") && text == "[Hi]")
+        );
     }
 
     #[test]

@@ -96,6 +96,7 @@ impl State {
     fn live_event(&self, channel: &str, live: bool) -> ChatEvent {
         ChatEvent::Live {
             platform: Platform::TikTok,
+            historical: false,
             live,
             title: if live {
                 self.title.clone()

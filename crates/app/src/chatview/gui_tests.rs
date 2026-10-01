@@ -162,7 +162,10 @@ fn gui_tiktok_rows_cannot_be_replied_to_in_a_merged_tab(cx: &mut TestAppContext)
             view.start_reply("1", window, cx);
             assert!(view.replying_to.is_none());
             view.start_reply("2", window, cx);
-            assert_eq!(view.replying_to.as_ref().unwrap().platform, Platform::Twitch);
+            assert_eq!(
+                view.replying_to.as_ref().unwrap().platform,
+                Platform::Twitch
+            );
         });
     });
 }
@@ -174,9 +177,15 @@ fn gui_tiktok_only_tab_is_read_only_and_keeps_platform_emotes_separate(cx: &mut 
         view.config.twitch_channel.clear();
         view.config.tiktok_channel = "creator".into();
         view.picker_tab = Platform::TikTok;
-        view.channel.update(cx, |channel, cx| channel.push(ChatEvent::Emotes {
-            platform: Platform::TikTok, emotes: vec![emote("TikTokWave")],
-        }, cx));
+        view.channel.update(cx, |channel, cx| {
+            channel.push(
+                ChatEvent::Emotes {
+                    platform: Platform::TikTok,
+                    emotes: vec![emote("TikTokWave")],
+                },
+                cx,
+            )
+        });
         assert_eq!(view.picker_platforms(), vec![Platform::TikTok]);
         assert_eq!(view.picker_tab_emotes(cx)[0].name, "TikTokWave");
         assert_eq!(view.channel.read(cx).emotes_twitch[0].name, "Kappa");
@@ -186,8 +195,17 @@ fn gui_tiktok_only_tab_is_read_only_and_keeps_platform_emotes_separate(cx: &mut 
     app.draw();
     app.cx.update(|window, cx| {
         app.view.update(cx, |view, cx| {
-            view.input.update(cx, |input, cx| input.set_value("must not send", window, cx));
-            view.on_input_event(&view.input.clone(), &InputEvent::PressEnter { secondary: false, shift: false }, window, cx);
+            view.input
+                .update(cx, |input, cx| input.set_value("must not send", window, cx));
+            view.on_input_event(
+                &view.input.clone(),
+                &InputEvent::PressEnter {
+                    secondary: false,
+                    shift: false,
+                },
+                window,
+                cx,
+            );
             assert!(view.sent_history.is_empty());
         });
     });
@@ -442,10 +460,10 @@ fn gui_mentions_build_only_the_visible_rows(cx: &mut TestAppContext) {
     let mut app = Harness::new(cx);
     app.cx.update(|_, cx| {
         app.view.update(cx, |view, cx| {
-            view.set_mentions(bks_core::MentionMatcher::with_sound([(
-                "ping".into(),
-                false,
-            )]));
+            view.set_mentions(
+                bks_core::MentionMatcher::with_sound([("ping".into(), false)]),
+                cx,
+            );
             let mut layout = view.config.layout.clone();
             layout.set_enabled(tabs::PanelKind::Mentions, true);
             view.set_layout(layout, cx);
@@ -474,10 +492,10 @@ fn gui_mentions_use_the_configured_chat_font_size(cx: &mut TestAppContext) {
     let mut app = Harness::new(cx);
     app.cx.update(|_, cx| {
         app.view.update(cx, |view, cx| {
-            view.set_mentions(bks_core::MentionMatcher::with_sound([(
-                "ping".into(),
-                false,
-            )]));
+            view.set_mentions(
+                bks_core::MentionMatcher::with_sound([("ping".into(), false)]),
+                cx,
+            );
             let mut layout = view.config.layout.clone();
             layout.set_enabled(tabs::PanelKind::Mentions, true);
             view.set_layout(layout, cx);
@@ -520,4 +538,150 @@ fn gui_mentions_use_the_configured_chat_font_size(cx: &mut TestAppContext) {
             });
         }
     }
+}
+
+#[gpui::test]
+fn gui_viewer_list_virtualizes_and_chat_does_not_refilter_it(cx: &mut TestAppContext) {
+    let mut app = Harness::new(cx);
+    let mut panel = None;
+    let window = cx.add_window(|window, cx| {
+        let view = cx.new(|cx| viewers::ViewerListView::new(&app.view, window, cx));
+        view.update(cx, |view, cx| {
+            view.resolve(
+                Ok(bks_twitch::Chatters {
+                    total: 5_000,
+                    chatters: (0..5_000)
+                        .map(|ix| bks_twitch::Chatter {
+                            user_id: ix.to_string(),
+                            user_login: format!("viewer{ix:04}"),
+                            user_name: format!("Viewer{ix:04}"),
+                        })
+                        .collect(),
+                }),
+                cx,
+            )
+        });
+        panel = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let panel = panel.unwrap();
+    let mut window = VisualTestContext::from_window(window.into(), cx);
+    window.run_until_parked();
+    window.update(|window, cx| {
+        window.draw(cx).clear();
+    });
+    assert!(window.debug_bounds("viewer-row-0").is_some());
+    assert!(window.debug_bounds("viewer-row-4999").is_none());
+    app.cx.update(|_, cx| {
+        let channel = app.view.read(cx).channel.clone();
+        channel.update(cx, |channel, cx| {
+            for ix in 0..100 {
+                channel.push(ChatEvent::Message(chat_message(ix)), cx);
+            }
+        });
+    });
+    app.draw();
+    window.run_until_parked();
+    window.update(|window, cx| {
+        assert_eq!(panel.read(cx).refilters, 1);
+        assert_eq!(panel.read(cx).matches.len(), 5_000);
+        let input = panel.read(cx).input.clone();
+        input.read(cx).focus_handle(cx).focus(window, cx);
+        window.draw(cx).clear();
+    });
+    window.simulate_input("viewer4999");
+    window.run_until_parked();
+    window.update(|_, cx| {
+        assert_eq!(panel.read(cx).matches.len(), 1);
+        assert_eq!(panel.read(cx).list.item_count(), 1);
+        assert_eq!(panel.read(cx).refilters, 1 + "viewer4999".len());
+    });
+}
+
+#[gpui::test]
+fn gui_search_repaints_deleted_messages_without_new_chat(cx: &mut TestAppContext) {
+    let mut app = Harness::new(cx);
+    app.cx.update(|_, cx| {
+        let channel = app.view.read(cx).channel.clone();
+        channel.update(cx, |channel, cx| {
+            channel.push(ChatEvent::Message(chat_message(0)), cx);
+        });
+    });
+    app.draw();
+    let window = cx.add_window(|window, cx| {
+        let view = cx.new(|cx| search_view::SearchView::new(&app.view, window, cx));
+        Root::new(view, window, cx)
+    });
+    let mut window = VisualTestContext::from_window(window.into(), cx);
+    window.run_until_parked();
+    window.update(|window, cx| {
+        window.draw(cx).clear();
+    });
+    assert!(window.debug_bounds("search-hit-0-struck-false").is_some());
+    app.cx.update(|_, cx| {
+        let channel = app.view.read(cx).channel.clone();
+        channel.update(cx, |channel, cx| {
+            channel.push(
+                ChatEvent::DeleteMessage {
+                    platform: Platform::Twitch,
+                    message_id: "0".into(),
+                },
+                cx,
+            );
+        });
+    });
+    window.run_until_parked();
+    window.update(|window, cx| {
+        window.draw(cx).clear();
+    });
+    assert!(window.debug_bounds("search-hit-0-struck-true").is_some());
+    assert!(window.debug_bounds("search-hit-0-struck-false").is_none());
+}
+
+#[gpui::test]
+fn gui_mentions_and_search_do_not_rescan_history_on_live_arrivals(cx: &mut TestAppContext) {
+    let mut app = Harness::new(cx);
+    app.cx.update(|_, cx| {
+        app.view.update(cx, |view, cx| {
+            view.set_mentions(bks_core::MentionMatcher::new(["ping".into()]), cx);
+            let mut layout = view.config.layout.clone();
+            layout.set_enabled(tabs::PanelKind::Mentions, true);
+            view.set_layout(layout, cx);
+        })
+    });
+    app.draw();
+    let mut search = None;
+    let window = cx.add_window(|window, cx| {
+        let view = cx.new(|cx| search_view::SearchView::new(&app.view, window, cx));
+        search = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let search = search.unwrap();
+    let search_window = VisualTestContext::from_window(window.into(), cx);
+    search_window.run_until_parked();
+    let initial_rebuilds = app
+        .cx
+        .update(|_, cx| app.view.read(cx).mentions_panel.rebuilds);
+    for batch in 0..3 {
+        app.cx.update(|_, cx| {
+            let channel = app.view.read(cx).channel.clone();
+            channel.update(cx, |channel, cx| {
+                for ix in batch * 500..(batch + 1) * 500 {
+                    channel.push(ChatEvent::Message(chat_message(ix)), cx);
+                }
+            });
+        });
+        app.draw();
+        search_window.run_until_parked();
+    }
+    app.cx.update(|_, cx| {
+        let view = app.view.read(cx);
+        assert_eq!(view.mentions_panel.rebuilds, initial_rebuilds);
+        assert_eq!(view.mentions_panel.rows.len(), crate::MAX_ROWS);
+        assert_eq!(view.mentions_panel.rows.front().unwrap().id, "500");
+        let search = search.read(cx);
+        assert_eq!(search.results.rebuilds, 1);
+        assert_eq!(search.results.rows.len(), crate::MAX_ROWS);
+        assert_eq!(search.results.rows.front().unwrap().id, "500");
+    });
 }

@@ -168,6 +168,7 @@ async fn watch_live_chat(source: &str, video_id: &str, tx: &ChatSink) -> anyhow:
     let _ = tx
         .send(ChatEvent::Live {
             platform: Platform::YouTube,
+            historical: false,
             live: true,
             title,
             game: String::new(),
@@ -403,6 +404,7 @@ fn viewership_count(resp: &Value) -> Option<u64> {
 fn offline_live(last_stream: Option<bks_platform::LastStream>) -> ChatEvent {
     ChatEvent::Live {
         platform: Platform::YouTube,
+        historical: false,
         live: false,
         title: String::new(),
         game: String::new(),

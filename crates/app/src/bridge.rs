@@ -15,18 +15,20 @@
 //! native emotes inline, already parsed before they reach here). Adding another
 //! provider is pushing it into `providers()`/`kick_providers()`.
 
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use bks_emotes::{BttvProvider, EmoteProvider, EmoteRegistry, FfzProvider, SeventvProvider};
 use bks_kick::KickSource;
 use bks_platform::{ChannelMeta, ChatEvent, ChatSource, LastStream};
+use bks_tiktok::TikTokSource;
 use bks_twitch::{BadgeMap, EventsubAuth, TwitchSource};
 use bks_youtube::YouTubeSource;
-use bks_tiktok::TikTokSource;
 use tokio::runtime::Runtime;
 
 use crate::controller::Controller;
 use crate::session::Session;
+use crate::source_hub::{self, SourceHub};
 
 /// A clonable sender into the merged UI event stream.
 type Sink = smol::channel::Sender<ChatEvent>;
@@ -54,64 +56,271 @@ pub fn connect(
     tiktok_channel: &str,
 ) -> (smol::channel::Receiver<ChatEvent>, Controller) {
     let (tx, rx) = smol::channel::bounded::<ChatEvent>(1024);
-    let twitch = bks_core::strip_channel(twitch_channel).to_string();
-    let kick = bks_core::strip_channel(kick_channel).to_string();
-    // YouTube's source is a handle/URL/video ref, not a `#channel`, so it's passed
-    // through verbatim (just trimmed).
-    let youtube = youtube_channel.trim().to_string();
-    let tiktok = tiktok_channel.trim().to_string();
-
+    let twitch = SourceKey::new(bks_core::Platform::Twitch, twitch_channel);
+    let kick = SourceKey::new(bks_core::Platform::Kick, kick_channel);
+    let youtube = SourceKey::new(bks_core::Platform::YouTube, youtube_channel);
+    let tiktok = SourceKey::new(bks_core::Platform::TikTok, tiktok_channel);
+    let sources: Vec<_> = [&twitch, &kick, &youtube, &tiktok]
+        .into_iter()
+        .filter(|key| !key.channel.is_empty())
+        .map(|key| shared_source(session.clone(), key.clone()))
+        .collect();
+    let producer = |platform| {
+        sources
+            .iter()
+            .find(|source| source.key.platform == platform)
+            .map(|source| &source.controller)
+    };
     let controller = Controller::new(
         session,
         tx.clone(),
         runtime().handle().clone(),
-        twitch.clone(),
-        kick.clone(),
+        twitch.channel,
+        kick.channel,
+    )
+    .with_sources(
+        producer(bks_core::Platform::Twitch),
+        producer(bks_core::Platform::Kick),
     );
-
-    // Twitch: the controller owns the connection (authed if logged in, else
-    // anonymous) so login swaps can re-join cleanly. Skipped if no channel.
     controller.start();
-
-    // Twitch live status is polled (via IVR, anonymous): an immediate first check,
-    // then every LIVE_POLL_SECS, emitting a `Live` event on a transition. Kick does
-    // NOT poll its live *status* — its `StreamerIsLive`/`StopStreamBroadcast` arrive
-    // on the Pusher `channel.{id}` subscription the connector already holds
-    // (real-time, no poll) — but its viewer *count* has no push event, so that one
-    // number is polled from the lightweight livestream endpoint.
-    if !twitch.is_empty() {
-        spawn_connection(&tx, poll_twitch_live(twitch.clone(), tx.clone()));
+    for source in sources {
+        spawn_connection(&tx, forward_source(source, tx.clone()));
     }
-
-    // Kick: emotes arrive inline, so messages forward unchanged. We also record
-    // each chatter's id with the controller so Kick moderation can target them.
-    if !kick.is_empty() {
-        spawn_connection(&tx, poll_kick_viewers(kick.clone(), tx.clone()));
-        spawn_connection(
-            &tx,
-            run_kick(
-                Arc::new(KickSource::new()),
-                kick,
-                tx.clone(),
-                controller.clone(),
-            ),
-        );
-    }
-
-    // YouTube: anonymous InnerTube read. Like Kick, emotes arrive inline (custom
-    // channel emojis), so on top of that we only add 7TV. No moderation yet.
-    if !youtube.is_empty() {
-        spawn_connection(
-            &tx,
-            run_youtube(Arc::new(YouTubeSource::new()), youtube, tx.clone()),
-        );
-    }
-
-    if !tiktok.is_empty() {
-        spawn_connection(&tx, run_tiktok(tiktok, tx.clone()));
-    }
-
     (rx, controller)
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct SourceKey {
+    platform: bks_core::Platform,
+    channel: String,
+}
+
+impl SourceKey {
+    fn new(platform: bks_core::Platform, channel: &str) -> Self {
+        let channel = canonical_channel(platform, channel);
+        Self { platform, channel }
+    }
+}
+
+/// Shared by the feed-model and source registries so their identity rules agree.
+pub(crate) fn canonical_channel(platform: bks_core::Platform, channel: &str) -> String {
+    use bks_core::Platform;
+    match platform {
+        Platform::Twitch | Platform::Kick => bks_core::channel_login(channel),
+        Platform::TikTok => bks_core::normalize_tiktok_channel(channel)
+            .unwrap_or_else(|| channel.trim().to_string()),
+        Platform::YouTube => normalize_youtube(channel),
+    }
+}
+
+fn normalize_youtube(channel: &str) -> String {
+    let channel = channel.trim();
+    if channel.is_empty() {
+        return String::new();
+    }
+    // Video and UC channel ids are case-sensitive; handles are not.
+    if let Some(video) = bks_youtube::extract_video_id(channel) {
+        return format!("https://www.youtube.com/watch?v={video}");
+    }
+    let candidate = if channel.contains("://") {
+        channel.to_string()
+    } else {
+        format!("https://{channel}")
+    };
+    if let Ok(url) = reqwest::Url::parse(&candidate) {
+        if matches!(
+            url.host_str(),
+            Some("youtube.com" | "www.youtube.com" | "m.youtube.com")
+        ) {
+            let path = url.path().trim_end_matches('/');
+            if let Some(handle) = path.strip_prefix("/@") {
+                return format!(
+                    "@{}",
+                    handle.split('/').next().unwrap_or_default().to_lowercase()
+                );
+            }
+            if let Some(id) = path.strip_prefix("/channel/") {
+                return format!(
+                    "https://www.youtube.com/channel/{}",
+                    id.split('/').next().unwrap_or_default()
+                );
+            }
+        }
+    }
+    if channel.starts_with("UC") && channel.len() == 24 {
+        return format!("https://www.youtube.com/channel/{channel}");
+    }
+    if !channel.contains('/') && !channel.contains(char::is_whitespace) {
+        return format!("@{}", channel.trim_start_matches('@').to_lowercase());
+    }
+    channel.to_string()
+}
+
+/// Owns exactly one fully processed source, including polling and side feeds.
+/// Relays hold the strong references; the registry cannot keep a closed channel
+/// alive. Controllers share only its action state, not this lifetime guard.
+struct SharedSource {
+    key: SourceKey,
+    login: tokio::sync::watch::Receiver<crate::session::LoginState>,
+    controller: Controller,
+    ingress: Sink,
+    hub: Arc<SourceHub>,
+    drain: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for SharedSource {
+    fn drop(&mut self) {
+        self.ingress.close();
+        self.drain.abort();
+    }
+}
+
+fn shared_source(session: Session, key: SourceKey) -> Arc<SharedSource> {
+    static SOURCES: OnceLock<Mutex<SourceRegistry>> = OnceLock::new();
+    let mut sources = SOURCES.get_or_init(Mutex::default).lock().unwrap();
+    get_source(&mut sources, session, key, start_source)
+}
+
+type SourceRegistry = HashMap<SourceKey, Vec<Weak<SharedSource>>>;
+
+fn get_source(
+    sources: &mut SourceRegistry,
+    session: Session,
+    key: SourceKey,
+    start: impl FnOnce(Session, SourceKey) -> Arc<SharedSource>,
+) -> Arc<SharedSource> {
+    sources.retain(|_, entries| {
+        entries.retain(|source| source.strong_count() != 0);
+        !entries.is_empty()
+    });
+    let login = session.subscribe();
+    if let Some(source) = sources
+        .get(&key)
+        .into_iter()
+        .flatten()
+        .filter_map(Weak::upgrade)
+        .find(|source| source.login.same_channel(&login))
+    {
+        return source;
+    }
+    let source = start(session, key.clone());
+    sources
+        .entry(key)
+        .or_default()
+        .push(Arc::downgrade(&source));
+    source
+}
+
+fn source_pipe(session: Session, key: SourceKey) -> Arc<SharedSource> {
+    use bks_core::Platform;
+    let (tx, rx) = smol::channel::bounded(1024);
+    let hub = Arc::new(SourceHub::new());
+    let drain_hub = hub.clone();
+    let drain = runtime().spawn(async move {
+        while let Ok(event) = rx.recv().await {
+            drain_hub.publish(event);
+        }
+    });
+    let controller = Controller::new(
+        session.clone(),
+        tx.clone(),
+        runtime().handle().clone(),
+        if key.platform == Platform::Twitch {
+            key.channel.clone()
+        } else {
+            String::new()
+        },
+        if key.platform == Platform::Kick {
+            key.channel.clone()
+        } else {
+            String::new()
+        },
+    );
+    Arc::new(SharedSource {
+        key,
+        login: session.subscribe(),
+        controller,
+        ingress: tx,
+        hub,
+        drain,
+    })
+}
+
+fn start_source(session: Session, key: SourceKey) -> Arc<SharedSource> {
+    use bks_core::Platform;
+    let source = source_pipe(session, key);
+    let key = &source.key;
+    let tx = &source.ingress;
+    let controller = &source.controller;
+    match key.platform {
+        Platform::Twitch => {
+            controller.start();
+            spawn_connection(tx, poll_twitch_live(key.channel.clone(), tx.clone()));
+        }
+        Platform::Kick => {
+            controller.start();
+            spawn_connection(tx, poll_kick_viewers(key.channel.clone(), tx.clone()));
+            spawn_connection(
+                tx,
+                run_kick(
+                    Arc::new(KickSource::new()),
+                    key.channel.clone(),
+                    tx.clone(),
+                    controller.clone(),
+                ),
+            );
+        }
+        Platform::YouTube => spawn_connection(
+            tx,
+            run_youtube(
+                Arc::new(YouTubeSource::new()),
+                key.channel.clone(),
+                tx.clone(),
+            ),
+        ),
+        Platform::TikTok => spawn_connection(tx, run_tiktok(key.channel.clone(), tx.clone())),
+    }
+    source
+}
+
+async fn forward_source(source: Arc<SharedSource>, tx: Sink) {
+    let mut subscription = source.hub.subscribe(0);
+    let mut joining = true;
+    loop {
+        for event in subscription.seed.drain(..) {
+            // Only the initial seed predates this feed. Recovery fills a live
+            // gap and must retain ordering, alerts, and the events-panel entry.
+            let event = if joining {
+                source_hub::historical(&event.event)
+            } else {
+                (*event.event).clone()
+            };
+            if tx.send(event).await.is_err() {
+                return;
+            }
+        }
+        joining = false;
+        let mut delivered = subscription.through;
+        loop {
+            match subscription.events.recv().await {
+                Ok(event) => {
+                    if tx.send((*event.event).clone()).await.is_err() {
+                        return;
+                    }
+                    delivered = event.sequence;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                    let notice = format!("{}: this feed fell behind by {count} updates; restoring recent chat and channel state", source.key.channel);
+                    if tx.send(ChatEvent::Error(notice)).await.is_err() {
+                        return;
+                    }
+                    subscription = source.hub.subscribe(delivered);
+                    break;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    }
 }
 
 fn spawn_connection(tx: &Sink, work: impl std::future::Future<Output = ()> + Send + 'static) {
@@ -207,6 +416,7 @@ async fn poll_twitch_live(channel: String, tx: Sink) {
                 if tx
                     .send(ChatEvent::Live {
                         platform: bks_core::Platform::Twitch,
+                        historical: false,
                         live,
                         title,
                         game,
@@ -978,7 +1188,9 @@ async fn run_tiktok(channel: String, tx: Sink) {
                 emit_emotes(bks_core::Platform::TikTok, &emotes, &tx).await;
             }
         }
-        if tx.send(event).await.is_err() { break; }
+        if tx.send(event).await.is_err() {
+            break;
+        }
     }
 }
 
@@ -1079,6 +1291,335 @@ async fn load_emotes(
         meta.name,
         providers.len()
     );
+}
+
+#[cfg(test)]
+mod shared_source_tests {
+    use super::*;
+    use bks_core::{Author, Message, Platform};
+
+    fn message(index: usize) -> ChatEvent {
+        ChatEvent::Message(Box::new(Message {
+            id: index.to_string(),
+            platform: Platform::Twitch,
+            channel: "fixture".into(),
+            timestamp: chrono::DateTime::from_timestamp(index as i64, 0).unwrap(),
+            author: Author::default(),
+            raw_text: index.to_string(),
+            elements: vec![],
+            reply: None,
+            first_message: false,
+            highlighted: false,
+            historical: false,
+            reward_id: None,
+        }))
+    }
+
+    // Poll only when the test permits delivery, so overflowing the broadcast
+    // receiver never depends on executor timing or a sleeping UI thread.
+    fn drain_relay<F: std::future::Future<Output = ()>>(
+        relay: &mut std::pin::Pin<Box<F>>,
+        rx: &smol::channel::Receiver<ChatEvent>,
+    ) -> Vec<ChatEvent> {
+        let mut events = Vec::new();
+        let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        loop {
+            assert!(std::future::Future::poll(relay.as_mut(), &mut cx).is_pending());
+            let before = events.len();
+            while let Ok(event) = rx.try_recv() {
+                events.push(event);
+            }
+            if before == events.len() {
+                return events;
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn lag_recovery_retains_recent_live_rows_in_a_full_model(cx: &mut gpui::TestAppContext) {
+        use crate::chatview::Row;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+        let session = Session::for_test();
+        let model =
+            cx.update(|cx| crate::channel_store::register_for_test(session.clone(), "fixture", cx));
+        let source = source_pipe(session, SourceKey::new(Platform::Twitch, "fixture"));
+        let (tx, rx) = smol::channel::bounded(16);
+        source.hub.publish(message(0));
+        let mut relay = Box::pin(forward_source(source.clone(), tx));
+        let seed = drain_relay(&mut relay, &rx);
+        assert!(matches!(&seed[0], ChatEvent::Message(msg) if msg.historical));
+        cx.update(|cx| {
+            model.update(cx, |model, cx| {
+                for event in seed {
+                    model.push(event, cx);
+                }
+            })
+        });
+
+        let mut live = Vec::new();
+        for index in 1..=crate::MAX_ROWS {
+            source.hub.publish(message(index));
+            live.extend(drain_relay(&mut relay, &rx));
+        }
+        cx.update(|cx| {
+            model.update(cx, |model, cx| {
+                for event in live {
+                    model.push(event, cx);
+                }
+                assert_eq!(model.rows.len(), crate::MAX_ROWS);
+                assert!(model
+                    .rows
+                    .iter()
+                    .all(|row| matches!(row, Row::Message { msg } if !msg.historical)));
+            })
+        });
+
+        // Stop polling the real relay until the 2048-entry broadcast overflows.
+        let last_message = crate::MAX_ROWS + 4096;
+        for index in crate::MAX_ROWS + 1..=last_message {
+            source.hub.publish(message(index));
+        }
+        source.hub.publish(ChatEvent::Event {
+            platform: Platform::Twitch,
+            kind: bks_platform::EventKind::Sub,
+            text: "recovered subscription".into(),
+            timestamp: chrono::DateTime::from_timestamp(last_message as i64 + 1, 0).unwrap(),
+            message: None,
+            details: bks_platform::EventDetails::default(),
+        });
+        let recovered = drain_relay(&mut relay, &rx);
+        assert!(matches!(&recovered[0], ChatEvent::Error(text) if text.contains("fell behind")));
+        assert_eq!(recovered.len(), 1001);
+        cx.update(|cx| {
+            model.update(cx, |model, cx| {
+                for event in recovered {
+                    model.push(event, cx);
+                }
+                assert_eq!(model.rows.len(), crate::MAX_ROWS);
+                let ids: Vec<_> = model
+                    .rows
+                    .iter()
+                    .filter_map(|row| match row {
+                        Row::Message { msg } => {
+                            assert!(!msg.historical);
+                            Some(msg.id.parse::<usize>().unwrap())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(ids, (last_message - 998..=last_message).collect::<Vec<_>>());
+                assert!(matches!(
+                    model.rows.back(),
+                    Some(Row::Event {
+                        historical: false,
+                        ..
+                    })
+                ));
+                assert_eq!(
+                    model.events.len(),
+                    1,
+                    "recovered public event must reach the live panel"
+                );
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn initial_automod_replay_is_silent_but_live_holds_notify(cx: &mut gpui::TestAppContext) {
+        use crate::channel_store::ChannelEvent;
+        use crate::chatview::Row;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+        let session = Session::for_test();
+        let model =
+            cx.update(|cx| crate::channel_store::register_for_test(session.clone(), "fixture", cx));
+        let activity = std::rc::Rc::new(std::cell::Cell::new(0));
+        let _subscription = cx.update(|cx| {
+            let activity = activity.clone();
+            cx.subscribe(&model, move |_, event: &ChannelEvent, _| {
+                // ChatView uses this flag to emit TabActivity for unread dots.
+                if matches!(
+                    event,
+                    ChannelEvent::Appended {
+                        historical: false,
+                        ..
+                    }
+                ) {
+                    activity.set(activity.get() + 1);
+                }
+            })
+        });
+        let source = source_pipe(session, SourceKey::new(Platform::Twitch, "fixture"));
+        let held = |id: &str| ChatEvent::AutoModHeld {
+            platform: Platform::Twitch,
+            historical: false,
+            message_id: id.into(),
+            user: "viewer".into(),
+            text: "held message".into(),
+            reason: "blocked term".into(),
+            timestamp: chrono::Utc::now(),
+        };
+        source.hub.publish(held("old"));
+        source.hub.publish(ChatEvent::AutoModResolved {
+            platform: Platform::Twitch,
+            message_id: "old".into(),
+            status: bks_platform::AutoModStatus::Denied,
+            moderator: "moderator".into(),
+        });
+        let (tx, rx) = smol::channel::bounded(16);
+        let mut relay = Box::pin(forward_source(source.clone(), tx));
+        let seed = drain_relay(&mut relay, &rx);
+        cx.update(|cx| {
+            model.update(cx, |model, cx| {
+                for event in seed {
+                    model.push(event, cx);
+                }
+                assert!(matches!(
+                    &model.rows[0],
+                    Row::AutoMod {
+                        historical: true,
+                        resolved: Some(_),
+                        ..
+                    }
+                ));
+            })
+        });
+        assert_eq!(activity.get(), 0, "resolved join backlog must stay silent");
+
+        source.hub.publish(held("live"));
+        let live = drain_relay(&mut relay, &rx);
+        cx.update(|cx| {
+            model.update(cx, |model, cx| {
+                for event in live {
+                    model.push(event, cx);
+                }
+                assert!(matches!(
+                    model.rows.back(),
+                    Some(Row::AutoMod {
+                        historical: false,
+                        resolved: None,
+                        ..
+                    })
+                ));
+            })
+        });
+        assert_eq!(activity.get(), 1, "a new hold must still mark activity");
+    }
+
+    #[test]
+    fn channel_keys_normalize_aliases_without_lowercasing_video_ids() {
+        assert!(
+            SourceKey::new(Platform::Twitch, " #Example ")
+                == SourceKey::new(Platform::Twitch, "example")
+        );
+        assert!(
+            SourceKey::new(Platform::Kick, "EXAMPLE") == SourceKey::new(Platform::Kick, "example")
+        );
+        assert!(
+            SourceKey::new(Platform::TikTok, "https://www.tiktok.com/@Example/live")
+                == SourceKey::new(Platform::TikTok, "example")
+        );
+        assert!(
+            SourceKey::new(Platform::YouTube, "https://www.youtube.com/@Example/live")
+                == SourceKey::new(Platform::YouTube, "@example")
+        );
+        assert!(
+            SourceKey::new(Platform::YouTube, "https://youtu.be/AbCdEfGhI01?t=2")
+                == SourceKey::new(Platform::YouTube, "AbCdEfGhI01")
+        );
+        assert!(
+            SourceKey::new(Platform::YouTube, "AbCdEfGhI01")
+                != SourceKey::new(Platform::YouTube, "abcdefghI01")
+        );
+        assert!(
+            SourceKey::new(Platform::Twitch, "example")
+                != SourceKey::new(Platform::Kick, "example")
+        );
+        assert_ne!(
+            crate::channel_store::ChannelKey::new("", "", "AbCdEfGhI01", ""),
+            crate::channel_store::ChannelKey::new("", "", "abcdefghI01", "")
+        );
+        assert_eq!(
+            crate::channel_store::ChannelKey::new("", "", "AbCdEfGhI01", ""),
+            crate::channel_store::ChannelKey::new("", "", "https://youtu.be/AbCdEfGhI01", "")
+        );
+    }
+
+    #[tokio::test]
+    async fn overlapping_feeds_share_sources_and_last_subscriber_closes_them() {
+        let mut sources = SourceRegistry::new();
+        let session = Session::for_test();
+        let kick = get_source(
+            &mut sources,
+            session.clone(),
+            SourceKey::new(Platform::Kick, "Example"),
+            source_pipe,
+        );
+        let merged_kick = get_source(
+            &mut sources,
+            session.clone(),
+            SourceKey::new(Platform::Kick, "#example"),
+            |_, _| panic!("reopened existing Kick producer"),
+        );
+        let twitch = get_source(
+            &mut sources,
+            session.clone(),
+            SourceKey::new(Platform::Twitch, "example"),
+            source_pipe,
+        );
+        assert!(Arc::ptr_eq(&kick, &merged_kick));
+        assert!(!Arc::ptr_eq(&kick, &twitch));
+        let ingress = kick.ingress.clone();
+        let drain = kick.drain.abort_handle();
+        drop(kick);
+        assert!(!ingress.is_closed());
+        drop(merged_kick);
+        assert!(ingress.is_closed());
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !drain.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let reopened = get_source(
+            &mut sources,
+            session,
+            SourceKey::new(Platform::Kick, "example"),
+            source_pipe,
+        );
+        assert!(!reopened.ingress.is_closed());
+        assert_eq!(sources.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn separate_login_sessions_never_share_authenticated_sources() {
+        let mut sources = SourceRegistry::new();
+        let first_session = Session::for_test();
+        let second_session = Session::for_test();
+        let key = SourceKey::new(Platform::Twitch, "example");
+        let first = get_source(
+            &mut sources,
+            first_session.clone(),
+            key.clone(),
+            source_pipe,
+        );
+        let second = get_source(&mut sources, second_session, key.clone(), source_pipe);
+        assert!(!Arc::ptr_eq(&first, &second));
+        let again = get_source(&mut sources, first_session, key, |_, _| {
+            panic!("lost first session's source")
+        });
+        assert!(Arc::ptr_eq(&first, &again));
+    }
 }
 
 #[cfg(test)]

@@ -6,10 +6,12 @@
 //! child window and the virtualized result list); this module holds the pure
 //! matching/filtering used by the reconcile (kept here so it's unit-testable).
 
+#[cfg(test)]
 use std::sync::Arc;
 
 use bks_core::{contains_ci, Message};
 
+#[cfg(test)]
 use crate::chatview::Row;
 
 /// Normalizes a query for matching — trimmed + lowercased once up front, so
@@ -33,6 +35,7 @@ pub fn matches(msg: &Message, query: &str) -> bool {
 /// order `rows` yields them (pass the buffer in chat order). Only plain chat
 /// rows are searched: event/system/error rows aren't messages the log can jump
 /// to.
+#[cfg(test)]
 pub fn filter<'a>(rows: impl Iterator<Item = &'a Row>, query: &str) -> Vec<&'a Arc<Message>> {
     rows.filter_map(|row| match row {
         Row::Message { msg } => matches(msg, query).then_some(msg),
@@ -47,6 +50,7 @@ mod tests {
     use crate::chatview::Row;
     use bks_core::{Author, Message, Platform};
     use chrono::Utc;
+    #[cfg(test)]
     use std::sync::Arc;
 
     fn message_row(id: &str, login: &str, name: &str, text: &str) -> Row {

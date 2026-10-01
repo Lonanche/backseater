@@ -29,27 +29,12 @@ use gpui_component::{h_flex, v_flex, ActiveTheme};
 
 use super::{
     mention_click_for, mention_click_for_platform, mod_click_for, name_click_for,
-    name_right_click_for, pin_click_for, reply_click_for, thread_click_for, ChatView,
-    EmotePopup, Row,
+    name_right_click_for, pin_click_for, reply_click_for, thread_click_for, ChatView, EmotePopup,
+    Row,
 };
 use crate::channel_store::ChannelModel;
 use crate::{render, ORDINAL_STRIDE, SCROLLBAR_WIDTH};
 use bks_core::Message;
-
-/// A message decorated with its author's resolved 7TV cosmetics for rendering:
-/// the shared message untouched when there are none (no copy), else an owned
-/// clone with the paint/badge applied. Cosmetics live on the shared model, not
-/// baked onto the immutable message, so they apply retroactively + are shared.
-pub(super) fn decorate<'a>(msg: &'a Message, model: &ChannelModel) -> std::borrow::Cow<'a, Message> {
-    match model.cosmetics_for(msg.platform, &msg.author.user_id) {
-        Some(c) => {
-            let mut owned = msg.clone();
-            crate::apply_cosmetics_to_author(&mut owned.author, c);
-            std::borrow::Cow::Owned(owned)
-        }
-        None => std::borrow::Cow::Borrowed(msg),
-    }
-}
 
 /// A row's local calendar date, when it has one (messages and events carry a
 /// timestamp; system/error/live notices don't and inherit their neighbors').
@@ -122,10 +107,14 @@ pub(super) fn trailing_day_label(
     item_count: usize,
     today: chrono::NaiveDate,
 ) -> Option<String> {
-    let last = model.rows.iter().take(item_count).rev().find_map(row_date)?;
+    let last = model
+        .rows
+        .iter()
+        .take(item_count)
+        .rev()
+        .find_map(row_date)?;
     (last < today).then(|| day_label(today))
 }
-
 
 /// Builds the inline link-preview card for a message row, or `None` when inline
 /// previews are off, the message has no previewable link, or its fetch failed.
@@ -400,8 +389,11 @@ impl Render for LogView {
                     };
                     let name_click = name_click_for(&render_entity, msg);
                     let name_right_click = name_right_click_for(&render_entity, msg);
-                    let reply_click = matches!(msg.platform, bks_core::Platform::Twitch | bks_core::Platform::Kick)
-                        .then(|| reply_click_for(&render_entity, msg));
+                    let reply_click = matches!(
+                        msg.platform,
+                        bks_core::Platform::Twitch | bks_core::Platform::Kick
+                    )
+                    .then(|| reply_click_for(&render_entity, msg));
                     // A reply's context line is clickable to open the thread panel;
                     // non-reply rows have no context line, so no handler.
                     let thread_click = msg
@@ -450,10 +442,10 @@ impl Render for LogView {
                     // Struck (ban/delete) + cosmetics come from the shared model's
                     // side-tables, not baked onto the immutable message.
                     let struck = model.is_struck(msg);
-                    let decorated = decorate(msg, model);
                     render::render_message(
-                        &decorated,
+                        msg,
                         render::RowFlags {
+                            cosmetics: model.cosmetics_for(msg.platform, &msg.author.user_id),
                             struck,
                             mentioned,
                             external_highlight: true,
@@ -531,14 +523,13 @@ impl Render for LogView {
                     text,
                     reason,
                     resolved,
+                    ..
                 } => {
                     highlight = Some(render::highlight_automod());
                     // AutoMod rows are Twitch-only (the EventSub feed they arrive
                     // on is Twitch's), so the chatter name opens a Twitch usercard.
-                    let name_click = mention_click_for_platform(
-                        &render_entity,
-                        bks_core::Platform::Twitch,
-                    );
+                    let name_click =
+                        mention_click_for_platform(&render_entity, bks_core::Platform::Twitch);
                     render::render_automod(
                         message_id,
                         user,
@@ -637,8 +628,7 @@ impl Render for LogView {
                                         this.hover_strip_row = Some(msg_id.clone());
                                         this.refresh_log(cx);
                                     }
-                                } else if this.hover_strip_row.as_deref() == Some(msg_id.as_str())
-                                {
+                                } else if this.hover_strip_row.as_deref() == Some(msg_id.as_str()) {
                                     this.hover_strip_row = None;
                                     this.refresh_log(cx);
                                 }

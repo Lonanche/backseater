@@ -1,9 +1,9 @@
 //! The chatter "usercard": its own OS window opened by clicking a name in chat,
 //! showing the account's info and that person's recent messages in this channel.
 //!
-//! State lives on the [`ChatView`](crate::ChatView) (it owns the messages and the
-//! hosting child window); this module holds the card's own data + the body
-//! renderer. Account stats load asynchronously (Twitch Helix), so the header
+//! The `chatview::card` view owns the window, inputs, and account lookup; this
+//! module holds the card's data and header renderer. Account stats load
+//! asynchronously, so the header
 //! shows a loading/failed state until they arrive.
 
 use bks_core::Platform;
@@ -29,7 +29,7 @@ pub enum Stats {
 }
 
 /// One open usercard. Identifies the target and carries whatever account stats
-/// have loaded; the past-message list is pulled from the live feed at render time.
+/// have loaded; the owning view tracks recent messages from channel events.
 pub struct UserCard {
     /// Lowercased login of the target — used to filter their messages and as the
     /// moderation target.
@@ -38,7 +38,7 @@ pub struct UserCard {
     pub display_name: String,
     /// Numeric id from the message that opened the card (shown as "ID: …").
     pub user_id: String,
-    /// The platform the clicked message came from (only Twitch loads stats today).
+    /// The platform the clicked message came from.
     pub platform: Platform,
     /// Chosen name color (packed RGB), for the header name.
     pub color: Option<u32>,
@@ -461,21 +461,51 @@ mod tests {
 
     #[test]
     fn profile_url_per_platform() {
-        let twitch = UserCard::new("oilrats".into(), "OilRats".into(), "1".into(), Platform::Twitch, None);
-        assert_eq!(twitch.profile_url().as_deref(), Some("https://twitch.tv/oilrats"));
+        let twitch = UserCard::new(
+            "oilrats".into(),
+            "OilRats".into(),
+            "1".into(),
+            Platform::Twitch,
+            None,
+        );
+        assert_eq!(
+            twitch.profile_url().as_deref(),
+            Some("https://twitch.tv/oilrats")
+        );
 
-        let kick = UserCard::new("qaixx".into(), "Qaixx".into(), "2".into(), Platform::Kick, None);
-        assert_eq!(kick.profile_url().as_deref(), Some("https://kick.com/qaixx"));
+        let kick = UserCard::new(
+            "qaixx".into(),
+            "Qaixx".into(),
+            "2".into(),
+            Platform::Kick,
+            None,
+        );
+        assert_eq!(
+            kick.profile_url().as_deref(),
+            Some("https://kick.com/qaixx")
+        );
 
         // YouTube uses the UC… channel id (no login slug in chat).
-        let yt = UserCard::new(String::new(), "Creator".into(), "UC123".into(), Platform::YouTube, None);
+        let yt = UserCard::new(
+            String::new(),
+            "Creator".into(),
+            "UC123".into(),
+            Platform::YouTube,
+            None,
+        );
         assert_eq!(
             yt.profile_url().as_deref(),
             Some("https://www.youtube.com/channel/UC123")
         );
 
         // Missing identifier → no link.
-        let bare = UserCard::new(String::new(), "Anon".into(), String::new(), Platform::Twitch, None);
+        let bare = UserCard::new(
+            String::new(),
+            "Anon".into(),
+            String::new(),
+            Platform::Twitch,
+            None,
+        );
         assert_eq!(bare.profile_url(), None);
     }
 

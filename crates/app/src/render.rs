@@ -3,7 +3,8 @@
 //! custom glyph-level element later touches only this file.
 
 use bks_core::{
-    Color, Emote, Message, MessageElement, NamePaint, PaintKind, PaintStop, Platform, ReplyParent,
+    Author, Badge, Color, Emote, Message, MessageElement, NamePaint, PaintKind, PaintStop,
+    Platform, ReplyParent,
 };
 use bks_platform::{AutoModStatus, EventKind};
 use gpui::prelude::*;
@@ -393,7 +394,11 @@ pub fn chrome_hover() -> gpui::Hsla {
 /// [`chrome_hover`] can't be used there — a hover style *replaces* the base
 /// background, so a see-through hover lets the occluded rows bleed through.
 pub(crate) fn panel_hover() -> u32 {
-    let toward = if chat_bg_is_dark() { 0xffffff } else { 0x000000 };
+    let toward = if chat_bg_is_dark() {
+        0xffffff
+    } else {
+        0x000000
+    };
     blend(palette().panel_bg, toward, 0.07)
 }
 
@@ -475,7 +480,11 @@ pub(crate) fn highlight_suspicious() -> (u32, u32) {
 /// the panel surface nudged toward the foreground so the edge reads on both
 /// dark and light themes.
 pub(crate) fn panel_border() -> u32 {
-    let toward = if chat_bg_is_dark() { 0xffffff } else { 0x000000 };
+    let toward = if chat_bg_is_dark() {
+        0xffffff
+    } else {
+        0x000000
+    };
     blend(palette().panel_bg, toward, 0.14)
 }
 
@@ -822,7 +831,6 @@ pub(crate) const HISTORY_OPACITY: f32 = 0.6;
 /// previews all key on this (via `text_token` and `inline_tokens`).
 const WORD_TIGHTEN: f32 = 1.0;
 
-
 /// Horizontal padding a highlighted row's tinted pill gets (`px_2`, 8px), so its
 /// content has breathing room inside the rounded box. An equal *negative* margin
 /// cancels it, so the pill bleeds back to the row's content edge and the
@@ -928,13 +936,8 @@ fn text_token(
     let tighten = text.ends_with(char::is_whitespace);
     let ord = *ordinal;
     *ordinal += 1;
-    let token = SelectableText::new(
-        ctx.ids.token(ord),
-        ord,
-        text,
-        ctx.selection.clone(),
-    )
-    .starts_row(starts_row);
+    let token = SelectableText::new(ctx.ids.token(ord), ord, text, ctx.selection.clone())
+        .starts_row(starts_row);
     let mut wrap = div();
     if let Some(c) = color {
         wrap = wrap.text_color(rgb(c));
@@ -1039,7 +1042,15 @@ fn push_run(
         if let (Some(cb), Some(id)) = (seventv_link_click, seventv_emote_id(word)) {
             tokens.push(seventv_link_token(ctx, ordinal, word, id, cb.clone()));
         } else if is_url(word) {
-            push_link(tokens, ctx, ordinal, word, word, link_hover, link_preview_hover);
+            push_link(
+                tokens,
+                ctx,
+                ordinal,
+                word,
+                word,
+                link_hover,
+                link_preview_hover,
+            );
         } else if word.chars().count() > LONG_WORD_CHARS {
             for piece in break_long_word(word) {
                 tokens.push(text_token(ctx, ordinal, piece, color, false, false));
@@ -1195,14 +1206,9 @@ fn name_token(
         None => {
             let ord = *ordinal;
             *ordinal += 1;
-            SelectableText::new(
-                ctx.ids.token(ord),
-                ord,
-                text,
-                ctx.selection.clone(),
-            )
-            .starts_row(true)
-            .into_any_element()
+            SelectableText::new(ctx.ids.token(ord), ord, text, ctx.selection.clone())
+                .starts_row(true)
+                .into_any_element()
         }
     };
     // A flat name carries its color on the wrapper (so the whole token inherits it);
@@ -1371,12 +1377,7 @@ fn push_link(
     for piece in pieces {
         let ord = *ordinal;
         *ordinal += 1;
-        let token = SelectableText::new(
-            ctx.ids.token(ord),
-            ord,
-            piece,
-            ctx.selection.clone(),
-        );
+        let token = SelectableText::new(ctx.ids.token(ord), ord, piece, ctx.selection.clone());
         let url = url.to_string();
         let sel = ctx.selection.clone();
         let hovered = ctx.selection.is_link_hovered(link_id);
@@ -1518,9 +1519,12 @@ pub struct SuspiciousTag {
     pub detail: String,
 }
 
-/// Per-message display flags, set by the view from the row's state.
+/// Per-message display state, set by the view from the row's state.
 #[derive(Clone, Default)]
-pub struct RowFlags {
+pub struct RowFlags<'a> {
+    /// Cosmetics resolved against the live model. Borrowing them keeps updates
+    /// retroactive without cloning the immutable message or its author.
+    pub cosmetics: Option<&'a bks_emotes::Cosmetics>,
     /// The author was banned/timed-out or the message deleted: strike + fade it.
     pub struck: bool,
     /// The message mentions the user: tint its background.
@@ -1544,6 +1548,30 @@ pub struct RowFlags {
     pub suspicious: Option<SuspiciousTag>,
 }
 
+/// A resolved paint overrides the stored paint only when present, matching the
+/// author decoration used by usercards without copying the author into a row.
+fn resolved_paint<'a>(
+    author: &'a Author,
+    cosmetics: Option<&'a bks_emotes::Cosmetics>,
+) -> Option<&'a NamePaint> {
+    cosmetics
+        .and_then(|c| c.paint.as_ref())
+        .or(author.paint.as_ref())
+}
+
+/// Prepend the resolved badge unless its ID is already on the author. Both the
+/// optional badge and platform badges stay borrowed until their elements build.
+fn resolved_badges<'a>(
+    author: &'a Author,
+    cosmetics: Option<&'a bks_emotes::Cosmetics>,
+) -> impl Iterator<Item = &'a Badge> {
+    cosmetics
+        .and_then(|c| c.badge.as_ref())
+        .filter(|badge| !author.badges.iter().any(|existing| existing.id == badge.id))
+        .into_iter()
+        .chain(author.badges.iter())
+}
+
 /// One chat message as a wrapping row: platform · time · name · tokens. When
 /// `struck`, the row is struck through and faded (set on a ban/timeout or a
 /// message deletion, and kept — an unban doesn't restore it).
@@ -1555,7 +1583,7 @@ pub struct RowFlags {
 /// the usercard); the card's list passes `None` so its rows aren't re-clickable.
 pub fn render_message(
     msg: &Message,
-    flags: RowFlags,
+    flags: RowFlags<'_>,
     font_size: f32,
     selection: &Selection,
     ordinal: &mut usize,
@@ -1576,6 +1604,7 @@ pub fn render_message(
         inline_preview,
     } = handlers;
     let RowFlags {
+        cosmetics,
         struck,
         mentioned,
         external_highlight,
@@ -1606,7 +1635,7 @@ pub fn render_message(
         ordinal,
         format!("{}:", msg.author.display_name),
         name_color,
-        msg.author.paint.as_ref(),
+        resolved_paint(&msg.author, cosmetics),
         name_click,
         name_right_click,
     ));
@@ -1682,19 +1711,15 @@ pub fn render_message(
                 // Small horizontal margin stands in for the (removed) row gap so
                 // emotes aren't flush against adjacent words. The wrapper carries a
                 // stable id so it can host the hover tooltip.
-                let mut wrap =
-                    div()
-                        .id(ids.emote(ord))
-                        .mx_px()
-                        .tooltip(move |window, cx| {
-                            image_tooltip(
-                                tip_url.clone(),
-                                tip_text.clone(),
-                                TOOLTIP_PREVIEW_HEIGHT,
-                                window,
-                                cx,
-                            )
-                        });
+                let mut wrap = div().id(ids.emote(ord)).mx_px().tooltip(move |window, cx| {
+                    image_tooltip(
+                        tip_url.clone(),
+                        tip_text.clone(),
+                        TOOLTIP_PREVIEW_HEIGHT,
+                        window,
+                        cx,
+                    )
+                });
                 if let Some((cb, emote, sel)) = click {
                     wrap = wrap.cursor_pointer().on_mouse_up(
                         MouseButton::Left,
@@ -1753,14 +1778,11 @@ pub fn render_message(
                                 .id(ids.token(ord))
                                 .cursor_pointer()
                                 .hover(|s| s.underline())
-                                .on_mouse_up(
-                                    MouseButton::Left,
-                                    move |_, window, cx| {
-                                        if !sel.has_selection() {
-                                            cb(&login, window, cx);
-                                        }
-                                    },
-                                )
+                                .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                                    if !sel.has_selection() {
+                                        cb(&login, window, cx);
+                                    }
+                                })
                                 .child(token)
                                 .into_any_element(),
                         );
@@ -1785,10 +1807,7 @@ pub fn render_message(
 
     // Author badges (subscriber/VIP/mod/...), each a small CDN image. The bridge
     // fills these in with resolved URLs; unresolved ones were already dropped.
-    let author_badges: Vec<gpui::AnyElement> = msg
-        .author
-        .badges
-        .iter()
+    let author_badges: Vec<gpui::AnyElement> = resolved_badges(&msg.author, cosmetics)
         .enumerate()
         .map(|(i, badge)| {
             let image = animated_img(ids.badge(i), badge.url.clone(), px(scale.badge));
@@ -2061,7 +2080,11 @@ pub const INLINE_PREVIEW_H: f32 = 72.;
 /// height ([`INLINE_PREVIEW_H`]) so it reserves its space up front (skeleton
 /// while loading, filled in on load — no layout jump). A plain click opens the
 /// link through the usual confirm dialog.
-pub fn inline_preview_card(preview: InlinePreview, row_id: &str, font_size: f32) -> gpui::AnyElement {
+pub fn inline_preview_card(
+    preview: InlinePreview,
+    row_id: &str,
+    font_size: f32,
+) -> gpui::AnyElement {
     let scale = Scale::new(font_size);
     let thumb_w = INLINE_PREVIEW_H * 16. / 9.;
     let border = rgb(panel_border());
@@ -2294,10 +2317,7 @@ fn hover_action(
             .cursor_pointer()
             .text_size(px(scale.small))
             .text_color(rgb(palette().timestamp))
-            .hover(|s| {
-                s.bg(chrome_hover())
-                    .text_color(rgb(palette().default_name))
-            })
+            .hover(|s| s.bg(chrome_hover()).text_color(rgb(palette().default_name)))
             .when_some(icon, |chip, path| {
                 chip.child(
                     gpui::svg()
@@ -3377,17 +3397,19 @@ pub fn render_thread_line(
         })
         .child(name)
         .child(
-            div().flex_1().min_w_0().overflow_hidden().child(h_flex()
-                .min_w_0()
-                .items_center()
-                .overflow_hidden()
-                .children(inline_tokens(
-                    &msg.elements,
-                    scale,
-                    ("thread-line-emote", id_seed),
-                    None,
-                    false,
-                ))),
+            div().flex_1().min_w_0().overflow_hidden().child(
+                h_flex()
+                    .min_w_0()
+                    .items_center()
+                    .overflow_hidden()
+                    .children(inline_tokens(
+                        &msg.elements,
+                        scale,
+                        ("thread-line-emote", id_seed),
+                        None,
+                        false,
+                    )),
+            ),
         )
 }
 
@@ -3439,11 +3461,91 @@ fn stable_id(s: &str) -> u64 {
 mod tests {
     use super::{
         break_long_word, contrast_ratio, emote_tooltip_text, event_name_login, lerp_color,
-        readable_color_on, sample_gradient, seventv_emote_id, split_words, strip_reply_prefix,
-        DARK, LIGHT, LONG_WORD_CHARS, MIN_NAME_CONTRAST,
+        readable_color_on, resolved_badges, resolved_paint, sample_gradient, seventv_emote_id,
+        split_words, strip_reply_prefix, DARK, LIGHT, LONG_WORD_CHARS, MIN_NAME_CONTRAST,
     };
     use bks_core::PaintStop;
-    use bks_core::{Emote, EmoteTooltip};
+    use bks_core::{Author, Badge, Emote, EmoteTooltip, NamePaint, PaintKind};
+
+    #[test]
+    fn resolved_cosmetics_borrow_overrides_and_preserve_the_author() {
+        let author = Author {
+            paint: Some(NamePaint {
+                name: "stored".into(),
+                kind: PaintKind::Solid(0xff0000),
+            }),
+            badges: vec![Badge {
+                id: "moderator".into(),
+                url: "platform-badge".into(),
+                title: None,
+            }],
+            ..Default::default()
+        };
+        let cosmetics = bks_emotes::Cosmetics {
+            paint: Some(NamePaint {
+                name: "resolved".into(),
+                kind: PaintKind::Solid(0x00ff00),
+            }),
+            badge: Some(Badge {
+                id: "7tv".into(),
+                url: "cosmetic-badge".into(),
+                title: None,
+            }),
+        };
+
+        // The borrowed paint and badges point to their source allocations.
+        assert!(std::ptr::eq(
+            resolved_paint(&author, Some(&cosmetics)).unwrap(),
+            cosmetics.paint.as_ref().unwrap()
+        ));
+        let badges: Vec<_> = resolved_badges(&author, Some(&cosmetics)).collect();
+        assert_eq!(badges.len(), 2);
+        assert!(std::ptr::eq(badges[0], cosmetics.badge.as_ref().unwrap()));
+        assert!(std::ptr::eq(badges[1], &author.badges[0]));
+        assert_eq!(author.paint.as_ref().unwrap().name, "stored");
+        assert_eq!(author.badges.len(), 1);
+
+        // Missing cosmetics preserve a paint already attached to the author.
+        let empty = bks_emotes::Cosmetics::default();
+        for cosmetics in [None, Some(&empty)] {
+            assert!(std::ptr::eq(
+                resolved_paint(&author, cosmetics).unwrap(),
+                author.paint.as_ref().unwrap()
+            ));
+            assert_eq!(resolved_badges(&author, cosmetics).count(), 1);
+        }
+    }
+
+    #[test]
+    fn resolved_badge_keeps_existing_order_and_deduplicates_by_id() {
+        let author = Author {
+            badges: vec![
+                Badge {
+                    id: "moderator".into(),
+                    url: "platform-badge".into(),
+                    title: None,
+                },
+                Badge {
+                    id: "7tv".into(),
+                    url: "stored-badge".into(),
+                    title: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let cosmetics = bks_emotes::Cosmetics {
+            badge: Some(Badge {
+                id: "7tv".into(),
+                url: "new-badge".into(),
+                title: None,
+            }),
+            ..Default::default()
+        };
+        let badges: Vec<_> = resolved_badges(&author, Some(&cosmetics)).collect();
+        assert_eq!(badges.len(), 2);
+        assert!(std::ptr::eq(badges[0], &author.badges[0]));
+        assert!(std::ptr::eq(badges[1], &author.badges[1]));
+    }
 
     fn emote(name: &str, tooltip: EmoteTooltip) -> Emote {
         Emote {
@@ -3606,7 +3708,10 @@ mod tests {
     fn event_name_login_matches_actor_and_mentions() {
         // The acting user's name is clickable (leading token, with trailing
         // punctuation from the formatted line).
-        assert_eq!(event_name_login("alice", Some("alice")).as_deref(), Some("alice"));
+        assert_eq!(
+            event_name_login("alice", Some("alice")).as_deref(),
+            Some("alice")
+        );
         assert_eq!(
             event_name_login("Alice", Some("alice")).as_deref(),
             Some("Alice"),

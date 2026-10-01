@@ -97,8 +97,8 @@ pub struct SuspiciousMark {
 }
 
 /// Identifies a channel set: the normalized sources a tab is configured with.
-/// Two tabs with the same sources share one model. The
-/// parts are lowercased/trimmed so case differences don't split the key.
+/// Two tabs with the same sources share one model. Identity follows the source
+/// registry, including case-sensitive YouTube video/channel ids.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ChannelKey {
     pub twitch: String,
@@ -110,16 +110,19 @@ pub struct ChannelKey {
 impl ChannelKey {
     pub fn new(twitch: &str, kick: &str, youtube: &str, tiktok: &str) -> Self {
         Self {
-            twitch: bks_core::channel_login(twitch),
-            kick: bks_core::channel_login(kick),
-            youtube: youtube.trim().to_lowercase(),
-            tiktok: bks_core::normalize_tiktok_channel(tiktok).unwrap_or_else(|| tiktok.trim().to_lowercase()),
+            twitch: crate::bridge::canonical_channel(Platform::Twitch, twitch),
+            kick: crate::bridge::canonical_channel(Platform::Kick, kick),
+            youtube: crate::bridge::canonical_channel(Platform::YouTube, youtube),
+            tiktok: crate::bridge::canonical_channel(Platform::TikTok, tiktok),
         }
     }
 
     /// A key with no channels at all — an unconfigured tab, never shared.
     fn is_empty(&self) -> bool {
-        self.twitch.is_empty() && self.kick.is_empty() && self.youtube.is_empty() && self.tiktok.is_empty()
+        self.twitch.is_empty()
+            && self.kick.is_empty()
+            && self.youtube.is_empty()
+            && self.tiktok.is_empty()
     }
 }
 
@@ -136,6 +139,7 @@ pub enum ChannelEvent {
     Appended {
         index: usize,
         msg: Option<std::sync::Arc<Message>>,
+        is_message: bool,
         /// The row replays the join backlog (a historical message *or* event) —
         /// it must never flash the tab. Carried on the event because a
         /// historical event without an attached message has `msg: None`,
@@ -159,6 +163,7 @@ pub enum ChannelEvent {
     Inserted {
         index: usize,
         msg: Option<std::sync::Arc<Message>>,
+        is_message: bool,
         /// See [`Appended`](Self::Appended)`::generation`.
         generation: u64,
     },
@@ -468,7 +473,7 @@ impl ChannelModel {
     ) -> Option<&bks_emotes::Cosmetics> {
         // Per visible row per frame; the nested map borrows `user_id` as `&str`
         // so this allocates nothing even once cosmetics are resolved.
-        if self.cosmetics.is_empty() || user_id.is_empty() {
+        if !bks_emotes::paints_enabled() || self.cosmetics.is_empty() || user_id.is_empty() {
             return None;
         }
         self.cosmetics
@@ -546,12 +551,14 @@ impl ChannelModel {
         }
         let ix = self.rows.len();
         let msg = row_message(&row);
+        let is_message = matches!(row, Row::Message { .. });
         let historical = row_historical(&row);
         self.rows.push_back(row);
         self.rows_generation += 1;
         cx.emit(ChannelEvent::Appended {
             index: ix,
             msg,
+            is_message,
             historical,
             generation: self.rows_generation,
         });
@@ -562,11 +569,13 @@ impl ChannelModel {
             return;
         }
         let msg = row_message(&row);
+        let is_message = matches!(row, Row::Message { .. });
         self.rows.insert(ix, row);
         self.rows_generation += 1;
         cx.emit(ChannelEvent::Inserted {
             index: ix,
             msg,
+            is_message,
             generation: self.rows_generation,
         });
     }
@@ -978,6 +987,7 @@ impl ChannelModel {
                 }
             }
             ChatEvent::AutoModHeld {
+                historical,
                 message_id,
                 user,
                 text,
@@ -985,6 +995,7 @@ impl ChannelModel {
                 ..
             } => self.row_push_back(
                 Row::AutoMod {
+                    historical,
                     message_id,
                     user,
                     text,
@@ -1092,6 +1103,7 @@ impl ChannelModel {
             }
             ChatEvent::Live {
                 platform,
+                historical,
                 live,
                 title,
                 game,
@@ -1123,7 +1135,7 @@ impl ChannelModel {
                 if !live {
                     self.viewer_counts.remove(&platform);
                 }
-                if flag_changed {
+                if flag_changed && !historical {
                     self.row_push_back(
                         Row::Live {
                             platform,
@@ -1259,7 +1271,7 @@ fn row_message(row: &Row) -> Option<std::sync::Arc<Message>> {
 fn row_historical(row: &Row) -> bool {
     match row {
         Row::Message { msg } => msg.historical,
-        Row::Event { historical, .. } => *historical,
+        Row::Event { historical, .. } | Row::AutoMod { historical, .. } => *historical,
         _ => false,
     }
 }
@@ -1297,7 +1309,14 @@ pub fn get_or_create(
         }
     }
 
-    let model = build_model(config_twitch, config_kick, config_youtube, config_tiktok, session, cx);
+    let model = build_model(
+        config_twitch,
+        config_kick,
+        config_youtube,
+        config_tiktok,
+        session,
+        cx,
+    );
     if !key.is_empty() {
         cx.global_mut::<ChannelStore>()
             .channels
@@ -1445,12 +1464,89 @@ mod tests {
     fn tiktok_identity_is_normalized_and_part_of_the_shared_channel_key() {
         let key = super::ChannelKey::new("", "", "", "@Creator");
         assert!(!key.is_empty());
-        assert_eq!(key, super::ChannelKey::new("", "", "", "https://www.tiktok.com/@creator/live"));
+        assert_eq!(
+            key,
+            super::ChannelKey::new("", "", "", "https://www.tiktok.com/@creator/live")
+        );
         assert_ne!(key, super::ChannelKey::new("", "", "", "another"));
         assert_ne!(key, super::ChannelKey::new("", "", "", ""));
     }
     use super::*;
     use bks_platform::EventDetails;
+
+    #[gpui::test]
+    fn replayed_live_status_and_public_events_do_not_emit_alerts(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let model = cx.update(|cx| register_for_test(Session::for_test(), "fixture", cx));
+        let alerts = std::rc::Rc::new(std::cell::Cell::new(0));
+        let live_events = std::rc::Rc::new(std::cell::Cell::new(0));
+        let _subscription = cx.update(|cx| {
+            let alerts = alerts.clone();
+            let live_events = live_events.clone();
+            cx.subscribe(&model, move |_, event: &ChannelEvent, _| match event {
+                ChannelEvent::WentLive { .. } => alerts.set(alerts.get() + 1),
+                ChannelEvent::EventAppended { .. } => live_events.set(live_events.get() + 1),
+                _ => {}
+            })
+        });
+        let live = |live| ChatEvent::Live {
+            platform: Platform::Twitch,
+            historical: false,
+            live,
+            title: "stream title".into(),
+            game: "category".into(),
+            started_at: None,
+            last_stream: None,
+            link: None,
+        };
+        let event = ChatEvent::Event {
+            platform: Platform::Twitch,
+            kind: EventKind::Sub,
+            text: "a subscription".into(),
+            timestamp: Utc::now(),
+            message: None,
+            details: EventDetails::default(),
+        };
+        cx.update(|cx| {
+            model.update(cx, |model, cx| {
+                model.push(crate::source_hub::historical(&live(true)), cx);
+                assert!(model.live_status[&Platform::Twitch].live);
+                assert_eq!(model.live_status[&Platform::Twitch].title, "stream title");
+                assert!(
+                    model.rows.is_empty(),
+                    "live-state seed added a transition row"
+                );
+                model.push(crate::source_hub::historical(&event), cx);
+                model.push(crate::source_hub::historical(&event), cx);
+                assert_eq!(model.rows.len(), 1, "replayed public event was duplicated");
+                assert!(
+                    model.events.is_empty(),
+                    "historical event entered the live panel"
+                );
+                assert!(matches!(
+                    model.rows[0],
+                    Row::Event {
+                        historical: true,
+                        ..
+                    }
+                ));
+            })
+        });
+        assert_eq!(alerts.get(), 0);
+        assert_eq!(live_events.get(), 0);
+        cx.update(|cx| {
+            model.update(cx, |model, cx| {
+                model.push(crate::source_hub::historical(&live(false)), cx);
+                model.push(live(true), cx);
+                assert_eq!(model.rows.len(), 2);
+            })
+        });
+        assert_eq!(alerts.get(), 1, "real transitions must still alert");
+    }
 
     #[test]
     fn retention_preserves_referenced_records_and_bounds_pending_records() {

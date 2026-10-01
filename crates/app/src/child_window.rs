@@ -1,30 +1,15 @@
-//! Child OS windows hosting app panels (settings, usercard).
-//!
-//! These used to be in-app draggable overlays (`FloatWindow`); they're now real
-//! OS windows (`cx.open_window`) so they can be dragged off the main window and
-//! resized freely by the OS. A [`ChildWindow`] is a window's root content: it
-//! holds a weak handle to a host entity (the app, or a tab's view) plus a body
-//! builder that renders the panel *against the host*, so all panel state stays
-//! on the host — the window is just a surface. It observes the host (re-renders
-//! whenever the host notifies) and removes its own window if the host is dropped
-//! (e.g. a tab rebuilt while its usercard is open), on top of the host's own
-//! `on_release` cleanup.
-//!
-//! ⚠️ Opening a window draws it once synchronously, and this view's render
-//! re-enters the host entity (`host.update`). Never call [`open`] while the host
-//! is leased (i.e. from inside one of its own `update`/listener frames) — spawn
-//! a task and open from a plain `App` context instead.
+//! Shared window placement and lifecycle for panels with their own view state.
+//! Create these from a plain App context: opening a window renders it immediately.
 
 use gpui::prelude::*;
 use gpui::{
-    div, point, rgb, AnyElement, AnyWindowHandle, App, Bounds, DisplayId, Entity, Pixels,
-    SharedString, Size, Subscription, TitlebarOptions, WeakEntity, Window, WindowBounds,
-    WindowOptions,
+    point, AnyWindowHandle, App, Bounds, DisplayId, Entity, Pixels, Size, TitlebarOptions, Window,
+    WindowBounds, WindowOptions,
 };
-use gpui_component::{ActiveTheme, Root};
+use gpui_component::Root;
 
 /// The parent window's screen bounds and display id, used to position a child
-/// window over it (see [`open`] for why the display id must travel along). A
+/// window over it (see [`open_owned`] for why the display id must travel along). A
 /// closed/invalid handle yields defaults (an empty rect on the primary display).
 pub fn parent_bounds(parent: AnyWindowHandle, cx: &mut App) -> (Bounds<Pixels>, Option<DisplayId>) {
     parent
@@ -37,9 +22,13 @@ pub fn parent_bounds(parent: AnyWindowHandle, cx: &mut App) -> (Bounds<Pixels>, 
 /// The display id a child window at `bounds` should open on: hit-test the
 /// bounds' center against the actual displays (so a parent straddling two
 /// monitors still opens the child on the right one), falling back to
-/// `parent_display`. ⚠️ This must be passed to `WindowOptions` — see [`open`]
+/// `parent_display`. ⚠️ This must be passed to `WindowOptions` — see [`open_owned`]
 /// for the "opens big in the wrong place" bug that omitting it causes.
-pub fn resolve_display(bounds: Bounds<Pixels>, parent_display: Option<DisplayId>, cx: &App) -> Option<DisplayId> {
+pub fn resolve_display(
+    bounds: Bounds<Pixels>,
+    parent_display: Option<DisplayId>,
+    cx: &App,
+) -> Option<DisplayId> {
     cx.displays()
         .into_iter()
         .find(|d| d.bounds().contains(&bounds.center()))
@@ -71,202 +60,28 @@ pub fn focus_existing(handle: AnyWindowHandle, title: Option<&str>, cx: &mut App
         .is_ok()
 }
 
-/// [`open`], centered over `parent` (the main/chat window) with the display id
-/// resolved from it — the shared "open" half of every open-or-focus site.
-pub fn open_centered<H: Render>(
-    title: &str,
-    size: Size<Pixels>,
-    min_size: Size<Pixels>,
-    parent: AnyWindowHandle,
-    host: Entity<H>,
-    body: impl Fn(&mut H, &mut gpui::Context<H>) -> AnyElement + 'static,
-    cx: &mut App,
-) -> anyhow::Result<(AnyWindowHandle, Entity<ChildWindow<H>>)> {
-    let (parent, display) = parent_bounds(parent, cx);
-    open(
-        title,
-        centered_on(parent, size),
-        min_size,
-        display,
-        host,
-        body,
-        cx,
-    )
-}
-
-/// [`open_centered`] without the built-in padded scroll surface: the body gets
-/// the window edge-to-edge and manages its own padding + scrolling. For panels
-/// with their own chrome (the settings window's full-height category sidebar).
-pub fn open_centered_bare<H: Render>(
-    title: &str,
-    size: Size<Pixels>,
-    min_size: Size<Pixels>,
-    parent: AnyWindowHandle,
-    host: Entity<H>,
-    body: impl Fn(&mut H, &mut gpui::Context<H>) -> AnyElement + 'static,
-    cx: &mut App,
-) -> anyhow::Result<(AnyWindowHandle, Entity<ChildWindow<H>>)> {
-    let (parent, display) = parent_bounds(parent, cx);
-    open_impl(
-        title,
-        centered_on(parent, size),
-        min_size,
-        display,
-        host,
-        body,
-        true,
-        None,
-        cx,
-    )
-}
-
-/// [`open_centered_bare`] that also remembers the window's position/size under
-/// `key` (see [`crate::window_state`]): opens at the saved rect when one exists
-/// and is still on a connected display (else centered over `parent` at `size`),
-/// and records every later move/resize for the next open.
+/// Opens a panel whose state and inputs belong to its own view and window.
 #[allow(clippy::too_many_arguments)]
-pub fn open_persisted_bare<H: Render>(
-    key: &'static str,
+pub fn open_owned<V: Render + 'static>(
     title: &str,
     size: Size<Pixels>,
     min_size: Size<Pixels>,
     parent: AnyWindowHandle,
-    host: Entity<H>,
-    body: impl Fn(&mut H, &mut gpui::Context<H>) -> AnyElement + 'static,
-    cx: &mut App,
-) -> anyhow::Result<(AnyWindowHandle, Entity<ChildWindow<H>>)> {
-    let (parent, display) = parent_bounds(parent, cx);
-    let bounds = crate::window_state::child_bounds(key, cx)
-        .unwrap_or_else(|| centered_on(parent, size));
-    open_impl(title, bounds, min_size, display, host, body, true, Some(key), cx)
-}
-
-/// The body builder a child window renders its content with, against the host.
-type Body<H> = Box<dyn Fn(&mut H, &mut gpui::Context<H>) -> AnyElement>;
-
-/// The root content view of one child window; `H` is the host entity its body
-/// renders against.
-pub struct ChildWindow<H: Render> {
-    host: WeakEntity<H>,
-    body: Body<H>,
-    /// Bare windows hand the body the full window; padded ones wrap it in the
-    /// shared scrolling panel surface.
-    bare: bool,
-    /// This view's own window, so the Escape observer (fired for keystrokes in
-    /// *any* window) only closes it for keystrokes dispatched here.
-    window: AnyWindowHandle,
-    _esc_close: Option<Subscription>,
-    _observe_host: Subscription,
-}
-
-impl<H: Render> ChildWindow<H> {
-    /// Makes Escape close this window. A keystroke observer, NOT an element
-    /// key listener: with nothing focused in the window (the settings panel
-    /// until an input is clicked), gpui dispatches keys to the dispatch-tree
-    /// root only, so a listener on our root div never sees them. The observer
-    /// fires after dispatch with the resolved action — `Some` when something
-    /// consumed the key (an open dropdown/menu cancelling itself, the kit
-    /// input eating it for IME/completion state), which is skipped so a
-    /// second press then closes the window.
-    pub fn close_on_escape(&mut self, cx: &mut gpui::Context<Self>) {
-        let target = self.window;
-        self._esc_close = Some(cx.observe_keystrokes(move |_, ev, window, _| {
-            if window.window_handle() == target
-                && ev.keystroke.key == "escape"
-                && !ev.keystroke.modifiers.modified()
-                && ev.action.is_none()
-            {
-                window.remove_window();
-            }
-        }));
-    }
-}
-
-impl<H: Render> Render for ChildWindow<H> {
-    fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        // Un-stick hover state if the pointer left the window (see stale_hover.rs).
-        crate::stale_hover::clear(window, cx);
-        let Some(host) = self.host.upgrade() else {
-            // The host is gone (its tab closed or was rebuilt): nothing to show.
-            window.remove_window();
-            return div().into_any_element();
-        };
-        let body = host.update(cx, |host, cx| (self.body)(host, cx));
-        let root = div()
-            .size_full()
-            .bg(rgb(crate::render::panel_bg()))
-            .text_color(cx.theme().foreground);
-        if self.bare {
-            return root.child(body).into_any_element();
-        }
-        root
-            // The body scrolls if it's taller than the window.
-            .child(
-                div()
-                    .id("child-window-body")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .p_4()
-                    .child(body),
-            )
-            .into_any_element()
-    }
-}
-
-/// Opens a child window titled `title` at `bounds` (screen coordinates), with
-/// content rendered by `body` against `host`. Returns the window handle (for
-/// focusing / retitling / closing) and the content entity — observe the
-/// content's release to learn the user closed the window.
-///
-/// `parent_display` is the display the parent (chat) window is on. ⚠️ It must
-/// be passed through to `WindowOptions`: with no display id, gpui validates the
-/// requested bounds against the *primary* monitor and, when their center isn't
-/// on it (chat window on a secondary monitor), silently discards them for that
-/// display's `default_bounds()` — the "opens as a big window in the wrong
-/// place" bug. The center hit-test below also handles the parent straddling
-/// two monitors (the child's center may be on the neighbor).
-pub fn open<H: Render>(
-    title: &str,
-    bounds: Bounds<Pixels>,
-    min_size: Size<Pixels>,
-    parent_display: Option<DisplayId>,
-    host: Entity<H>,
-    body: impl Fn(&mut H, &mut gpui::Context<H>) -> AnyElement + 'static,
-    cx: &mut App,
-) -> anyhow::Result<(AnyWindowHandle, Entity<ChildWindow<H>>)> {
-    open_impl(
-        title,
-        bounds,
-        min_size,
-        parent_display,
-        host,
-        body,
-        false,
-        None,
-        cx,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn open_impl<H: Render>(
-    title: &str,
-    bounds: Bounds<Pixels>,
-    min_size: Size<Pixels>,
-    parent_display: Option<DisplayId>,
-    host: Entity<H>,
-    body: impl Fn(&mut H, &mut gpui::Context<H>) -> AnyElement + 'static,
-    bare: bool,
     persist: Option<&'static str>,
+    build: impl FnOnce(&mut Window, &mut gpui::Context<V>) -> V,
     cx: &mut App,
-) -> anyhow::Result<(AnyWindowHandle, Entity<ChildWindow<H>>)> {
-    let display_id = resolve_display(bounds, parent_display, cx);
+) -> anyhow::Result<(AnyWindowHandle, Entity<V>)> {
+    let (parent_bounds, parent_display) = parent_bounds(parent, cx);
+    let bounds = persist
+        .and_then(|key| crate::window_state::child_bounds(key, cx))
+        .unwrap_or_else(|| centered_on(parent_bounds, size));
     let mut content = None;
     let handle = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            display_id,
+            display_id: resolve_display(bounds, parent_display, cx),
             titlebar: Some(TitlebarOptions {
-                title: Some(SharedString::from(title.to_string())),
+                title: Some(title.to_owned().into()),
                 ..Default::default()
             }),
             window_min_size: Some(min_size),
@@ -275,9 +90,18 @@ fn open_impl<H: Render>(
         },
         |window, cx| {
             let view = cx.new(|cx| {
+                let target = window.window_handle();
+                cx.observe_keystrokes(move |_, ev, window, _| {
+                    if window.window_handle() == target
+                        && ev.keystroke.key == "escape"
+                        && !ev.keystroke.modifiers.modified()
+                        && ev.action.is_none()
+                    {
+                        window.remove_window();
+                    }
+                })
+                .detach();
                 if let Some(key) = persist {
-                    // Restore bounds even if the user maximized before closing —
-                    // a maximized child reopens windowed at its last rect.
                     cx.observe_window_bounds(window, move |_, window, cx| {
                         crate::window_state::child_changed(
                             key,
@@ -287,19 +111,11 @@ fn open_impl<H: Render>(
                     })
                     .detach();
                 }
-                ChildWindow {
-                    host: host.downgrade(),
-                    body: Box::new(body),
-                    bare,
-                    window: window.window_handle(),
-                    _esc_close: None,
-                    _observe_host: cx.observe(&host, |_, _, cx| cx.notify()),
-                }
+                build(window, cx)
             });
             content = Some(view.clone());
-            // The kit's Root supplies each window's tooltip/popover layers.
             cx.new(|cx| Root::new(view, window, cx))
         },
     )?;
-    Ok((handle.into(), content.expect("build_root_view always runs")))
+    Ok((handle.into(), content.expect("window content initialized")))
 }

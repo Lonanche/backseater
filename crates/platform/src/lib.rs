@@ -246,6 +246,8 @@ pub enum ChatEvent {
     /// human string ("automod: swearing, level 4" / "blocked term").
     AutoModHeld {
         platform: Platform,
+        /// A retained hold replayed on join; it must not mark the feed unread.
+        historical: bool,
         message_id: String,
         /// The chatter whose message was held (display name).
         user: String,
@@ -326,6 +328,9 @@ pub enum ChatEvent {
     /// *is* the stream (Twitch/Kick) or when offline.
     Live {
         platform: Platform,
+        /// A retained source snapshot for a newly subscribed/lagging feed.
+        /// Updates current status without a transition notice or live alert.
+        historical: bool,
         live: bool,
         title: String,
         game: String,

@@ -425,6 +425,7 @@ async fn run_client(
         let _ = tx
             .send(ChatEvent::Live {
                 platform: Platform::Kick,
+                historical: false,
                 live: info.is_live,
                 title: info.livestream_title.clone(),
                 game: info.livestream_category.clone(),
@@ -731,6 +732,7 @@ async fn run_client(
                     let _ = tx
                         .send(ChatEvent::Live {
                             platform: Platform::Kick,
+                            historical: false,
                             live: true,
                             title: ev.livestream.session_title,
                             game: String::new(),
@@ -748,6 +750,7 @@ async fn run_client(
                 let _ = tx
                     .send(ChatEvent::Live {
                         platform: Platform::Kick,
+                        historical: false,
                         live: false,
                         title: String::new(),
                         game: String::new(),

@@ -8,9 +8,7 @@
 //! popout is a *mirror*, not a move — closing the window just drops the extra
 //! view, never the channel. Many popouts of the same channel are allowed.
 //!
-//! Unlike a settings panel (`child_window.rs`, a padded body rendered against a
-//! host), a popout hosts a full `ChatView` directly, so it gets its own root
-//! view rendered edge-to-edge rather than reusing `ChildWindow`'s panel chrome.
+//! A popout hosts a full `ChatView` with its own root, rendered edge-to-edge.
 
 use gpui::prelude::*;
 use gpui::{
@@ -83,7 +81,7 @@ pub struct PopoutParams {
 }
 
 /// Opens a popout window for the given tab. `parent_display` is the display the
-/// main window is on — it must travel with the bounds (see `child_window::open`
+/// main window is on — it must travel with the bounds (see `child_window::open_owned`
 /// for why gpui otherwise relocates the window). Returns the window handle so
 /// the app can close it on shutdown; observe the `PopoutWindow` release (via the
 /// returned entity path in the caller) to learn the user closed it.
@@ -146,8 +144,7 @@ pub fn open(
 /// renders against `BackseaterApp` (it reads the shared `mention_store` +
 /// scroll/new-flag state), so this holds a weak handle to the app and re-renders
 /// whenever it notifies (a new mention arrives). Rendered full-bleed; the feed
-/// manages its own scroll. Not built on `child_window.rs` because that wraps the
-/// body in a padded, separately-scrolling panel that would fight the feed.
+/// manages its own scroll and app subscription.
 pub struct MentionsWindow {
     app: WeakEntity<crate::BackseaterApp>,
     _observe_app: Subscription,

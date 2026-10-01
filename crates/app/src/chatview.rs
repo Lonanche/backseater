@@ -6,8 +6,12 @@
 //! Split out of `main.rs`; the shared row types live here too since only this
 //! view uses them.
 
+mod card;
+mod filtered;
 mod log;
 mod picker;
+mod search_view;
+mod viewers;
 
 #[cfg(test)]
 mod gui_tests;
@@ -21,7 +25,7 @@ use gpui::{
     div, img, px, App, Context, Entity, FollowMode, FontWeight, ListAlignment, ListState,
     MouseButton, Pixels, Point, SharedString, Window,
 };
-use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::button::Button;
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
@@ -32,10 +36,7 @@ use crate::controller::Controller;
 use crate::image_cache::LruImageCache;
 use crate::session::Session;
 use crate::tabs::{self, TabConfig};
-use crate::{
-    child_window, commands, controller, render, search, selectable, usercard, viewerlist,
-    USERCARD_MESSAGES,
-};
+use crate::{child_window, commands, controller, render, search, selectable, usercard, viewerlist};
 use log::LogView;
 use picker::{EmoteCell, PickerRow};
 
@@ -80,8 +81,7 @@ struct ViewerAnim {
 
 impl ViewerAnim {
     fn value_at(&self, now: std::time::Instant) -> u64 {
-        let t = now.duration_since(self.started).as_secs_f32()
-            / VIEWER_ANIM_DURATION.as_secs_f32();
+        let t = now.duration_since(self.started).as_secs_f32() / VIEWER_ANIM_DURATION.as_secs_f32();
         eased_count(self.from, self.to, t)
     }
 
@@ -101,28 +101,6 @@ fn eased_count(from: u64, to: u64, t: f32) -> u64 {
     let t = t.max(0.0);
     let eased = (1.0 - (1.0 - t) * (1.0 - t)) as f64;
     (from as f64 + (to as f64 - from as f64) * eased).round() as u64
-}
-
-/// Default size of the usercard child window (header + mod actions + recent
-/// messages fit without scrolling); the OS resizes it freely from there.
-const USERCARD_WINDOW_SIZE: gpui::Size<Pixels> = gpui::Size {
-    width: px(440.),
-    height: px(620.),
-};
-/// Smallest the usercard window can be resized to.
-const USERCARD_MIN_SIZE: gpui::Size<Pixels> = gpui::Size {
-    width: px(360.),
-    height: px(300.),
-};
-
-/// The longest timeout each platform accepts: Helix rejects durations over
-/// 1,209,600s (2 weeks); Kick's ban API takes minutes capped at 7 days. Gates
-/// which preset chips show and what the custom box allows.
-fn max_timeout_secs(platform: bks_core::Platform) -> u32 {
-    match platform {
-        bks_core::Platform::Kick => 604_800,
-        _ => 1_209_600,
-    }
 }
 
 /// Default size of the viewer-list child window (a narrow name column).
@@ -198,6 +176,7 @@ pub(crate) enum Row {
     /// moderator acted, or the hold expired) — then a status line replaces the
     /// buttons. `message_id` keys the approve/deny call and the later update.
     AutoMod {
+        historical: bool,
         message_id: String,
         user: String,
         text: String,
@@ -433,15 +412,6 @@ enum LayoutDrag {
     },
 }
 
-/// A usercard moderation action, dispatched to the right controller method per
-/// platform by [`ChatView::usercard_moderate`].
-#[derive(Clone, Copy)]
-enum Mod {
-    Ban,
-    Timeout(u32),
-    Unban,
-}
-
 /// An open emote-info popup: a small card (image + name/provider/author, and an
 /// "Open on 7TV" link for 7TV emotes) anchored near where the emote was clicked.
 /// Lighter than the draggable usercard — it's a transient info bubble closed by
@@ -654,63 +624,12 @@ pub(crate) struct ChatView {
     /// A viewer-anim repaint tick is already scheduled (one timer per view at a
     /// time, like the animated-emote wakeup coalescing).
     viewer_anim_tick_pending: bool,
-    /// The open chatter usercard's data, if any. Opened by clicking a name in
-    /// chat (see [`open_usercard`]); shown in its own OS window.
-    usercard: Option<usercard::UserCard>,
-    /// Custom timeout duration box on the usercard ("90s", "10m", "1h30m", …).
-    /// Window-bound like all kit inputs, so it's created against the usercard
-    /// window when that opens (`None` while no window is up).
-    usercard_timeout_input: Option<Entity<InputState>>,
-    _usercard_timeout_sub: Option<gpui::Subscription>,
-    /// Inline error under the custom timeout box (bad duration / over the
-    /// platform's cap); cleared on a successful apply or a new card.
-    usercard_timeout_error: Option<String>,
-    /// Warn-reason box on the usercard (Twitch-only — Helix requires a reason
-    /// the chatter must acknowledge). Window-bound like the timeout box.
-    usercard_warn_input: Option<Entity<InputState>>,
-    _usercard_warn_sub: Option<gpui::Subscription>,
-    /// Inline error under the warn box (empty/overlong reason); cleared on a
-    /// successful apply or a new card.
-    usercard_warn_error: Option<String>,
-    /// The child OS window hosting the usercard, when open. Clicking another
-    /// name re-points (and refocuses) the same window instead of opening more.
     usercard_window: Option<gpui::AnyWindowHandle>,
-    /// The open Twitch viewer list's data, if any (see [`viewerlist`]); shown in
-    /// its own OS window, opened from the input bar's 👥 button or `/chatters`.
-    viewer_list: Option<viewerlist::ViewerList>,
-    /// The child OS window hosting the viewer list, when open. Re-opening
-    /// refreshes + refocuses it instead of opening more.
+    usercard_view: Option<gpui::WeakEntity<card::UserCardView>>,
     viewer_list_window: Option<gpui::AnyWindowHandle>,
-    /// Search box filtering the viewer list by name. Window-bound like all kit
-    /// inputs, so it's created against the viewer-list window when that opens
-    /// (`None` while no window is up); the subscription is replaced with it.
-    viewer_search: Option<Entity<InputState>>,
-    _viewer_search_sub: Option<gpui::Subscription>,
-    /// The child OS window hosting this view's chat search (Ctrl+F), when open.
-    /// Re-opening refocuses it instead of opening more.
+    viewer_list_view: Option<gpui::WeakEntity<viewers::ViewerListView>>,
     search_window: Option<gpui::AnyWindowHandle>,
-    /// Search box filtering the chat history in the search window. Window-bound
-    /// like all kit inputs, so it's created against the search window when that
-    /// opens (`None` while no window is up).
-    search_input: Option<Entity<InputState>>,
-    _search_input_sub: Option<gpui::Subscription>,
-    /// The current normalized search query, cached on each input change — the
-    /// search body renders on every host notify (including animation ticks),
-    /// so it must not re-read + re-lowercase the input per frame.
-    search_query: String,
-    /// The search window's virtualized result list (Bottom + Tail like the
-    /// log/events panel): only on-screen rows are built per frame. Must stay
-    /// in lockstep with `search_results` (same rule as `rows`/`list_state`);
-    /// recreated fresh on each window open so it starts at the bottom.
-    search_list_state: ListState,
-    /// The matched messages the search list shows, in chat order (oldest
-    /// first). `Arc` clones out of the shared buffer, rebuilt/spliced by
-    /// `sync_search_results`; cleared when the window closes.
-    search_results: Vec<std::sync::Arc<Message>>,
-    /// The `(rows_generation, normalized query)` the results were last built
-    /// against — `sync_search_results` is a no-op until either moves. `None`
-    /// forces a rebuild (fresh open).
-    search_synced: Option<(u64, String)>,
+    search_view: Option<gpui::WeakEntity<search_view::SearchView>>,
     /// The main window this tab renders in — the usercard window positions
     /// itself near it.
     parent_window: gpui::AnyWindowHandle,
@@ -754,14 +673,7 @@ pub(crate) struct ChatView {
     /// `(seed_id, rows_generation)` — rebuilt only when the seed or the buffer
     /// changes. `RefCell` because `build_thread` takes `&self` (render path).
     thread_cache: std::cell::RefCell<Option<(String, u64, crate::thread::Thread)>>,
-    /// Caches the mentions panel's matched messages keyed by the model's
-    /// `rows_generation`, so its full-buffer scan (which runs on *every*
-    /// `ChatView` render — at animation rate while the picker is open, since a
-    /// cell tick dirties this view) only happens when the buffer actually
-    /// changed. Invalidated on a matcher change ([`set_mentions`]) and a channel
-    /// swap ([`reconnect`] — a fresh model's generation could collide).
-    /// `RefCell` because it's filled from the render path.
-    mentions_panel_cache: std::cell::RefCell<Option<(u64, Vec<std::sync::Arc<Message>>)>>,
+    mentions_panel: filtered::FilteredMessages,
     /// While dragging a layout divider: which one, the two adjacent shares, and
     /// the pointer position at grab time, so each move applies a delta. `None`
     /// when not resizing.
@@ -967,8 +879,11 @@ impl ChatView {
         // buffer's current events that pass this tab's kind filter.
         let events_list_state = ListState::new(0, ListAlignment::Bottom, px(200.));
         events_list_state.set_follow_mode(FollowMode::Tail);
-        let events_shown =
-            filtered_event_seqs(channel.read(cx), config.event_kinds, config.collapse_gift_subs);
+        let events_shown = filtered_event_seqs(
+            channel.read(cx),
+            config.event_kinds,
+            config.collapse_gift_subs,
+        );
         events_list_state.reset(events_shown.len());
         let applied_event_seq = channel.read(cx).next_event_seq();
 
@@ -1046,25 +961,12 @@ impl ChatView {
             expanded_gifts: std::collections::HashSet::new(),
             viewer_anims: HashMap::new(),
             viewer_anim_tick_pending: false,
-            usercard: None,
-            usercard_timeout_input: None,
-            _usercard_timeout_sub: None,
-            usercard_timeout_error: None,
-            usercard_warn_input: None,
-            _usercard_warn_sub: None,
-            usercard_warn_error: None,
             usercard_window: None,
-            viewer_list: None,
+            usercard_view: None,
             viewer_list_window: None,
-            viewer_search: None,
-            _viewer_search_sub: None,
+            viewer_list_view: None,
             search_window: None,
-            search_input: None,
-            _search_input_sub: None,
-            search_query: String::new(),
-            search_list_state: fresh_search_list_state(),
-            search_results: Vec::new(),
-            search_synced: None,
+            search_view: None,
             parent_window: window.window_handle(),
             emote_popup: None,
             link_preview: None,
@@ -1074,7 +976,7 @@ impl ChatView {
             replying_to: None,
             thread_panel: None,
             thread_cache: std::cell::RefCell::new(None),
-            mentions_panel_cache: std::cell::RefCell::new(None),
+            mentions_panel: filtered::FilteredMessages::default(),
             layout_drag: None,
             grid_bounds: std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default())),
             events_list_state,
@@ -1154,6 +1056,10 @@ impl ChatView {
             }
             self.applied_rows_generation = *generation;
         }
+        self.mentions_panel
+            .apply(event, &self.mentions_list_state, |_, msg| {
+                !msg.historical && self.mentions.matches(&msg.raw_text)
+            });
         match event {
             ChannelEvent::Appended {
                 index,
@@ -1379,7 +1285,6 @@ impl ChatView {
                         this.list_state.remeasure_items(first..ix);
                     }
                 }
-                this.search_list_state.remeasure();
                 this.mentions_list_state.remeasure();
                 this.refresh_log(cx);
                 cx.notify();
@@ -1434,12 +1339,35 @@ impl ChatView {
         self.paused_needs_reset = false;
         // Caches keyed on the old model's `rows_generation` would collide with
         // the new model's (each model counts from 0).
-        *self.mentions_panel_cache.borrow_mut() = None;
+        self.mentions_panel.invalidate();
         self.mentions_list_state.reset(0);
         *self.thread_cache.borrow_mut() = None;
         self._channel_sub = cx.subscribe(&channel, Self::on_channel_event);
         self.channel_key = key;
         self.channel = channel;
+        if let Some(card) = self
+            .usercard_view
+            .as_ref()
+            .and_then(gpui::WeakEntity::upgrade)
+        {
+            card.update(cx, |card, cx| {
+                card.reconnect(self.channel.clone(), self.font_size, cx)
+            });
+        }
+        if self.config.twitch_channel.is_empty() {
+            if let Some(handle) = self.viewer_list_window.take() {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            }
+            self.viewer_list_view = None;
+        } else if let Some(viewers) = self
+            .viewer_list_view
+            .as_ref()
+            .and_then(gpui::WeakEntity::upgrade)
+        {
+            viewers.update(cx, |view, cx| {
+                view.reconnect(&self.config.twitch_channel, self.controller.clone(), cx)
+            });
+        }
         // Seed the list from the new model + re-arm the replay guards (its
         // queued emits may include events this seed already covers); the event
         // watermark is re-armed by `rebuild_events_shown` below.
@@ -1449,6 +1377,7 @@ impl ChatView {
         self.refresh_personal_emotes(cx);
         self.rebuild_events_shown(cx);
         self.refresh_log(cx);
+        self.update_search_options(true, cx);
         cx.notify();
     }
 
@@ -1468,13 +1397,17 @@ impl ChatView {
         self.applied_event_seq = self.channel.read(cx).next_event_seq();
     }
 
-    /// Updates the mention terms used to tint incoming messages. New messages
-    /// match against this; already-shown rows keep the flag they were pushed with.
-    pub(crate) fn set_mentions(&mut self, mentions: bks_core::MentionMatcher) {
+    /// Updates mention matching for buffered and incoming messages.
+    pub(crate) fn set_mentions(
+        &mut self,
+        mentions: bks_core::MentionMatcher,
+        cx: &mut Context<Self>,
+    ) {
         self.mentions = mentions;
         // The mentions panel's cached matches were computed with the old terms.
-        *self.mentions_panel_cache.borrow_mut() = None;
+        self.mentions_panel.invalidate();
         self.mentions_list_state.reset(0);
+        self.update_search_options(false, cx);
     }
 
     /// Updates the ignore list. The log filters every row against this at render
@@ -1485,10 +1418,8 @@ impl ChatView {
     pub(crate) fn set_ignore(&mut self, ignore: bks_core::IgnoreList, cx: &mut Context<Self>) {
         self.ignore = ignore;
         // The search window's result membership is filtered by this list, but
-        // its sync is keyed on (rows_generation, query) — neither moves on an
-        // ignore edit, so force the rebuild or an open window keeps listing
-        // newly-ignored users until the next buffered message.
-        self.search_synced = None;
+        // An ignore edit changes membership independently of incoming rows.
+        self.update_search_options(true, cx);
         // Reset unless paused: a paused view must not re-measure (that snaps the
         // frozen view to the live bottom) — unpause_log resets when it resumes.
         if self.log_paused {
@@ -1501,8 +1432,13 @@ impl ChatView {
     /// Updates the suppress list — matching messages render dimmed instead of
     /// hidden. Unlike ignore this is purely a render concern, so a change
     /// re-dims already-buffered rows too (the caller repaints the log).
-    pub(crate) fn set_suppress(&mut self, suppress: bks_core::SuppressList) {
+    pub(crate) fn set_suppress(
+        &mut self,
+        suppress: bks_core::SuppressList,
+        cx: &mut Context<Self>,
+    ) {
         self.suppress = suppress;
+        self.update_search_options(false, cx);
     }
 
     /// Switches the mentions panel between this tab's own mentions and the
@@ -1594,7 +1530,14 @@ impl ChatView {
             return;
         }
         let mut end = from;
-        for row in self.channel.read(cx).rows.iter().skip(from).take(count - from) {
+        for row in self
+            .channel
+            .read(cx)
+            .rows
+            .iter()
+            .skip(from)
+            .take(count - from)
+        {
             end += 1;
             if log::row_date(row).is_some() {
                 break;
@@ -1671,9 +1614,30 @@ impl ChatView {
         self.remeasure(cx);
     }
 
-    /// Re-measures every row and repaints the log — for preference changes that
-    /// change row heights without changing the rows (font family/size).
+    pub(crate) fn refresh_panel_styles(&self, cx: &mut Context<Self>) {
+        if let Some(viewers) = self
+            .viewer_list_view
+            .as_ref()
+            .and_then(gpui::WeakEntity::upgrade)
+        {
+            viewers.update(cx, |view, cx| {
+                view.list.remeasure();
+                cx.notify();
+            });
+        }
+        if let Some(card) = self
+            .usercard_view
+            .as_ref()
+            .and_then(gpui::WeakEntity::upgrade)
+        {
+            card.update(cx, |card, cx| card.refresh(self.font_size, cx));
+        }
+        self.update_search_options(false, cx);
+    }
+
+    /// Re-measures every row after a preference changes its layout.
     pub(crate) fn remeasure(&mut self, cx: &mut Context<Self>) {
+        self.refresh_panel_styles(cx);
         // The reset below syncs any hover-pause-withheld tail in, so the
         // deferred re-measure (if one was pending) just happened.
         self.paused_needs_reset = false;
@@ -1805,7 +1769,9 @@ impl ChatView {
             self.update_input_popup(cx);
         }
         if let InputEvent::PressEnter { .. } = event {
-            if self.config.read_only() { return; }
+            if self.config.read_only() {
+                return;
+            }
             let text = state.read(cx).value().to_string();
             let trimmed = text.trim();
             if !trimmed.is_empty() {
@@ -1959,7 +1925,12 @@ impl ChatView {
     /// it consumed the key: only when there's history and the move stays in range
     /// (Up past the oldest is ignored; Down past the newest restores the stashed
     /// draft). Stashes the live draft on entry so it isn't lost.
-    fn history_recall(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn history_recall(
+        &mut self,
+        delta: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.sent_history.is_empty() {
             return false;
         }
@@ -2016,7 +1987,10 @@ impl ChatView {
         let Some(msg) = self.message_by_id(msg_id, cx) else {
             return;
         };
-        if !matches!(msg.platform, bks_core::Platform::Twitch | bks_core::Platform::Kick) {
+        if !matches!(
+            msg.platform,
+            bks_core::Platform::Twitch | bks_core::Platform::Kick
+        ) {
             return;
         }
         self.replying_to = Some(controller::ReplyTo {
@@ -2168,33 +2142,6 @@ impl ChatView {
             .replace("{user}", &msg.author.login)
             .replace("{msg-id}", &msg.id);
         self.controller.handle_input_at(&line, msg.platform);
-    }
-
-    /// Runs a custom mod button from the usercard against `login` on `platform`.
-    /// Like [`run_mod_button`](Self::run_mod_button) but there's no message —
-    /// the card targets a user — so only `{user}`/`<user>`-target templates are
-    /// offered (filtered by `commands::targets_user`); the login is substituted
-    /// for `{user}` and injected as the implicit target when no placeholder is
-    /// typed.
-    fn run_usercard_mod_button(&self, command: &str, login: &str, platform: bks_core::Platform) {
-        let mut template = command.to_string();
-        if !command.contains("{user}") {
-            let is_user_target = command
-                .strip_prefix('/')
-                .and_then(|rest| rest.split_whitespace().next())
-                .and_then(commands::implicit_target)
-                == Some(commands::ImplicitTarget::User);
-            if is_user_target {
-                let mut parts = command.splitn(2, char::is_whitespace);
-                let head = parts.next().unwrap_or_default();
-                template = match parts.next() {
-                    Some(rest) => format!("{head} {{user}} {rest}"),
-                    None => format!("{head} {{user}}"),
-                };
-            }
-        }
-        let line = template.replace("{user}", login);
-        self.controller.handle_input_at(&line, platform);
     }
 
     /// Opens the pin confirmation dialog for message `msg_id`: the message is
@@ -2403,8 +2350,7 @@ impl ChatView {
         // With two or more counted platforms, a combined total closes the bar.
         // Summing the *displayed* (animating) values keeps it rolling in sync.
         let counted = segments.iter().filter(|(_, _, c)| c.is_some()).count();
-        let total =
-            (counted >= 2).then(|| segments.iter().filter_map(|(_, _, c)| *c).sum::<u64>());
+        let total = (counted >= 2).then(|| segments.iter().filter_map(|(_, _, c)| *c).sum::<u64>());
         Some(
             h_flex()
                 .w_full()
@@ -2455,14 +2401,12 @@ impl ChatView {
                                 .font_weight(FontWeight::BOLD)
                                 .child(SharedString::from("Total")),
                         )
-                        .child(
-                            div()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(SharedString::from(format!(
-                                    "{} viewers",
-                                    bks_core::format_count(total)
-                                ))),
-                        )
+                        .child(div().text_color(cx.theme().muted_foreground).child(
+                            SharedString::from(format!(
+                                "{} viewers",
+                                bks_core::format_count(total)
+                            )),
+                        ))
                 }))
                 // The viewer-list button rides the bar's right edge (a
                 // while-live, mods-only feature — it doesn't earn a spot in
@@ -2514,7 +2458,10 @@ impl ChatView {
                 chips.push("Emote-only".to_string());
             }
             if let Some(gap) = modes.slow {
-                chips.push(format!("Slow ({})", bks_core::format_duration(gap.as_secs())));
+                chips.push(format!(
+                    "Slow ({})",
+                    bks_core::format_duration(gap.as_secs())
+                ));
             }
             if modes.unique {
                 chips.push("Unique".to_string());
@@ -2544,24 +2491,23 @@ impl ChatView {
             bar.border_t_1()
         };
         Some(
-            bar
-                .children(groups.into_iter().map(|(platform, chips)| {
-                    h_flex()
-                        .gap_1p5()
-                        .items_center()
-                        .child(crate::platform_icon(platform, 14.))
-                        .children(chips.into_iter().map(|label| {
-                            div()
-                                .px_1p5()
-                                .py_0p5()
-                                .rounded(px(4.))
-                                .bg(cx.theme().muted)
-                                .text_color(cx.theme().muted_foreground)
-                                .text_size(chip_text)
-                                .child(SharedString::from(label))
-                        }))
-                }))
-                .into_any_element(),
+            bar.children(groups.into_iter().map(|(platform, chips)| {
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .child(crate::platform_icon(platform, 14.))
+                    .children(chips.into_iter().map(|label| {
+                        div()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded(px(4.))
+                            .bg(cx.theme().muted)
+                            .text_color(cx.theme().muted_foreground)
+                            .text_size(chip_text)
+                            .child(SharedString::from(label))
+                    }))
+            }))
+            .into_any_element(),
         )
     }
 
@@ -2616,9 +2562,9 @@ impl ChatView {
                     if lands_at_top {
                         self.list_state.scroll_by(-pin_headroom - px(4.));
                     } else if let Some(bounds) = self.list_state.bounds_for_item(ix) {
-                        let covered = self.list_state.viewport_bounds().top() + pin_headroom
-                            + px(4.)
-                            - bounds.top();
+                        let covered =
+                            self.list_state.viewport_bounds().top() + pin_headroom + px(4.)
+                                - bounds.top();
                         if covered > px(0.) {
                             self.list_state.scroll_by(-covered);
                         }
@@ -2647,7 +2593,11 @@ impl ChatView {
 
     /// The current flash strength for a message row, if it's the flashed target
     /// and still fading; `None` otherwise. Read by the log render to tint the row.
-    pub(crate) fn flash_strength_for(&self, platform: bks_core::Platform, msg_id: &str) -> Option<f32> {
+    pub(crate) fn flash_strength_for(
+        &self,
+        platform: bks_core::Platform,
+        msg_id: &str,
+    ) -> Option<f32> {
         let flash = self.flash.as_ref()?;
         if flash.platform != platform || flash.msg_id != msg_id {
             return None;
@@ -2737,7 +2687,10 @@ impl ChatView {
         let mut cards: Vec<gpui::AnyElement> = Vec::new();
         let mut collapsed = 0usize;
         for platform in [bks_core::Platform::Twitch, bks_core::Platform::Kick] {
-            let Some(pin) = pins.iter().find(|(p, _)| *p == platform).map(|(_, pin)| pin)
+            let Some(pin) = pins
+                .iter()
+                .find(|(p, _)| *p == platform)
+                .map(|(_, pin)| pin)
             else {
                 continue;
             };
@@ -2765,9 +2718,12 @@ impl ChatView {
         let height_cell = self.pin_overlay_height.clone();
         let mut col = v_flex().absolute().top_0().left_0().right_0().child(
             v_flex().relative().children(cards).child(
-                gpui::canvas(move |b, _, _| height_cell.set(b.size.height), |_, _, _, _| ())
-                    .absolute()
-                    .size_full(),
+                gpui::canvas(
+                    move |b, _, _| height_cell.set(b.size.height),
+                    |_, _, _, _| (),
+                )
+                .absolute()
+                .size_full(),
             ),
         );
         if collapsed > 0 {
@@ -2874,53 +2830,46 @@ impl ChatView {
         // Twitch and Kick pins stack, the messages stay column-aligned no
         // matter how long each pinner's name is.
         // `occlude` keeps clicks on it from also hitting the row below.
-        let mut header = h_flex()
-            .w_full()
-            .items_center()
-            .gap_2()
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .items_center()
-                    .gap_1()
-                    .text_size(px(self.font_size * 0.75))
-                    .text_color(gpui::rgb(p.event_text))
-                    // svg() needs its own text color — nothing cascades.
-                    .child(
-                        gpui::svg()
-                            .path("icons/pin.svg")
-                            .size(px(self.font_size * 0.8))
-                            .flex_none()
-                            .text_color(gpui::rgb(p.event_text)),
-                    )
-                    .map(|row| {
-                        if pinned_by.is_empty() {
-                            row.child(SharedString::from("Pinned"))
-                        } else {
-                            // The pinning moderator's name is clickable (opens their
-                            // usercard on the pin's platform), the rest is label text.
-                            let entity = cx.entity();
-                            let name = pinned_by.clone();
-                            row.child(SharedString::from("Pinned by")).child(
-                                div()
-                                    .id(SharedString::from(format!("pin-by-{platform:?}")))
-                                    .cursor_pointer()
-                                    .hover(|s| s.underline())
-                                    .child(SharedString::from(pinned_by.clone()))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        move |_, _window, cx| {
-                                            entity.update(cx, |this, cx| {
-                                                this.open_usercard_named(&name, platform, cx);
-                                                cx.notify();
-                                            });
-                                        },
-                                    ),
-                            )
-                        }
-                    }),
-            );
+        let mut header = h_flex().w_full().items_center().gap_2().child(
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .gap_1()
+                .text_size(px(self.font_size * 0.75))
+                .text_color(gpui::rgb(p.event_text))
+                // svg() needs its own text color — nothing cascades.
+                .child(
+                    gpui::svg()
+                        .path("icons/pin.svg")
+                        .size(px(self.font_size * 0.8))
+                        .flex_none()
+                        .text_color(gpui::rgb(p.event_text)),
+                )
+                .map(|row| {
+                    if pinned_by.is_empty() {
+                        row.child(SharedString::from("Pinned"))
+                    } else {
+                        // The pinning moderator's name is clickable (opens their
+                        // usercard on the pin's platform), the rest is label text.
+                        let entity = cx.entity();
+                        let name = pinned_by.clone();
+                        row.child(SharedString::from("Pinned by")).child(
+                            div()
+                                .id(SharedString::from(format!("pin-by-{platform:?}")))
+                                .cursor_pointer()
+                                .hover(|s| s.underline())
+                                .child(SharedString::from(pinned_by.clone()))
+                                .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.open_usercard_named(&name, platform, cx);
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    }
+                }),
+        );
 
         if self.can_pin(platform, cx) {
             header = header.child(
@@ -3017,500 +2966,10 @@ impl ChatView {
 
     /// Shows `card` in the usercard window (shared by name clicks in chat and
     /// the viewer list) and starts the async account-stats fetch for it.
-    fn show_usercard(&mut self, mut card: usercard::UserCard, cx: &mut Context<Self>) {
-        let login = card.login.clone();
-        let platform = card.platform;
-        // Mods get a deep link to twitch.tv's own viewer card
-        // (`/popout/{channel}/viewercard/{user}`) for a Twitch chatter — only when
-        // the logged-in user can moderate this channel and both slugs are known.
-        if platform == bks_core::Platform::Twitch
-            && self.channel.read(cx).can_moderate(bks_core::Platform::Twitch)
-        {
-            let channel = self.controller.twitch_channel();
-            if !channel.is_empty() && !login.is_empty() {
-                card.mod_viewercard_url = Some(format!(
-                    "https://www.twitch.tv/popout/{channel}/viewercard/{login}"
-                ));
-            }
-        }
-        self.usercard = Some(card);
-        // A stale custom-timeout/warn error would misread as being about the new card.
-        self.usercard_timeout_error = None;
-        self.usercard_warn_error = None;
-
-        // Show the card's OS window. Deferred to a task because opening a window
-        // draws it synchronously, and that draw re-enters this entity for the
-        // body — which would double-lease it from inside this listener.
+    fn show_usercard(&mut self, card: usercard::UserCard, cx: &mut Context<Self>) {
         let view = cx.entity();
         cx.spawn(async move |_, cx| {
-            cx.update(|cx| Self::show_usercard_window(view, cx));
-        })
-        .detach();
-
-        // Fetch account stats in the background; deliver back over a smol channel
-        // the view drains, then store them on the (still-open) card. Twitch loads
-        // via Helix; Kick via the broker. Other platforms have no lookup yet.
-        match platform {
-            bks_core::Platform::Twitch => {
-                let (tx, rx) = smol::channel::bounded(1);
-                self.controller.fetch_twitch_usercard(login.clone(), tx);
-                self.apply_usercard_stats(login, rx, usercard::Stats::Twitch, cx);
-            }
-            bks_core::Platform::Kick => {
-                let (tx, rx) = smol::channel::bounded(1);
-                self.controller.fetch_kick_usercard(login.clone(), tx);
-                self.apply_usercard_stats(login, rx, usercard::Stats::Kick, cx);
-            }
-            _ => {}
-        }
-    }
-
-    /// Waits for a usercard stats fetch and stores the (wrapped) result on the
-    /// still-open card — the shared back half of both platforms' lookups in
-    /// [`show_usercard`](Self::show_usercard). `wrap` is the platform's `Stats`
-    /// variant constructor.
-    fn apply_usercard_stats<T: 'static>(
-        &self,
-        login: String,
-        rx: smol::channel::Receiver<anyhow::Result<T>>,
-        wrap: impl FnOnce(T) -> usercard::Stats + 'static,
-        cx: &mut Context<Self>,
-    ) {
-        cx.spawn(async move |weak, cx| {
-            if let Ok(result) = rx.recv().await {
-                let _ = weak.update(cx, |this, cx| {
-                    // Ignore if the card was closed or replaced meanwhile.
-                    if let Some(card) = &mut this.usercard {
-                        if card.login == login {
-                            card.stats = match result {
-                                Ok(data) => wrap(data),
-                                Err(err) => usercard::Stats::Unavailable(format!("{err:#}")),
-                            };
-                            cx.notify();
-                        }
-                    }
-                });
-            }
-        })
-        .detach();
-    }
-
-    /// Opens (or re-points + refocuses) the child OS window hosting this tab's
-    /// usercard. Runs from a plain `App` context (see the spawn in
-    /// [`open_usercard`]); the body renders against this view, so replacing the
-    /// card re-renders the same window.
-    fn show_usercard_window(view: Entity<Self>, cx: &mut App) {
-        let Some(title) = view
-            .read(cx)
-            .usercard
-            .as_ref()
-            .map(|card| format!("{}'s Usercard", card.display_name))
-        else {
-            return;
-        };
-        if let Some(handle) = view.read(cx).usercard_window {
-            if child_window::focus_existing(handle, Some(&title), cx) {
-                // The same window now shows a different chatter: a leftover
-                // half-typed duration would apply to the wrong person.
-                let _ = handle.update(cx, |_, window, cx| {
-                    view.update(cx, |this, cx| {
-                        if let Some(input) = &this.usercard_timeout_input {
-                            input.update(cx, |state, cx| state.set_value("", window, cx));
-                        }
-                        if let Some(input) = &this.usercard_warn_input {
-                            input.update(cx, |state, cx| state.set_value("", window, cx));
-                        }
-                    });
-                });
-                return;
-            }
-            // The window closed under us — fall through and open a fresh one.
-        }
-
-        // Opens at the last place the user left a usercard (persisted), else
-        // centered over the chat window. Bare (no built-in scroll surface): the
-        // header + mod actions stay put and only the recent-messages section
-        // scrolls.
-        let opened = child_window::open_persisted_bare(
-            "usercard",
-            &title,
-            USERCARD_WINDOW_SIZE,
-            USERCARD_MIN_SIZE,
-            view.read(cx).parent_window,
-            view.clone(),
-            |this, cx| this.usercard_body(cx),
-            cx,
-        );
-        let Ok((handle, content)) = opened else {
-            return;
-        };
-        let _ = handle.update(cx, |_, window, cx| {
-            view.update(cx, |this, cx| {
-                // The custom-timeout box is window-bound like all kit inputs, so
-                // it's created against this window (same rule as the viewer-list
-                // search); Enter applies it.
-                let input = cx.new(|cx| InputState::new(window, cx).placeholder("90s, 10m, 1h30m…"));
-                this._usercard_timeout_sub =
-                    Some(cx.subscribe_in(&input, window, Self::on_usercard_timeout_event));
-                this.usercard_timeout_input = Some(input);
-                let warn =
-                    cx.new(|cx| InputState::new(window, cx).placeholder("Warning reason…"));
-                this._usercard_warn_sub =
-                    Some(cx.subscribe_in(&warn, window, Self::on_usercard_warn_event));
-                this.usercard_warn_input = Some(warn);
-                this.usercard_window = Some(handle);
-                // The user closing the window (OS ✕) releases its content view;
-                // drop the card then — unless a newer window replaced it.
-                cx.observe_release(&content, move |this, _, cx| {
-                    if this.usercard_window == Some(handle) {
-                        this.usercard_window = None;
-                        this.usercard = None;
-                        this.usercard_timeout_input = None;
-                        this._usercard_timeout_sub = None;
-                        this.usercard_timeout_error = None;
-                        this.usercard_warn_input = None;
-                        this._usercard_warn_sub = None;
-                        this.usercard_warn_error = None;
-                    }
-                    cx.notify();
-                })
-                .detach();
-                cx.notify();
-            });
-        });
-    }
-
-    /// Applies the custom-timeout box on Enter.
-    fn on_usercard_timeout_event(
-        &mut self,
-        _: &Entity<InputState>,
-        event: &InputEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let InputEvent::PressEnter { .. } = event {
-            self.apply_custom_timeout(window, cx);
-        }
-    }
-
-    /// Parses the custom-timeout box and times the card's chatter out for that
-    /// long, or leaves an inline error under the box (unparseable, or over the
-    /// platform's cap — 2 weeks on Twitch, 7 days on Kick).
-    fn apply_custom_timeout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(card), Some(input)) = (&self.usercard, self.usercard_timeout_input.clone())
-        else {
-            return;
-        };
-        let platform = card.platform;
-        let login = card.login.clone();
-        let text = input.read(cx).value().trim().to_string();
-        if text.is_empty() {
-            return;
-        }
-        let max = max_timeout_secs(platform);
-        match bks_core::parse_duration(&text) {
-            None => {
-                self.usercard_timeout_error =
-                    Some(format!("Can't read \"{text}\" — try 90s, 10m, 1h30m, or 3d"));
-            }
-            Some(secs) if secs > max as u64 => {
-                self.usercard_timeout_error = Some(match platform {
-                    bks_core::Platform::Kick => "Kick timeouts max out at 7 days".to_string(),
-                    _ => "Twitch timeouts max out at 2 weeks".to_string(),
-                });
-            }
-            Some(secs) => {
-                self.usercard_moderate(platform, Mod::Timeout(secs as u32), &login);
-                self.usercard_timeout_error = None;
-                input.update(cx, |state, cx| state.set_value("", window, cx));
-            }
-        }
-        cx.notify();
-    }
-
-    /// Applies the warn-reason box on Enter.
-    fn on_usercard_warn_event(
-        &mut self,
-        _: &Entity<InputState>,
-        event: &InputEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let InputEvent::PressEnter { .. } = event {
-            self.apply_usercard_warn(window, cx);
-        }
-    }
-
-    /// Warns the card's chatter with the reason box's text (Twitch-only), or
-    /// leaves an inline error under the box — Helix requires a non-empty reason
-    /// of at most 500 characters.
-    fn apply_usercard_warn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(card), Some(input)) = (&self.usercard, self.usercard_warn_input.clone()) else {
-            return;
-        };
-        if card.platform != bks_core::Platform::Twitch {
-            return;
-        }
-        let login = card.login.clone();
-        let reason = input.read(cx).value().trim().to_string();
-        if reason.is_empty() {
-            self.usercard_warn_error =
-                Some("Enter a reason — the chatter has to acknowledge it".to_string());
-        } else if reason.chars().count() > 500 {
-            self.usercard_warn_error = Some("Warning reasons max out at 500 characters".to_string());
-        } else {
-            self.controller.warn_twitch(login, reason);
-            self.usercard_warn_error = None;
-            input.update(cx, |state, cx| state.set_value("", window, cx));
-        }
-        cx.notify();
-    }
-
-    /// Opens (or refreshes + refocuses) the Twitch viewer-list window for this
-    /// tab. Fetches the chatters via Helix — broadcaster/moderator only, so the
-    /// window shows an explanatory error for everyone else.
-    fn open_viewer_list(&mut self, cx: &mut Context<Self>) {
-        if self.config.twitch_channel.is_empty() {
-            return;
-        }
-        self.viewer_list = Some(viewerlist::ViewerList::new(
-            self.config.twitch_channel.clone(),
-        ));
-        self.refresh_viewer_list(cx);
-
-        // Show the list's OS window. Deferred like the usercard: opening a
-        // window draws it synchronously, re-entering this entity for the body.
-        let view = cx.entity();
-        cx.spawn(async move |_, cx| {
-            cx.update(|cx| Self::show_viewer_list_window(view, cx));
-        })
-        .detach();
-    }
-
-    /// (Re)fetches the viewer list into the open window's state.
-    fn refresh_viewer_list(&mut self, cx: &mut Context<Self>) {
-        let Some(list) = &mut self.viewer_list else {
-            return;
-        };
-        list.state = viewerlist::State::Loading;
-        cx.notify();
-        let channel = list.channel.clone();
-        let (tx, rx) = smol::channel::bounded(1);
-        self.controller.fetch_twitch_chatters(tx);
-        cx.spawn(async move |weak, cx| {
-            if let Ok(result) = rx.recv().await {
-                let _ = weak.update(cx, |this, cx| {
-                    // Ignore if the window was closed or re-pointed meanwhile.
-                    if let Some(list) = &mut this.viewer_list {
-                        if list.channel == channel {
-                            list.resolve(result);
-                            cx.notify();
-                        }
-                    }
-                });
-            }
-        })
-        .detach();
-    }
-
-    /// Opens (or refocuses) the child OS window hosting this tab's viewer list.
-    /// Runs from a plain `App` context (see the spawn in [`open_viewer_list`]).
-    /// The search input is created against this window — kit inputs are
-    /// window-bound, so one made for the main window wouldn't get focus/cursor
-    /// events here (same rule as the settings inputs).
-    fn show_viewer_list_window(view: Entity<Self>, cx: &mut App) {
-        let Some(title) = view
-            .read(cx)
-            .viewer_list
-            .as_ref()
-            .map(|list| format!("Viewer List - {}", list.channel))
-        else {
-            return;
-        };
-        if let Some(handle) = view.read(cx).viewer_list_window {
-            if child_window::focus_existing(handle, Some(&title), cx) {
-                return;
-            }
-            // The window closed under us — fall through and open a fresh one.
-        }
-
-        let opened = child_window::open_centered(
-            &title,
-            VIEWERLIST_WINDOW_SIZE,
-            VIEWERLIST_MIN_SIZE,
-            view.read(cx).parent_window,
-            view.clone(),
-            |this, cx| this.viewer_list_body(cx),
-            cx,
-        );
-        let Ok((handle, content)) = opened else {
-            return;
-        };
-        content.update(cx, |w, cx| w.close_on_escape(cx));
-        let _ = handle.update(cx, |_, window, cx| {
-            view.update(cx, |this, cx| {
-                let search =
-                    cx.new(|cx| InputState::new(window, cx).placeholder("Search viewers…"));
-                this._viewer_search_sub =
-                    Some(cx.subscribe_in(&search, window, Self::on_viewer_search_event));
-                this.viewer_search = Some(search);
-                this.viewer_list_window = Some(handle);
-                // The user closing the window (OS ✕) releases its content view;
-                // drop the list then — unless a newer window replaced it.
-                cx.observe_release(&content, move |this, _, cx| {
-                    if this.viewer_list_window == Some(handle) {
-                        this.viewer_list_window = None;
-                        this.viewer_list = None;
-                        this.viewer_search = None;
-                        this._viewer_search_sub = None;
-                    }
-                    cx.notify();
-                })
-                .detach();
-                cx.notify();
-            });
-        });
-    }
-
-    /// Re-filters the viewer list as the user types in its search box.
-    fn on_viewer_search_event(
-        &mut self,
-        _: &Entity<InputState>,
-        event: &InputEvent,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let InputEvent::Change = event {
-            cx.notify();
-        }
-    }
-
-    /// The viewer-list window's content: a count + refresh header, the search
-    /// box, and the (filtered, capped) name column. Clicking a name opens that
-    /// chatter's usercard.
-    fn viewer_list_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Some(list) = &self.viewer_list else {
-            return gpui::Empty.into_any_element();
-        };
-
-        let header_text = match &list.state {
-            viewerlist::State::Loading => "loading…".to_string(),
-            viewerlist::State::Failed(_) => String::new(),
-            viewerlist::State::Loaded(chatters) => {
-                let unit = bks_core::plural(chatters.total, "chatter", "chatters");
-                format!("{} {unit}", chatters.total)
-            }
-        };
-        let header = h_flex()
-            .gap_2()
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from(header_text)),
-            )
-            .child(
-                Button::new("viewerlist-refresh")
-                    .label("Refresh")
-                    .outline()
-                    .xsmall()
-                    .compact()
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh_viewer_list(cx))),
-            );
-
-        let content: gpui::AnyElement = match &list.state {
-            viewerlist::State::Loading => div()
-                .text_size(px(13.))
-                .text_color(cx.theme().muted_foreground)
-                .child(SharedString::from("loading viewer list…"))
-                .into_any_element(),
-            viewerlist::State::Failed(err) => div()
-                .text_size(px(13.))
-                .text_color(gpui::rgb(0xe05d5d))
-                .child(SharedString::from(err.clone()))
-                .into_any_element(),
-            viewerlist::State::Loaded(chatters) => {
-                let query = self
-                    .viewer_search
-                    .as_ref()
-                    .map(|s| s.read(cx).value().to_string())
-                    .unwrap_or_default();
-                let matched = viewerlist::filter(&chatters.chatters, &query);
-                let shown = matched.len().min(viewerlist::MAX_SHOWN);
-                let hidden = matched.len() - shown;
-                let rows: Vec<gpui::AnyElement> = matched[..shown]
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, chatter)| {
-                        let login = chatter.user_login.clone();
-                        let name = if chatter.user_name.is_empty() {
-                            chatter.user_login.clone()
-                        } else {
-                            chatter.user_name.clone()
-                        };
-                        let user_id = chatter.user_id.clone();
-                        div()
-                            .id(("viewer", ix))
-                            .px_1()
-                            .py_0p5()
-                            .rounded_sm()
-                            .text_size(px(13.))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(cx.theme().secondary))
-                            .child(SharedString::from(viewerlist::label(chatter)))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _, cx| {
-                                    let card = usercard::UserCard::new(
-                                        login.clone(),
-                                        name.clone(),
-                                        user_id.clone(),
-                                        bks_core::Platform::Twitch,
-                                        None,
-                                    );
-                                    this.show_usercard(card, cx);
-                                }),
-                            )
-                            .into_any_element()
-                    })
-                    .collect();
-                let mut col = v_flex()
-                    .id("viewer-list-names")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children(rows);
-                if hidden > 0 {
-                    col = col.child(
-                        div()
-                            .pt_1()
-                            .text_size(px(12.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(SharedString::from(format!(
-                                "…and {hidden} more — search to narrow the list"
-                            ))),
-                    );
-                }
-                col.into_any_element()
-            }
-        };
-
-        let mut body = v_flex().h_full().gap_2().child(header);
-        if let Some(search) = &self.viewer_search {
-            body = body.child(Input::new(search));
-        }
-        body.child(content).into_any_element()
-    }
-
-    /// Opens (or refocuses) this view's chat-search window (Ctrl+F). Deferred
-    /// like the viewer list: opening a window draws it synchronously,
-    /// re-entering this entity for the body.
-    pub(crate) fn open_search(&mut self, cx: &mut Context<Self>) {
-        let view = cx.entity();
-        cx.spawn(async move |_, cx| {
-            cx.update(|cx| Self::show_search_window(view, cx));
+            cx.update(|cx| card::open(view, card, cx));
         })
         .detach();
     }
@@ -3521,307 +2980,6 @@ impl ChatView {
     /// never fires until the user clicks inside the view.
     pub(crate) fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |state, cx| state.focus(window, cx));
-    }
-
-    /// Opens the child OS window hosting this tab's chat search, or refocuses
-    /// an already-open one (putting the caret back in the search box). Runs
-    /// from a plain `App` context (see the spawn in [`open_search`]). The
-    /// search input is created against this window — kit inputs are
-    /// window-bound (same rule as the viewer-list search).
-    fn show_search_window(view: Entity<Self>, cx: &mut App) {
-        let title = format!("Search - {}", view.read(cx).config.display_name());
-        if let Some(handle) = view.read(cx).search_window {
-            if child_window::focus_existing(handle, Some(&title), cx) {
-                let _ = handle.update(cx, |_, window, cx| {
-                    view.update(cx, |this, cx| {
-                        if let Some(input) = &this.search_input {
-                            input.update(cx, |state, cx| state.focus(window, cx));
-                        }
-                    });
-                });
-                return;
-            }
-            // The window closed under us — fall through and open a fresh one.
-        }
-
-        let opened = child_window::open_centered(
-            &title,
-            SEARCH_WINDOW_SIZE,
-            SEARCH_MIN_SIZE,
-            view.read(cx).parent_window,
-            view.clone(),
-            |this, cx| this.search_body(cx),
-            cx,
-        );
-        let Ok((handle, content)) = opened else {
-            return;
-        };
-        content.update(cx, |w, cx| w.close_on_escape(cx));
-        let _ = handle.update(cx, |_, window, cx| {
-            view.update(cx, |this, cx| {
-                let input =
-                    cx.new(|cx| InputState::new(window, cx).placeholder("Search messages…"));
-                // Focus the box so Ctrl+F → type works without a click.
-                input.update(cx, |state, cx| state.focus(window, cx));
-                this._search_input_sub =
-                    Some(cx.subscribe_in(&input, window, Self::on_search_input_event));
-                this.search_input = Some(input);
-                this.search_window = Some(handle);
-                // A fresh list state per open starts at the bottom (a Bottom-
-                // aligned list with no scroll history shows its newest rows)
-                // and tailing; `search_synced = None` forces the first body
-                // render to rebuild the results. The input starts empty.
-                this.search_query = String::new();
-                this.search_list_state = fresh_search_list_state();
-                this.search_results = Vec::new();
-                this.search_synced = None;
-                // The user closing the window (OS ✕) releases its content view;
-                // drop the state then — unless a newer window replaced it.
-                cx.observe_release(&content, move |this, _, cx| {
-                    if this.search_window == Some(handle) {
-                        this.search_window = None;
-                        this.search_input = None;
-                        this._search_input_sub = None;
-                        // Free the retained Arc clones; the next open rebuilds.
-                        this.search_results = Vec::new();
-                        this.search_synced = None;
-                    }
-                    cx.notify();
-                })
-                .detach();
-                cx.notify();
-            });
-        });
-    }
-
-    /// Re-filters the search results as the user types: caches the normalized
-    /// query here — once per keystroke, not per frame in the body — and lets
-    /// the next body render rebuild + re-snap (`search_synced` is keyed on it).
-    fn on_search_input_event(
-        &mut self,
-        state: &Entity<InputState>,
-        event: &InputEvent,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let InputEvent::Change = event {
-            self.search_query = search::normalize(&state.read(cx).value());
-            cx.notify();
-        }
-    }
-
-    /// Reconciles the search window's results + virtualized list with the
-    /// shared buffer. Keyed by `(rows_generation, query)`, so it's a no-op —
-    /// the common case, since the body re-renders on every host notify —
-    /// until either moves (an ignore-list edit also changes membership without
-    /// moving either key, so `set_ignore` clears `search_synced` directly). A query change rebuilds wholesale and re-snaps to
-    /// the newest match (any reading position is meaningless then); a buffer
-    /// change is mirrored as end-splices when the old results survive as a
-    /// contiguous run (the steady state: trims at the front, appends at the
-    /// back — `FollowMode::Tail` then keeps the list glued to the bottom
-    /// without yanking a user who scrolled up), falling back to a wholesale
-    /// re-measure for anything else (a historical backfill insert landing
-    /// mid-buffer).
-    fn sync_search_results(&mut self, cx: &mut Context<Self>) {
-        let generation = self.channel.read(cx).rows_generation();
-        if self
-            .search_synced
-            .as_ref()
-            .is_some_and(|(g, q)| *g == generation && *q == self.search_query)
-        {
-            return;
-        }
-        let query_changed = self
-            .search_synced
-            .as_ref()
-            .is_none_or(|(_, q)| *q != self.search_query);
-        // Rows this view ignores stay hidden here too, like the log.
-        let new: Vec<std::sync::Arc<Message>> = {
-            let model = self.channel.read(cx);
-            search::filter(model.rows.iter(), &self.search_query)
-                .into_iter()
-                .filter(|msg| !self.ignore.matches_message(msg))
-                .cloned()
-                .collect()
-        };
-        if query_changed {
-            self.search_list_state.reset(new.len());
-            self.search_list_state.set_follow_mode(FollowMode::Tail);
-        } else {
-            // Where does the old run start inside the new one? Front trims drop
-            // old leading items; appends extend past the old end. `Arc::ptr_eq`
-            // works because both sets clone the same buffer `Arc`s.
-            let old = &self.search_results;
-            let front_drop = match new.first() {
-                Some(first) => old
-                    .iter()
-                    .position(|m| std::sync::Arc::ptr_eq(m, first))
-                    .unwrap_or(old.len()),
-                None => old.len(),
-            };
-            let kept = old.len() - front_drop;
-            let is_end_delta = kept <= new.len()
-                && old[front_drop..]
-                    .iter()
-                    .zip(new.iter())
-                    .all(|(a, b)| std::sync::Arc::ptr_eq(a, b));
-            if is_end_delta {
-                if front_drop > 0 {
-                    self.search_list_state.splice(0..front_drop, 0);
-                }
-                if new.len() > kept {
-                    self.search_list_state.splice(kept..kept, new.len() - kept);
-                }
-            } else {
-                self.search_list_state.reset(new.len());
-            }
-        }
-        self.search_results = new;
-        self.search_synced = Some((generation, self.search_query.clone()));
-    }
-
-    /// The search window's content: a match-count header, the search box, and
-    /// the matched rows rendered exactly like chat rows (badges, emotes,
-    /// cosmetics, strike/fade — `render::render_message`), in chat order with
-    /// the newest at the bottom. The list is **virtualized** like the log and
-    /// events panel (only on-screen rows are built per frame — a plain scroll
-    /// column laid out, and kept animating, every off-screen row too, which
-    /// made the window sluggish): `search_list_state` + `search_results` stay
-    /// in lockstep via [`sync_search_results`]. It opens at the bottom, tails
-    /// new arrivals natively (`FollowMode::Tail`), and re-snaps on a query
-    /// change. Clicking a row jumps the chat log to that message (same reveal
-    /// + flash as a clicked mention) and brings the chat window forward.
-    fn search_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        self.sync_search_results(cx);
-
-        let total = self.search_results.len();
-        let unit = bks_core::plural(total as u64, "message", "messages");
-        let header_text = if self.search_query.is_empty() {
-            // Just the shown count — "in history" would overstate it: rows the
-            // view ignores are (correctly) excluded, like in the log.
-            format!("{total} {unit}")
-        } else {
-            format!("{total} matching {unit}")
-        };
-        let header = div()
-            .text_size(px(13.))
-            .text_color(cx.theme().muted_foreground)
-            .child(SharedString::from(header_text));
-
-        let results: gpui::AnyElement = if total == 0 {
-            div()
-                .flex_1()
-                .min_h_0()
-                .pt_2()
-                .text_size(px(13.))
-                .text_color(cx.theme().muted_foreground)
-                .child(SharedString::from("No matching messages"))
-                .into_any_element()
-        } else {
-            let font_size = self.font_size;
-            let view = cx.entity();
-            // One throwaway selection context shared by all rows (they aren't
-            // part of any drag-select), built once per body render — not per
-            // visible row per frame (it's an Rc allocation).
-            let selection = selectable::Selection::new();
-            selection.begin_frame();
-            let search_list = gpui::list(
-                self.search_list_state.clone(),
-                move |ix, _window, cx: &mut gpui::App| {
-                    let this = view.read(cx);
-                    let model = this.channel.read(cx);
-                    let Some(msg) = this.search_results.get(ix) else {
-                        return div().into_any_element();
-                    };
-                    // Struck (ban/delete) + cosmetics resolve against the live
-                    // model per build, same as the log's rows.
-                    let struck = model.is_struck(msg);
-                    let mentioned = this.mentions.matches(&msg.raw_text);
-                    let suppressed = this.suppress.matches_message(msg);
-                    let suspicious = model.suspicious_for(msg).map(|m| render::SuspiciousTag {
-                        restricted: m.status == bks_platform::SuspiciousStatus::Restricted,
-                        detail: m.detail.clone(),
-                    });
-                    let decorated = log::decorate(msg, model);
-                    // Ordinals only need ordering, so the row index strides
-                    // them like the log.
-                    let mut ordinal = ix * crate::ORDINAL_STRIDE;
-                    let row = render::render_message(
-                        &decorated,
-                        render::RowFlags {
-                            struck,
-                            mentioned,
-                            hide_timestamp: !crate::settings::show_timestamps_chat(),
-                            suppressed,
-                            suspicious,
-                            ..Default::default()
-                        },
-                        font_size,
-                        &selection,
-                        &mut ordinal,
-                        render::RowHandlers::default(),
-                    );
-                    // An Arc bump (not an id-String clone) identifies the row
-                    // for the click; capturing `ix` instead would mis-target
-                    // after a splice between paint and click.
-                    let msg = msg.clone();
-                    let entity = view.clone();
-                    div()
-                        .id(("search-hit", ix))
-                        .w_full()
-                        .min_w_0()
-                        .px(px(6.0))
-                        .rounded_sm()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(render::row_hover()))
-                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                            entity.update(cx, |this, cx| {
-                                this.jump_to_message(msg.platform, &msg.id, cx);
-                                // Bring the chat window forward so the jump is
-                                // seen; the app re-selects this tab
-                                // (`ActivateRequested`) in case the user
-                                // switched tabs meanwhile.
-                                let _ = this
-                                    .parent_window
-                                    .update(cx, |_, window, _| window.activate_window());
-                                cx.emit(ActivateRequested);
-                            });
-                        })
-                        .child(row)
-                        .into_any_element()
-                },
-            )
-            .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
-            .size_full();
-
-            // On the chat log's (lighter) background so the rows read exactly
-            // like the log; images route through the app-wide LRU cache so the
-            // sweep sees them (same as the log's rows). Overlay scrollbar only
-            // while scrolled off the bottom, like the log's.
-            div()
-                .relative()
-                .flex_1()
-                .min_h_0()
-                .rounded_md()
-                .bg(gpui::rgb(render::chat_bg()))
-                .py_1()
-                .text_size(px(font_size))
-                .child(
-                    gpui::image_cache(self.image_cache.clone())
-                        .size_full()
-                        .child(search_list),
-                )
-                .when(!self.search_list_state.is_following_tail(), |d| {
-                    d.vertical_scrollbar(&self.search_list_state)
-                })
-                .into_any_element()
-        };
-
-        let mut body = v_flex().h_full().gap_2().child(header);
-        if let Some(input) = &self.search_input {
-            body = body.child(Input::new(input));
-        }
-        body.child(results).into_any_element()
     }
 
     /// Opens the emote popup for a clicked 7TV link: shows a loading placeholder
@@ -3860,7 +3018,13 @@ impl ChatView {
     /// Handles a link's hover enter/leave from the render layer, driving the
     /// preview tooltip. Only acts in Tooltip mode and for URLs a provider can
     /// preview; everything else is a no-op (the normal link stays as-is).
-    fn on_link_preview_hover(&mut self, url: &str, entered: bool, anchor: Point<Pixels>, cx: &mut Context<Self>) {
+    fn on_link_preview_hover(
+        &mut self,
+        url: &str,
+        entered: bool,
+        anchor: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         if crate::settings::link_preview_mode() != crate::settings::LinkPreviewMode::Tooltip {
             return;
         }
@@ -3911,7 +3075,9 @@ impl ChatView {
 
         // Reveal the card after the show-delay if this arm is still current.
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(LINK_PREVIEW_SHOW_DELAY).await;
+            cx.background_executor()
+                .timer(LINK_PREVIEW_SHOW_DELAY)
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if this.link_preview_gen == gen {
                     if let Some(p) = &mut this.link_preview {
@@ -3933,7 +3099,9 @@ impl ChatView {
         };
         p.hovering = false;
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(LINK_PREVIEW_HIDE_GRACE).await;
+            cx.background_executor()
+                .timer(LINK_PREVIEW_HIDE_GRACE)
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if this.link_preview.as_ref().is_some_and(|p| !p.hovering) {
                     this.link_preview = None;
@@ -3999,34 +3167,17 @@ impl ChatView {
         }
     }
 
-    /// This chatter's recent messages in the current feed (oldest first), capped
-    /// to the most recent [`USERCARD_MESSAGES`]. Matched by lowercased login.
-    /// Live messages only — the `historical` backlog fetched at join is skipped.
-    /// Clones the shared `Arc<Message>`s (cheap) out of the channel model.
-    fn usercard_messages(&self, login: &str, cx: &App) -> Vec<std::sync::Arc<Message>> {
-        let mut msgs: Vec<std::sync::Arc<Message>> = self
-            .channel
+    /// Finds a message row by its id (for a clicked name to resolve its author).
+    fn message_by_id(&self, id: &str, cx: &App) -> Option<std::sync::Arc<Message>> {
+        self.channel
             .read(cx)
             .rows
             .iter()
-            .filter_map(|row| match row {
-                Row::Message { msg } if msg.author.login == login && !msg.historical => {
-                    Some(msg.clone())
-                }
+            .rev()
+            .find_map(|row| match row {
+                Row::Message { msg } if msg.id == id => Some(msg.clone()),
                 _ => None,
             })
-            .collect();
-        let skip = msgs.len().saturating_sub(USERCARD_MESSAGES);
-        msgs.drain(..skip);
-        msgs
-    }
-
-    /// Finds a message row by its id (for a clicked name to resolve its author).
-    fn message_by_id(&self, id: &str, cx: &App) -> Option<std::sync::Arc<Message>> {
-        self.channel.read(cx).rows.iter().rev().find_map(|row| match row {
-            Row::Message { msg } if msg.id == id => Some(msg.clone()),
-            _ => None,
-        })
     }
 
     /// Handles a Tab press in the input: completes the word at the cursor against
@@ -4868,8 +4019,7 @@ impl ChatView {
                 // gift-heavy panel doesn't rescan the whole buffer every frame.
                 let is_summary = ev.details.gift_count.is_some();
                 let expandable = is_summary
-                    && (!ev.details.recipients.is_empty()
-                        || (collapse && ev.has_grouped_children));
+                    && (!ev.details.recipients.is_empty() || (collapse && ev.has_grouped_children));
                 let expanded = expandable && this.expanded_gifts.contains(&seq);
                 let names = expanded.then(|| {
                     let mut names = ev.details.recipients.clone();
@@ -4891,7 +4041,11 @@ impl ChatView {
                         text: &ev.text,
                         timestamp: ev.timestamp,
                         details: &ev.details,
-                        message: if hide_msgs { None } else { ev.message.as_deref() },
+                        message: if hide_msgs {
+                            None
+                        } else {
+                            ev.message.as_deref()
+                        },
                         expandable,
                         expanded_names: names,
                         mention_click: Some(mention_click_for_platform(&view, ev.platform)),
@@ -5075,42 +4229,15 @@ impl ChatView {
         } else {
             let model = self.channel.read(cx);
             let generation = model.rows_generation();
-            let mut cache = self.mentions_panel_cache.borrow_mut();
-            if cache.as_ref().is_none_or(|(g, _)| *g != generation) {
-                let matched: Vec<std::sync::Arc<Message>> = model
-                    .rows
-                    .iter()
-                    .filter_map(|row| {
-                        let msg: &Message = match row {
-                            Row::Message { msg } => msg,
-                            Row::Event {
-                                message: Some(msg), ..
-                            } => msg,
-                            _ => return None,
-                        };
-                        if msg.historical || !self.mentions.matches(&msg.raw_text) {
-                            return None;
-                        }
-                        Some(match row {
-                            Row::Message { msg } => msg.clone(),
-                            _ => std::sync::Arc::new(msg.clone()),
-                        })
-                    })
-                    .collect();
-                let keys = |rows: &[std::sync::Arc<Message>]| {
-                    rows.iter()
-                        .map(|m| (m.platform, m.id.clone()))
-                        .collect::<Vec<_>>()
-                };
-                let old = cache
-                    .as_ref()
-                    .map(|(_, rows)| keys(rows))
-                    .unwrap_or_default();
-                crate::mentions::sync_list(&self.mentions_list_state, &old, &keys(&matched));
-                *cache = Some((generation, matched));
+            if !self.mentions_panel.is_current(generation) {
+                self.mentions_panel.rebuild(
+                    &model.rows,
+                    generation,
+                    &self.mentions_list_state,
+                    |_, msg| !msg.historical && self.mentions.matches(&msg.raw_text),
+                );
             }
-            let empty = cache.as_ref().is_none_or(|(_, rows)| rows.is_empty());
-            drop(cache);
+            let empty = self.mentions_panel.rows.is_empty();
             if empty {
                 div()
                     .px_2()
@@ -5122,12 +4249,10 @@ impl ChatView {
                 let entity = cx.entity();
                 let content = gpui::list(self.mentions_list_state.clone(), move |ix, _, cx| {
                     let this = entity.read(cx);
-                    let cache = this.mentions_panel_cache.borrow();
-                    let Some(msg) = cache.as_ref().and_then(|(_, rows)| rows.get(ix)) else {
+                    let Some(msg) = this.mentions_panel.rows.get(ix) else {
                         return div().into_any_element();
                     };
                     let model = this.channel.read(cx);
-                    let decorated = log::decorate(msg, model);
                     let selection = selectable::Selection::new();
                     let mut ordinal = 0;
                     div()
@@ -5138,8 +4263,9 @@ impl ChatView {
                         .px(px(6.))
                         .pb_1()
                         .child(render::render_message(
-                            &decorated,
+                            msg,
                             render::RowFlags {
+                                cosmetics: model.cosmetics_for(msg.platform, &msg.author.user_id),
                                 struck: model.is_struck(msg),
                                 mentioned: true,
                                 hide_timestamp: !crate::settings::show_timestamps_mentions(),
@@ -5341,7 +4467,11 @@ impl ChatView {
         let viewport = window.viewport_size();
         const CARD_W: f32 = 240.;
         const GAP: f32 = 10.;
-        let thumb_h = if thumbnail.is_some() { CARD_W * 9. / 16. } else { 0. };
+        let thumb_h = if thumbnail.is_some() {
+            CARD_W * 9. / 16.
+        } else {
+            0.
+        };
         // The muted meta pieces: "channel · views" and the clip's "Clipped by X".
         let channel_views = [author, stats]
             .into_iter()
@@ -5362,8 +4492,9 @@ impl ChatView {
         };
         let has_meta = !one_line.is_empty();
         const META_INNER_W: f32 = CARD_W - 12.; // minus p_1p5 left+right
-        let meta_two_lines =
-            !channel_views.is_empty() && !byline.is_empty() && one_line.chars().count() as f32 * 5.5 > META_INNER_W;
+        let meta_two_lines = !channel_views.is_empty()
+            && !byline.is_empty()
+            && one_line.chars().count() as f32 * 5.5 > META_INNER_W;
         // The card is top-anchored (grows downward), so the above-the-link gap
         // depends on estimating its height. Budget two title lines; the meta is one
         // or two lines by the decision above. An over-estimate only lifts the card
@@ -5442,9 +4573,8 @@ impl ChatView {
         );
         if has_meta {
             let muted = cx.theme().muted_foreground;
-            let meta_line = |text: SharedString| {
-                div().text_size(px(11.)).text_color(muted).child(text)
-            };
+            let meta_line =
+                |text: SharedString| div().text_size(px(11.)).text_color(muted).child(text);
             if meta_two_lines {
                 // Doesn't fit on one line → "channel · views" then "Clipped by X"
                 // on its own line, with no separator between them.
@@ -5739,12 +4869,14 @@ impl ChatView {
                         .py_1()
                         .items_center()
                         .justify_between()
-                        .child(caption("Replying in thread", None, muted).child(
-                            div()
-                                .text_size(px(label_size))
-                                .text_color(muted)
-                                .child(SharedString::from(format!("· {count}"))),
-                        ))
+                        .child(
+                            caption("Replying in thread", None, muted).child(
+                                div()
+                                    .text_size(px(label_size))
+                                    .text_color(muted)
+                                    .child(SharedString::from(format!("· {count}"))),
+                            ),
+                        )
                         .child(cancel),
                 )
                 .child(
@@ -5772,7 +4904,11 @@ impl ChatView {
             .py_1()
             .gap_2()
             .items_center()
-            .child(caption("Replying to", Some(SharedString::from(parent_author)), muted))
+            .child(caption(
+                "Replying to",
+                Some(SharedString::from(parent_author)),
+                muted,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -5780,7 +4916,11 @@ impl ChatView {
                     .overflow_hidden()
                     .text_size(px(label_size))
                     .text_color(muted)
-                    .child(render::render_reply_preview(&parent_elements, font_size, seed)),
+                    .child(render::render_reply_preview(
+                        &parent_elements,
+                        font_size,
+                        seed,
+                    )),
             )
             .child(cancel)
             .into_any_element();
@@ -6038,446 +5178,6 @@ impl ChatView {
     }
 }
 
-impl ChatView {
-    /// The usercard window's content: the account header, the mod-action rows,
-    /// and the chatter's recent messages.
-    fn usercard_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Some(card) = &self.usercard else {
-            return gpui::Empty.into_any_element();
-        };
-        // Streamer mode hides the avatar behind a placeholder; clicking it
-        // reveals this card's avatar (state lives here, on the host).
-        let reveal = cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
-            if let Some(card) = &mut this.usercard {
-                card.avatar_revealed = true;
-                cx.notify();
-            }
-        });
-        let header = card.header(reveal, cx);
-        let actions = self.usercard_actions(cx);
-        let messages = self.usercard_message_list(cx);
-        // The window is bare (no built-in scroll surface): header + actions stay
-        // fixed and the recent-messages section fills and scrolls the rest.
-        v_flex()
-            .size_full()
-            .p_4()
-            .gap_3()
-            .child(header)
-            .child(actions)
-            .child(messages)
-            .into_any_element()
-    }
-
-    /// The moderation panel: a compact "Timeout" chip row plus Ban/Unban (and, on
-    /// Twitch, a Warn reason box and Mod/VIP grant toggles). Built to fit the card's default width — small
-    /// chips that wrap rather than a single overflowing row. Shown only when the
-    /// logged-in user can moderate the card's platform: Twitch needs `twitch_mod`;
-    /// Kick needs real mod status too (resolved from the logged-in account's own
-    /// usercard; its API has ban/timeout/unban, no role grants).
-    fn usercard_actions(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Some(card) = &self.usercard else {
-            return div().into_any_element();
-        };
-        let platform = card.platform;
-        let can_moderate = self.channel.read(cx).can_moderate(platform);
-        if !can_moderate {
-            return div().into_any_element();
-        }
-        // The target broadcaster can't be banned/timed out or granted a role at
-        // all; a target moderator can't be banned/timed out until they're
-        // unmodded. Hide the buttons that would always fail rather than show them
-        // dead. Role grants (mod/VIP) also need a *broadcaster* token, so only the
-        // channel owner sees them — a plain moderator can't add/remove mod or VIP.
-        let is_broadcaster = card.is_broadcaster;
-        // A Twitch login tier without the matching scopes hides the affordance
-        // (it could only 401) — Kick's scope set is fixed, so only Twitch gates.
-        // The scope slices come from the command registry so the gates can't
-        // drift from what /ban, /mod, /vip actually require.
-        let twitch = platform == bks_core::Platform::Twitch;
-        let show_ban_timeout = !is_broadcaster
-            && !card.is_moderator
-            && !(twitch && crate::session::twitch_scope_missing(commands::SCOPE_BANNED_USERS));
-        // Mod and VIP grants are gated per scope (a token could carry one and
-        // not the other), matching the popup's per-command /mod and /vip gates.
-        let can_grant_mod =
-            !(twitch && crate::session::twitch_scope_missing(commands::SCOPE_MODERATORS));
-        let can_grant_vip = !(twitch && crate::session::twitch_scope_missing(commands::SCOPE_VIPS));
-        let show_roles = !is_broadcaster
-            && self.channel.read(cx).twitch_broadcaster
-            && (can_grant_mod || can_grant_vip);
-        let login = card.login.clone();
-
-        // The user's own custom mod buttons (Settings → Mod Buttons), filtered
-        // to this card's platform (scope Both/None or a matching platform, and
-        // supported on it) and to those that act on a *user* — the card has no
-        // message, so "/delete"/`{msg-id}` buttons are skipped. Labeled with the
-        // button's name; each runs its template against this login. These show
-        // even for a mod/broadcaster target (a bot shoutout isn't a ban).
-        let custom_buttons: Vec<gpui::AnyElement> = crate::settings::mod_buttons()
-            .iter()
-            .filter(|b| b.platform.is_none_or(|p| p == platform))
-            .filter(|b| commands::supported_on(&b.command, platform))
-            .filter(|b| commands::targets_user(&b.command))
-            .filter(|b| {
-                !twitch
-                    || !crate::session::twitch_scope_missing(commands::twitch_scopes_for_template(
-                        &b.command,
-                    ))
-            })
-            .enumerate()
-            .map(|(i, b)| {
-                let label = if b.name.is_empty() {
-                    b.command.clone()
-                } else {
-                    b.name.clone()
-                };
-                let command = b.command.clone();
-                let to_login = login.clone();
-                Button::new(SharedString::from(format!("usercard-custom-{i}")))
-                    .label(SharedString::from(label))
-                    .outline()
-                    .xsmall()
-                    .compact()
-                    .on_click(cx.listener(move |this, _, _, _| {
-                        this.run_usercard_mod_button(&command, &to_login, platform);
-                    }))
-                    .into_any_element()
-            })
-            .collect();
-        let custom_buttons_row = (!custom_buttons.is_empty())
-            .then(|| h_flex().w_full().flex_wrap().gap_1().children(custom_buttons));
-
-        if !show_ban_timeout && !show_roles && custom_buttons_row.is_none() {
-            return div().into_any_element();
-        }
-
-        // (label, seconds) timeout presets — Chatterino's spread, through the
-        // full 2-week Twitch cap; presets over the platform's cap are dropped
-        // (Kick tops out at 7 days).
-        const PRESETS: &[(&str, u32)] = &[
-            ("1s", 1),
-            ("1m", 60),
-            ("10m", 600),
-            ("30m", 1800),
-            ("1h", 3600),
-            ("4h", 14400),
-            ("1d", 86400),
-            ("3d", 259_200),
-            ("1w", 604_800),
-            ("2w", 1_209_600),
-        ];
-        let max = max_timeout_secs(platform);
-
-        let timeout_chips = h_flex()
-            .w_full()
-            .flex_wrap()
-            .gap_1()
-            .children(
-                PRESETS
-                    .iter()
-                    .filter(|(_, secs)| *secs <= max)
-                    .map(|(label, secs)| {
-                        let secs = *secs;
-                        let to_login = login.clone();
-                        Button::new(SharedString::from(format!("usercard-to-{label}")))
-                            .label(*label)
-                            .outline()
-                            .xsmall()
-                            .compact()
-                            .on_click(cx.listener(move |this, _, _, _| {
-                                this.usercard_moderate(platform, Mod::Timeout(secs), &to_login);
-                            }))
-                    }),
-            );
-
-        // The custom-duration row: a small parse-anything box ("90s", "1h30m",
-        // "3d") applied by Enter or its button. The input only exists while the
-        // usercard window is open (it's bound to it).
-        let custom_row = self.usercard_timeout_input.as_ref().map(|input| {
-            h_flex()
-                .w_full()
-                .gap_1()
-                .items_center()
-                .child(div().flex_1().child(Input::new(input).small()))
-                .child(
-                    Button::new("usercard-to-custom")
-                        .label("Timeout")
-                        .outline()
-                        .small()
-                        .compact()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.apply_custom_timeout(window, cx);
-                        })),
-                )
-        });
-        let custom_error = self.usercard_timeout_error.as_ref().map(|err| {
-            div()
-                .text_size(px(12.))
-                .text_color(cx.theme().danger)
-                .child(SharedString::from(err.clone()))
-        });
-
-        // Warn (Twitch-only — Kick has no warn API): a reason box + button;
-        // Helix requires the reason, and the chatter must acknowledge the
-        // warning before they can chat again. Applied by Enter or the button.
-        // Gated on its own warnings scope, not show_ban_timeout's banned_users
-        // — a Basic-moderation login can ban but not warn.
-        let warn_row = (platform == bks_core::Platform::Twitch
-            && !crate::session::twitch_scope_missing(commands::SCOPE_WARNINGS))
-            .then_some(self.usercard_warn_input.as_ref())
-            .flatten()
-            .map(|input| {
-                h_flex()
-                    .w_full()
-                    .gap_1()
-                    .items_center()
-                    .child(div().flex_1().child(Input::new(input).small()))
-                    .child(
-                        Button::new("usercard-warn")
-                            .label("Warn")
-                            .outline()
-                            .small()
-                            .compact()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.apply_usercard_warn(window, cx);
-                            })),
-                    )
-            });
-        let warn_error = self.usercard_warn_error.as_ref().map(|err| {
-            div()
-                .text_size(px(12.))
-                .text_color(cx.theme().danger)
-                .child(SharedString::from(err.clone()))
-        });
-
-        // Ban + Unban, always present for both platforms.
-        let ban_login = login.clone();
-        let ban = Button::new("usercard-ban")
-            .label("Ban")
-            .danger()
-            .xsmall()
-            .compact()
-            .on_click(cx.listener(move |this, _, _, _| {
-                this.usercard_moderate(platform, Mod::Ban, &ban_login);
-            }));
-        let unban_login = login.clone();
-        let unban = Button::new("usercard-unban")
-            .label("Unban")
-            .outline()
-            .xsmall()
-            .compact()
-            .on_click(cx.listener(move |this, _, _, _| {
-                this.usercard_moderate(platform, Mod::Unban, &unban_login);
-            }));
-
-        // Role grants are Twitch-only (Kick's public API can't add/remove mod/VIP).
-        // Both directions are shown as separate buttons (Mod/Unmod, VIP/Unvip) so
-        // the action never depends on (possibly stale) detected role state.
-        let roles = (show_roles && platform == bks_core::Platform::Twitch).then(|| {
-            let role_btn = |id: &'static str,
-                            label: &'static str,
-                            role: controller::Role,
-                            grant: bool,
-                            login: SharedString| {
-                Button::new(id)
-                    .label(label)
-                    .outline()
-                    .xsmall()
-                    .compact()
-                    .on_click(cx.listener(move |this, _, _, _| {
-                        this.controller
-                            .set_role_twitch(role, grant, login.to_string());
-                    }))
-            };
-            let login = SharedString::from(login.clone());
-            h_flex()
-                .gap_1()
-                .when(can_grant_mod, |row| {
-                    row.child(role_btn(
-                        "usercard-mod",
-                        "Mod",
-                        controller::Role::Moderator,
-                        true,
-                        login.clone(),
-                    ))
-                    .child(role_btn(
-                        "usercard-unmod",
-                        "Unmod",
-                        controller::Role::Moderator,
-                        false,
-                        login.clone(),
-                    ))
-                })
-                .when(can_grant_vip, |row| {
-                    row.child(role_btn(
-                        "usercard-vip",
-                        "VIP",
-                        controller::Role::Vip,
-                        true,
-                        login.clone(),
-                    ))
-                    .child(role_btn(
-                        "usercard-unvip",
-                        "Unvip",
-                        controller::Role::Vip,
-                        false,
-                        login.clone(),
-                    ))
-                })
-        });
-
-        // A compact, sectioned panel: the timeout chips + custom-duration row,
-        // a Ban/Unban row, (Twitch broadcaster only) a "Role" row, and the
-        // user's custom mod buttons.
-        let section_label = |text: &'static str| {
-            div()
-                .text_size(px(11.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(cx.theme().muted_foreground)
-                .child(SharedString::from(text))
-        };
-        v_flex()
-            .w_full()
-            .gap_2()
-            .p_3()
-            .rounded_md()
-            .bg(cx.theme().secondary)
-            .when(show_ban_timeout, |col| {
-                col.child(
-                    v_flex()
-                        .w_full()
-                        .gap_1()
-                        .child(section_label("Timeout"))
-                        .child(timeout_chips)
-                        .when_some(custom_row, |col, row| col.child(row))
-                        .when_some(custom_error, |col, err| col.child(err)),
-                )
-                .child(
-                    h_flex()
-                        .w_full()
-                        .items_center()
-                        .gap_1()
-                        .child(ban)
-                        .child(unban),
-                )
-                .when_some(warn_row, |col, row| {
-                    col.child(
-                        v_flex()
-                            .w_full()
-                            .gap_1()
-                            .child(section_label("Warn"))
-                            .child(row)
-                            .when_some(warn_error, |col, err| col.child(err)),
-                    )
-                })
-            })
-            .when_some(roles, |col, role_row| {
-                col.child(
-                    v_flex()
-                        .w_full()
-                        .gap_1()
-                        .child(section_label("Role"))
-                        .child(role_row.w_full().flex_wrap()),
-                )
-            })
-            .when_some(custom_buttons_row, |col, row| {
-                col.child(
-                    v_flex()
-                        .w_full()
-                        .gap_1()
-                        .child(section_label("Custom"))
-                        .child(row),
-                )
-            })
-            .into_any_element()
-    }
-
-    /// Routes a usercard moderation action to the controller for the card's
-    /// platform (Twitch or Kick). Centralizes the per-platform dispatch so the
-    /// chip handlers don't each branch on the platform.
-    fn usercard_moderate(&self, platform: bks_core::Platform, action: Mod, login: &str) {
-        let c = &self.controller;
-        let login = login.to_string();
-        match (platform, action) {
-            (bks_core::Platform::Twitch, Mod::Ban) => c.ban_twitch(login),
-            (bks_core::Platform::Twitch, Mod::Timeout(s)) => c.timeout_twitch(login, s),
-            (bks_core::Platform::Twitch, Mod::Unban) => c.unban_twitch(login),
-            (bks_core::Platform::Kick, Mod::Ban) => c.ban_kick(login),
-            (bks_core::Platform::Kick, Mod::Timeout(s)) => c.timeout_kick(login, s),
-            (bks_core::Platform::Kick, Mod::Unban) => c.unban_kick(login),
-            _ => {}
-        }
-    }
-
-    /// The card's past-message list: the chatter's recent messages in this feed,
-    /// rendered the same way as the main log (no mod buttons, no selection).
-    fn usercard_message_list(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Some(card) = &self.usercard else {
-            return div().into_any_element();
-        };
-        let login = card.login.clone();
-        let msgs = self.usercard_messages(&login, cx);
-
-        let content = if msgs.is_empty() {
-            div()
-                .text_size(px(13.))
-                .text_color(cx.theme().muted_foreground)
-                .child(SharedString::from("No recent messages in this channel."))
-                .into_any_element()
-        } else {
-            // A throwaway selection + ordinal: the card's messages aren't part of
-            // the log's drag-select, so they get their own (unused) selection
-            // context.
-            let selection = selectable::Selection::new();
-            selection.begin_frame();
-            let mut ordinal = 0usize;
-            let rows: Vec<gpui::AnyElement> = msgs
-                .iter()
-                .map(|msg| {
-                    render::render_message(
-                        msg,
-                        render::RowFlags::default(),
-                        self.font_size,
-                        &selection,
-                        &mut ordinal,
-                        render::RowHandlers::default(),
-                    )
-                    .into_any_element()
-                })
-                .collect();
-            div()
-                .id("usercard-messages")
-                .flex_1()
-                .min_h(px(0.))
-                .overflow_y_scroll()
-                .child(v_flex().gap_1().children(rows))
-                .into_any_element()
-        };
-
-        // Fills whatever height the window leaves under the header + actions;
-        // only this section scrolls.
-        v_flex()
-            .flex_1()
-            .min_h(px(0.))
-            .gap_1()
-            .pt_2()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from(format!(
-                        "Recent messages ({})",
-                        msgs.len()
-                    ))),
-            )
-            .child(content)
-            .into_any_element()
-    }
-}
-
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A tab with no channel set: prompt to configure it instead of an empty log.
@@ -6501,8 +5201,9 @@ impl Render for ChatView {
         let placeholder = self.composer_placeholder();
         if placeholder != self.input_placeholder {
             self.input_placeholder = placeholder.clone();
-            self.input
-                .update(cx, |state, cx| state.set_placeholder(placeholder, window, cx));
+            self.input.update(cx, |state, cx| {
+                state.set_placeholder(placeholder, window, cx)
+            });
         }
 
         let emote_popup_overlay = self.render_emote_popup(window, cx);
@@ -6523,12 +5224,12 @@ impl Render for ChatView {
             // on this ancestor takes it before the input can (actions dispatch
             // before raw KeyDown listeners, so an `on_key_down` never fires
             // there).
-            .capture_action(cx.listener(
-                |this, _: &gpui_component::input::Search, _window, cx| {
+            .capture_action(
+                cx.listener(|this, _: &gpui_component::input::Search, _window, cx| {
                     this.open_search(cx);
                     cx.stop_propagation();
-                },
-            ))
+                }),
+            )
             // With focus anywhere else (the log, ...) no input context is on
             // the focus path, the action binding doesn't apply, and the raw
             // keystroke reaches this bubble listener instead.
@@ -6566,7 +5267,9 @@ impl ChatView {
     /// hint instead. The leading space keeps the muted text clear of the caret,
     /// which the kit blinks exactly on the first glyph's left edge.
     fn composer_placeholder(&self) -> String {
-        if self.config.read_only() { return " This tab is read-only".into(); }
+        if self.config.read_only() {
+            return " This tab is read-only".into();
+        }
         let has_twitch = !self.config.twitch_channel.trim().is_empty();
         let has_kick = !self.config.kick_channel.trim().is_empty();
         let twitch = has_twitch && self.controller.twitch_logged_in();
@@ -6592,8 +5295,12 @@ impl ChatView {
     /// (prefix/suffix), so there's no button row to misalign.
     fn render_composer(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         if self.config.read_only() {
-            return div().px_3().py_2().text_color(cx.theme().muted_foreground)
-                .child("This tab is read-only").into_any_element();
+            return div()
+                .px_3()
+                .py_2()
+                .text_color(cx.theme().muted_foreground)
+                .child("This tab is read-only")
+                .into_any_element();
         }
         // Tab completion. A single-line `Input` binds Tab to its
         // `IndentInline` action, which for a non-indentable input
@@ -6772,7 +5479,10 @@ fn replace_word(text: &str, start: usize, insert: &str) -> String {
 fn starts_with_ci(name: &str, stem_lc: &str) -> bool {
     let fold = |c: char| if c == 'ς' { 'σ' } else { c };
     let mut name_chars = name.chars().flat_map(char::to_lowercase).map(fold);
-    stem_lc.chars().map(fold).all(|c| name_chars.next() == Some(c))
+    stem_lc
+        .chars()
+        .map(fold)
+        .all(|c| name_chars.next() == Some(c))
 }
 
 /// The stable sequence numbers of the model's retained events that pass
@@ -7182,7 +5892,9 @@ mod tests {
         let old = FlashTarget {
             platform: Platform::Twitch,
             msg_id: "m".into(),
-            started_at: std::time::Instant::now() - FLASH_DURATION - std::time::Duration::from_secs(1),
+            started_at: std::time::Instant::now()
+                - FLASH_DURATION
+                - std::time::Duration::from_secs(1),
         };
         assert!(old.strength().is_none(), "a faded flash should report None");
     }
@@ -7272,5 +5984,4 @@ mod tests {
         assert!(!rolling.done(now));
         assert!(rolling.done(now + VIEWER_ANIM_DURATION));
     }
-
 }

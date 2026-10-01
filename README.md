@@ -76,6 +76,17 @@ builder, with zero UI changes.** Connectors emit platform-tagged `ChatEvent`s
 over a channel; the UI renders `Message` tokens without knowing where they came
 from. Networking runs on one tokio runtime, bridged to GPUI's own executor.
 
+Processed sources are shared by platform and channel, including when tabs merge
+different channel combinations. Each feed receives bounded replay and live
+updates while keeping its own send target. Settings, usercards, viewer lists, and
+search windows own their inputs and editing state. Viewer lists are virtualized;
+mentions and search results update incrementally as chat arrives or expires.
+
+The shared image cache grows on demand with a 1 GiB decoded-memory budget,
+evicting the least recently used off-screen images first. Images still displayed
+in any window stay pinned, so visible images can temporarily exceed that budget.
+Compressed bytes remain disk-cached for reloads.
+
 ## Build & run
 
 Windows is the primary target (GPUI's DirectX backend). Requires:

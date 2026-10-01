@@ -6,13 +6,11 @@
 //!    ever drawn stays decoded (BGRA, all frames) in RAM for the process lifetime,
 //!    which over a long multi-channel session grows unbounded (animated emotes
 //!    dominate). gpui's bundled `RetainAllImageCache` also never evicts despite its
-//!    name. So this [`ImageCache`] records, **inside `load`**, the instant each
-//!    image was last accessed — and since gpui calls `load` for every image it
-//!    actually renders each frame, "last accessed" is exactly "last on screen", with
-//!    no per-image-kind bookkeeping in the UI. A periodic [`sweep`](LruImageCache::sweep)
-//!    frees the decoded frames of anything not drawn within a lifetime window.
-//!    On-screen images are re-stamped every
-//!    frame so they're never evicted; off-screen ones re-load when scrolled back.
+//!    name. This [`ImageCache`] tracks decoded bytes and evicts least recently
+//!    used off-screen images above a memory budget, plus age-based cleanup.
+//!    Each image pins its entry through gpui element state, which survives cached
+//!    view reuse even when `load` is not called again. Visible images stay resident;
+//!    off-screen ones re-load when scrolled back.
 //!
 //! 2. **Re-download on every miss.** gpui's image loader fetches over HTTP on every
 //!    cache miss (no disk cache) and re-decodes — so a short eviction lifetime makes
@@ -56,6 +54,10 @@ const MAX_FRAME_PIXELS: u64 = 4 * 1024 * 1024;
 const MAX_ANIMATION_PIXELS: u64 = 64 * 1024 * 1024;
 const MAX_DECODED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ANIMATION_FRAMES: usize = 512;
+/// Soft limit: images still used by a window are retained even above this budget.
+/// GPU atlas storage is additional to these decoded frame bytes.
+const DECODED_CACHE_BUDGET: usize = 1024 * 1024 * 1024;
+const MEMORY_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
 fn load_semaphore() -> &'static async_lock::Semaphore {
     static SEM: std::sync::OnceLock<async_lock::Semaphore> = std::sync::OnceLock::new();
@@ -113,20 +115,89 @@ enum Slot {
     Failed(Instant),
 }
 
-/// One cached slot plus when it was last accessed (drawn).
+/// One cached slot, its decoded cost, and leases held by rendered windows.
 struct Entry {
     slot: Slot,
     last_used: Instant,
+    decoded_bytes: usize,
+    pin: Arc<()>,
 }
 
-/// An [`ImageCache`] that evicts images not drawn within a lifetime window and
-/// backs its fetches with a persistent on-disk byte cache.
+struct ImagePin {
+    _pin: Arc<()>,
+    retry: Option<(Instant, gpui::Task<()>)>,
+}
+
+impl Entry {
+    fn new(slot: Slot, now: Instant) -> Self {
+        Self {
+            slot,
+            last_used: now,
+            decoded_bytes: 0,
+            pin: Arc::new(()),
+        }
+    }
+
+    fn mark_used(&mut self, hash: u64, now: Instant, window: &mut Window, cx: &mut App) {
+        self.last_used = now;
+        // Cached views recycle element state without re-running image layout.
+        // A pin disappears only when the image leaves that window's next frame.
+        window.with_global_id(("cached-image-pin", hash).into(), |id, window| {
+            window.with_element_state(id, |state: Option<ImagePin>, window| {
+                let mut state = state
+                    .filter(|state| Arc::ptr_eq(&state._pin, &self.pin))
+                    .unwrap_or_else(|| ImagePin {
+                        _pin: self.pin.clone(),
+                        retry: None,
+                    });
+                if let Slot::Failed(failed_at) = &self.slot {
+                    if state.retry.as_ref().is_none_or(|(at, _)| at != failed_at) {
+                        let delay =
+                            FAILED_RETRY_COOLDOWN.saturating_sub(now.duration_since(*failed_at));
+                        let timer = cx.background_executor().timer(delay);
+                        // Element state owns the task: scrolling away or closing
+                        // the window cancels it. Refreshing the live window also
+                        // retries static images inside cached views, without
+                        // retaining or notifying a potentially released view.
+                        state.retry = Some((
+                            *failed_at,
+                            window.spawn(cx, async move |cx| {
+                                timer.await;
+                                let _ = cx.update(|window, _| window.refresh());
+                            }),
+                        ));
+                    }
+                }
+                ((), state)
+            });
+        });
+    }
+
+    fn is_visible(&self) -> bool {
+        Arc::strong_count(&self.pin) > 1
+    }
+
+    fn account_image(&mut self, image: &RenderImage) -> usize {
+        if self.decoded_bytes != 0 {
+            return 0;
+        }
+        self.decoded_bytes = (0..image.frame_count())
+            .filter_map(|frame| image.as_bytes(frame))
+            .map(<[u8]>::len)
+            .sum();
+        self.decoded_bytes
+    }
+}
+
+/// An [`ImageCache`] with a decoded-memory budget, age-based eviction, and a
+/// persistent on-disk byte cache. Visible images are exempt from eviction.
 pub struct LruImageCache {
     entries: HashMap<u64, Entry>,
+    decoded_bytes: usize,
+    budget: usize,
     #[cfg(test)]
     offline: bool,
-    /// Images are dropped (decoded frames + GPU textures) this long after they
-    /// were last drawn.
+    /// Off-screen images expire this long after they were last loaded by a view.
     lifetime: Duration,
 }
 
@@ -147,7 +218,8 @@ impl LruImageCache {
 
     /// The app-wide shared cache, created on first use. All callers get the same
     /// entity, so its eviction/disk cache is shared across the whole app. The first
-    /// call starts the single periodic eviction sweep (every `sweep_interval`).
+    /// call starts the single periodic eviction sweep. Memory pressure is checked
+    /// at least once per second, including loads that completed after scrolling away.
     pub fn shared(lifetime: Duration, sweep_interval: Duration, cx: &mut App) -> Entity<Self> {
         if !cx.has_global::<GlobalImageCache>() {
             let cache = Self::new(lifetime, cx);
@@ -155,17 +227,21 @@ impl LruImageCache {
             // One startup prune of the on-disk byte cache (age-based GC).
             crate::bridge::runtime().spawn_blocking(prune_disk_cache);
             let weak = cache.downgrade();
-            cx.spawn(async move |cx| loop {
-                cx.background_executor().timer(sweep_interval).await;
-                let alive = cx.update(|cx| match weak.upgrade() {
-                    Some(cache) => {
-                        cache.update(cx, |c, cx| c.sweep(cx));
-                        true
+            cx.spawn(async move |cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(sweep_interval.min(MEMORY_SWEEP_INTERVAL))
+                        .await;
+                    let alive = cx.update(|cx| match weak.upgrade() {
+                        Some(cache) => {
+                            cache.update(cx, |c, cx| c.sweep(cx));
+                            true
+                        }
+                        None => false,
+                    });
+                    if !alive {
+                        break; // cache gone (app shutting down)
                     }
-                    None => false,
-                });
-                if !alive {
-                    break; // cache gone (app shutting down)
                 }
             })
             .detach();
@@ -185,67 +261,79 @@ impl LruImageCache {
     fn new(lifetime: Duration, cx: &mut App) -> Entity<Self> {
         let e = cx.new(|_cx| LruImageCache {
             entries: HashMap::new(),
+            decoded_bytes: 0,
+            budget: DECODED_CACHE_BUDGET,
             #[cfg(test)]
             offline: false,
             lifetime,
         });
         cx.observe_release(&e, |cache, cx| {
             for (_, entry) in std::mem::take(&mut cache.entries) {
-                drop_slot(entry.slot, cx);
+                drop_slot(entry.slot, None, cx);
             }
         })
         .detach();
         e
     }
 
-    /// Frees the decoded frames (and GPU textures, from every window) of each image
-    /// not drawn within [`self.lifetime`]. Driven by the timer in [`shared`](Self::shared).
-    /// Images on screen were accessed within the last frame, so they're never swept.
+    /// Frees expired and over-budget off-screen images, including GPU textures
+    /// in every window. Visible element-state pins override both eviction rules.
     fn sweep(&mut self, cx: &mut App) {
+        for entry in self.entries.values_mut() {
+            if entry.decoded_bytes == 0 {
+                if let Slot::Image(item) = &mut entry.slot {
+                    if let Some(Ok(image)) = item.get() {
+                        self.decoded_bytes += entry.account_image(&image);
+                    }
+                }
+            }
+        }
         let now = Instant::now();
         let stale: Vec<u64> = self
             .entries
             .iter()
-            .filter(|(_, e)| now.duration_since(e.last_used) > self.lifetime)
+            .filter(|(_, e)| !e.is_visible() && now.duration_since(e.last_used) > self.lifetime)
             .map(|(&hash, _)| hash)
             .collect();
         for hash in stale {
-            if let Some(entry) = self.entries.remove(&hash) {
-                drop_slot(entry.slot, cx);
+            self.remove(hash, None, cx);
+        }
+        self.trim_to_budget(None, cx);
+    }
+
+    fn trim_to_budget(&mut self, mut window: Option<&mut Window>, cx: &mut App) {
+        if self.decoded_bytes <= self.budget {
+            return;
+        }
+        let mut candidates: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.decoded_bytes > 0 && !entry.is_visible())
+            .map(|(&hash, entry)| (entry.last_used, hash))
+            .collect();
+        candidates.sort_unstable();
+        for (_, hash) in candidates {
+            self.remove(hash, window.as_deref_mut(), cx);
+            if self.decoded_bytes <= self.budget {
+                break;
             }
         }
-        // At `debug` level, summarize the resident decoded footprint (w×h×4 per
-        // frame, the BGRA heap cost) so a regression — e.g. an oversized image
-        // slipping past the decode downscale — is visible without per-frame cost
-        // in normal runs.
-        if tracing::enabled!(tracing::Level::DEBUG) {
-            let (mut loaded, mut decoded_bytes) = (0u64, 0u64);
-            for entry in self.entries.values_mut() {
-                if let Slot::Image(item) = &mut entry.slot {
-                    if let Some(Ok(img)) = item.get() {
-                        loaded += 1;
-                        for frame in 0..img.frame_count() {
-                            let size = img.size(frame);
-                            decoded_bytes += size.width.0 as u64 * size.height.0 as u64 * 4;
-                        }
-                    }
-                }
-            }
-            tracing::debug!(
-                "image cache: {} entries, {loaded} loaded, decoded heap {} MB",
-                self.entries.len(),
-                decoded_bytes / (1024 * 1024)
-            );
+    }
+
+    fn remove(&mut self, hash: u64, window: Option<&mut Window>, cx: &mut App) {
+        if let Some(entry) = self.entries.remove(&hash) {
+            self.decoded_bytes -= entry.decoded_bytes;
+            drop_slot(entry.slot, window, cx);
         }
     }
 }
 
 /// Frees a slot's decoded image (from every window), if it holds one that finished
 /// loading. A failed slot has nothing to free.
-fn drop_slot(slot: Slot, cx: &mut App) {
+fn drop_slot(slot: Slot, window: Option<&mut Window>, cx: &mut App) {
     if let Slot::Image(mut item) = slot {
         if let Some(Ok(image)) = item.get() {
-            cx.drop_image(image, None);
+            cx.drop_image(image, window);
         }
     }
 }
@@ -647,7 +735,7 @@ impl ImageCache for LruImageCache {
         let now = Instant::now();
 
         if let Some(entry) = self.entries.get_mut(&hash) {
-            entry.last_used = now; // accessed this frame → on screen → keep
+            entry.mark_used(hash, now, window, cx);
             match &mut entry.slot {
                 Slot::Image(item) => match item.get() {
                     // A failed load must NOT stay cached: a transient network blip or
@@ -657,9 +745,18 @@ impl ImageCache for LruImageCache {
                     Some(Err(err)) => {
                         tracing::warn!("image: load failed (will retry after cooldown): {err:#}");
                         entry.slot = Slot::Failed(now);
+                        entry.mark_used(hash, now, window, cx);
+                        return None;
                     }
-                    // Still loading, or loaded OK → return as-is.
-                    other => return other,
+                    Some(Ok(image)) => {
+                        let added = entry.account_image(&image);
+                        self.decoded_bytes += added;
+                        if added > 0 {
+                            self.trim_to_budget(Some(window), cx);
+                        }
+                        return Some(Ok(image));
+                    }
+                    None => return None,
                 },
                 // Previously failed: retry once the cooldown elapses, else stay blank
                 // (without re-spawning a fetch every frame).
@@ -698,13 +795,9 @@ impl ImageCache for LruImageCache {
                 cx.background_executor().spawn(fut).shared()
             }
         };
-        self.entries.insert(
-            hash,
-            Entry {
-                slot: Slot::Image(ImageCacheItem::Loading(task.clone())),
-                last_used: now,
-            },
-        );
+        let mut entry = Entry::new(Slot::Image(ImageCacheItem::Loading(task.clone())), now);
+        entry.mark_used(hash, now, window, cx);
+        self.entries.insert(hash, entry);
 
         let entity = window.current_view();
         window
@@ -740,6 +833,372 @@ pub fn load_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{IntoElement, ParentElement, Render, Styled, TestAppContext};
+
+    fn ready_entry(widths: &[u32], now: Instant) -> Entry {
+        let frames = widths
+            .iter()
+            .map(|&width| image::Frame::new(image::RgbaImage::new(width, 1)))
+            .collect::<Vec<_>>();
+        Entry::new(
+            Slot::Image(ImageCacheItem::Loaded(Ok(Arc::new(RenderImage::new(
+                frames,
+            ))))),
+            now,
+        )
+    }
+
+    #[gpui::test]
+    fn budget_accounts_all_frames_and_evicts_least_recently_used(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let cache = LruImageCache::new(Duration::from_secs(600), cx);
+            cache.update(cx, |cache, cx| {
+                cache.budget = 24;
+                let now = Instant::now();
+                for (key, age) in [(1, 30), (2, 20), (3, 10)] {
+                    cache
+                        .entries
+                        .insert(key, ready_entry(&[1, 2], now - Duration::from_secs(age)));
+                }
+                cache.sweep(cx);
+                assert_eq!(cache.decoded_bytes, 24);
+                assert!(!cache.entries.contains_key(&1));
+                assert!(cache.entries.contains_key(&2));
+                assert!(cache.entries.contains_key(&3));
+
+                cache.entries.get_mut(&2).unwrap().last_used = now;
+                cache.entries.insert(4, ready_entry(&[3], now));
+                cache.sweep(cx);
+                assert_eq!(cache.decoded_bytes, 24);
+                assert!(!cache.entries.contains_key(&3));
+                assert!(cache.entries.contains_key(&2));
+                assert!(cache.entries.contains_key(&4));
+                cache.sweep(cx);
+                assert_eq!(cache.decoded_bytes, 24, "sweeps do not double-count");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn visible_images_survive_budget_and_age_until_all_windows_release_them(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let cache = LruImageCache::new(Duration::from_secs(1), cx);
+            cache.update(cx, |cache, cx| {
+                cache.budget = 1;
+                let entry = ready_entry(&[2, 2], Instant::now() - Duration::from_secs(2));
+                let first_window = entry.pin.clone();
+                let second_window = entry.pin.clone();
+                cache.entries.insert(1, entry);
+                cache.sweep(cx);
+                assert_eq!(cache.decoded_bytes, 16);
+                drop(first_window);
+                cache.sweep(cx);
+                assert_eq!(cache.decoded_bytes, 16);
+                drop(second_window);
+                cache.sweep(cx);
+                assert!(cache.entries.is_empty());
+                assert_eq!(cache.decoded_bytes, 0);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn sweep_accounts_completed_loads_without_another_draw(cx: &mut TestAppContext) {
+        let cache = cx.update(|cx| {
+            let cache = LruImageCache::new(Duration::from_secs(600), cx);
+            let task = cx
+                .background_executor()
+                .spawn(async {
+                    Ok(Arc::new(RenderImage::new(vec![image::Frame::new(
+                        image::RgbaImage::new(2, 2),
+                    )])))
+                })
+                .shared();
+            cache.update(cx, |cache, _| {
+                cache.budget = 8;
+                cache.entries.insert(
+                    1,
+                    Entry::new(Slot::Image(ImageCacheItem::Loading(task)), Instant::now()),
+                );
+            });
+            cache
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            cache.update(cx, |cache, cx| {
+                cache.sweep(cx);
+                assert!(cache.entries.is_empty());
+                assert_eq!(cache.decoded_bytes, 0);
+            });
+        });
+    }
+
+    struct PinnedImageView {
+        cache: Entity<LruImageCache>,
+        show_image: bool,
+        renders: usize,
+    }
+
+    impl Render for PinnedImageView {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            self.renders += 1;
+            let count = if self.show_image { 3usize } else { 0 };
+            gpui::div()
+                .size_full()
+                .children((0..count).flat_map(|index| {
+                    [
+                        gpui::img("image-cache-test")
+                            .size(gpui::px(10.))
+                            .image_cache(&self.cache)
+                            .into_any_element(),
+                        crate::animated_img::animated_img(
+                            ("animated-pin-test", index),
+                            "image-cache-test",
+                            gpui::px(10.),
+                        )
+                        .into_any_element(),
+                    ]
+                }))
+        }
+    }
+
+    struct CachedImageRoot(Entity<PinnedImageView>);
+
+    impl Render for CachedImageRoot {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            let mut style = gpui::StyleRefinement::default();
+            style.size.width = Some(gpui::px(10.).into());
+            style.size.height = Some(gpui::px(10.).into());
+            gpui::div().child(gpui::AnyView::from(self.0.clone()).cached(style))
+        }
+    }
+
+    #[gpui::test]
+    fn cached_view_keeps_image_pinned_without_loading_it_again(cx: &mut TestAppContext) {
+        let (cache, view, key) = cx.update(|cx| {
+            let cache = LruImageCache::new(Duration::from_secs(1), cx);
+            cx.set_global(GlobalImageCache(cache.clone()));
+            let gpui::ImageSource::Resource(resource) = gpui::ImageSource::from("image-cache-test")
+            else {
+                panic!("test image must use the resource cache");
+            };
+            let key = hash(&resource);
+            cache.update(cx, |cache, _| {
+                cache.entries.insert(key, ready_entry(&[1], Instant::now()));
+                cache.budget = 0;
+            });
+            let view = cx.new(|_| PinnedImageView {
+                cache: cache.clone(),
+                show_image: true,
+                renders: 0,
+            });
+            (cache, view, key)
+        });
+        let (_, visual) = cx.add_window_view(|_, _| CachedImageRoot(view.clone()));
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+            assert!(cache.read(cx).entries[&key].is_visible());
+            let renders = view.read(cx).renders;
+            window.draw(cx).clear();
+            assert_eq!(
+                view.read(cx).renders,
+                renders,
+                "second frame reuses the view"
+            );
+        });
+        visual.cx.update(|cx| {
+            cache.update(cx, |cache, cx| {
+                cache.entries.get_mut(&key).unwrap().last_used =
+                    Instant::now() - Duration::from_secs(2);
+                cache.sweep(cx);
+                assert!(cache.entries.contains_key(&key));
+            });
+            view.update(cx, |view, cx| {
+                view.show_image = false;
+                cx.notify();
+            });
+        });
+        visual.update(|window, cx| {
+            window.draw(cx).clear();
+        });
+        visual.cx.update(|cx| {
+            cache.update(cx, |cache, cx| {
+                cache.sweep(cx);
+                assert!(!cache.entries.contains_key(&key));
+                assert_eq!(cache.decoded_bytes, 0);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn repeated_images_remain_pinned_until_the_last_window_stops_showing_them(
+        cx: &mut TestAppContext,
+    ) {
+        let (cache, key) = cx.update(|cx| {
+            let cache = LruImageCache::new(Duration::from_secs(600), cx);
+            cx.set_global(GlobalImageCache(cache.clone()));
+            let gpui::ImageSource::Resource(resource) = gpui::ImageSource::from("image-cache-test")
+            else {
+                panic!("test image must use the resource cache");
+            };
+            let key = hash(&resource);
+            cache.update(cx, |cache, _| {
+                cache.entries.insert(key, ready_entry(&[1], Instant::now()));
+                cache.budget = 0;
+            });
+            (cache, key)
+        });
+        let mut views = Vec::new();
+        for _ in 0..2 {
+            let view = cx.update(|cx| {
+                cx.new(|_| PinnedImageView {
+                    cache: cache.clone(),
+                    show_image: true,
+                    renders: 0,
+                })
+            });
+            let window = cx.add_window(|_, _| CachedImageRoot(view.clone()));
+            let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+            visual.run_until_parked();
+            visual.update(|window, cx| {
+                window.draw(cx).clear();
+                let renders = view.read(cx).renders;
+                window.draw(cx).clear();
+                assert_eq!(view.read(cx).renders, renders);
+            });
+            views.push((view, visual));
+        }
+        for (index, (view, visual)) in views.iter_mut().enumerate() {
+            visual.update(|window, cx| {
+                view.update(cx, |view, cx| {
+                    view.show_image = false;
+                    cx.notify();
+                });
+                window.refresh();
+                window.draw(cx).clear();
+            });
+            visual.cx.update(|cx| {
+                cache.update(cx, |cache, cx| {
+                    cache.sweep(cx);
+                    if index == 0 {
+                        assert!(cache.entries[&key].is_visible());
+                        assert_eq!(cache.decoded_bytes, 4);
+                    } else {
+                        assert!(cache.entries.is_empty());
+                        assert_eq!(cache.decoded_bytes, 0);
+                    }
+                });
+            });
+        }
+    }
+
+    fn failed_image_cache(cx: &mut App) -> (Entity<LruImageCache>, u64) {
+        let cache = LruImageCache::new(Duration::from_secs(600), cx);
+        cx.set_global(GlobalImageCache(cache.clone()));
+        let gpui::ImageSource::Resource(resource) = gpui::ImageSource::from("image-cache-test")
+        else {
+            panic!("test image must use the resource cache");
+        };
+        let key = hash(&resource);
+        cache.update(cx, |cache, _| {
+            cache.entries.insert(
+                key,
+                Entry::new(
+                    Slot::Image(ImageCacheItem::Loaded(Err(anyhow::anyhow!(
+                        "temporary image failure"
+                    )
+                    .into()))),
+                    Instant::now(),
+                ),
+            );
+        });
+        (cache, key)
+    }
+
+    #[gpui::test]
+    fn failed_images_wake_cached_windows_even_after_the_first_window_closes(
+        cx: &mut TestAppContext,
+    ) {
+        let (cache, key) = cx.update(failed_image_cache);
+        let mut views = Vec::new();
+        for _ in 0..2 {
+            let view = cx.update(|cx| {
+                cx.new(|_| PinnedImageView {
+                    cache: cache.clone(),
+                    show_image: true,
+                    renders: 0,
+                })
+            });
+            let window = cx.add_window(|_, _| CachedImageRoot(view.clone()));
+            let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+            visual.run_until_parked();
+            visual.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+                assert!(matches!(cache.read(cx).entries[&key].slot, Slot::Failed(_)));
+            });
+            views.push((view, visual));
+        }
+        views[0].1.update(|window, _| window.remove_window());
+        let (view, visual) = &mut views[1];
+        let renders = visual.update(|window, cx| {
+            window.draw(cx).clear();
+            cache.update(cx, |cache, _| {
+                // Make the next load succeed without a download or a notify.
+                cache.entries.get_mut(&key).unwrap().slot = ready_entry(&[1], Instant::now()).slot;
+            });
+            view.read(cx).renders
+        });
+        visual.executor().advance_clock(FAILED_RETRY_COOLDOWN);
+        visual.run_until_parked();
+        visual.update(|window, cx| {
+            window.draw(cx).clear();
+            assert!(
+                view.read(cx).renders > renders,
+                "cooldown refreshes the cached view"
+            );
+            assert_eq!(cache.read(cx).decoded_bytes, 4);
+        });
+    }
+
+    #[gpui::test]
+    fn offscreen_failed_images_cancel_their_retry_wakeups(cx: &mut TestAppContext) {
+        let (cache, key) = cx.update(failed_image_cache);
+        let view = cx.update(|cx| {
+            cx.new(|_| PinnedImageView {
+                cache: cache.clone(),
+                show_image: true,
+                renders: 0,
+            })
+        });
+        let (_, visual) = cx.add_window_view(|_, _| CachedImageRoot(view.clone()));
+        let renders = visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+            assert!(matches!(cache.read(cx).entries[&key].slot, Slot::Failed(_)));
+            view.update(cx, |view, cx| {
+                view.show_image = false;
+                cx.notify();
+            });
+            window.refresh();
+            window.draw(cx).clear();
+            assert!(!cache.read(cx).entries[&key].is_visible());
+            view.read(cx).renders
+        });
+        visual.executor().advance_clock(FAILED_RETRY_COOLDOWN * 3);
+        visual.run_until_parked();
+        visual.update(|window, cx| {
+            window.draw(cx).clear();
+            assert_eq!(
+                view.read(cx).renders,
+                renders,
+                "offscreen failures do not poll"
+            );
+        });
+    }
 
     fn gif(width: u32, height: u32, count: usize) -> Vec<u8> {
         let mut bytes = Vec::new();

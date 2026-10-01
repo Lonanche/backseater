@@ -52,23 +52,20 @@ impl ViewerList {
     }
 }
 
-/// How many names the window renders at once. The body isn't virtualized, so a
-/// huge channel (tens of thousands of chatters) is capped and the footer says
-/// how many more the search can narrow down to.
-pub const MAX_SHOWN: usize = 500;
-
 /// The chatters matching `query` (case-insensitive substring of login or
 /// display name; an empty query matches all), in the stored (sorted) order.
 /// Matching is the shared allocation-free [`bks_core::contains_ci`].
-pub fn filter<'a>(chatters: &'a [Chatter], query: &str) -> Vec<&'a Chatter> {
+pub fn filter(chatters: &[Chatter], query: &str) -> Vec<usize> {
     let query = query.trim().to_lowercase();
     chatters
         .iter()
-        .filter(|c| {
+        .enumerate()
+        .filter(|(_, c)| {
             query.is_empty()
                 || bks_core::contains_ci(&c.user_login, &query)
                 || bks_core::contains_ci(&c.user_name, &query)
         })
+        .map(|(ix, _)| ix)
         .collect()
 }
 

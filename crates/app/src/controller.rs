@@ -1,9 +1,9 @@
 //! A tab's handle for acting on its chat: sending, moderation, and connecting.
 //!
 //! There is one Controller per tab. Login is app-wide (see [`Session`]); a
-//! Controller borrows the shared session for credentials/actions but owns this
-//! tab's connection (the Twitch source), its channels, send target, and the Kick
-//! chatters it has seen. The GPUI side calls these methods; each spawns onto the
+//! Controller borrows the shared session and channel sources for credentials/
+//! actions, while owning this tab's channels and send target. The GPUI side
+//! calls these methods; each spawns onto the
 //! shared tokio runtime and reports outcomes back as `System` events in this
 //! tab's feed.
 //!
@@ -146,23 +146,26 @@ pub struct TwitchEmotes {
     pub channel: Vec<bks_core::Emote>,
 }
 
-/// This tab's mutable connection state. Behind a mutex so the GPUI side and
-/// tokio tasks can share it.
+/// A Twitch channel's mutable connection state, shared by its producer and all
+/// feed controllers that send to it.
 #[derive(Default)]
 struct State {
-    /// Active Twitch source for this tab — anonymous or authed. Cancelled when
+    /// Active Twitch source for this channel — anonymous or authed. Cancelled when
     /// swapped (reconnect / channel change) so we never run two at once.
     twitch: Option<Arc<TwitchSource>>,
     twitch_task: Option<tokio::task::JoinHandle<()>>,
-    /// Kick chatters this tab has seen (login → numeric id), so moderation can
-    /// target them — Kick's API can't resolve a username to an id.
-    kick_user_ids: HashMap<String, u64>,
 }
 
 /// A tab's send/moderate/connect handle. Clone is cheap.
 #[derive(Clone)]
 pub struct Controller {
     state: Arc<Mutex<State>>,
+    /// Shared by all feeds displaying the same Kick channel, independently of
+    /// which Twitch channel (if any) accompanies it.
+    kick_user_ids: Arc<std::sync::Mutex<HashMap<String, u64>>>,
+    /// Only the platform producer reconnects/refreshes source state on login.
+    /// Feed controllers observe login solely to maintain their own send target.
+    owns_sources: bool,
     /// Where typed messages go (per tab). A sync mutex (never held across an
     /// await) so the UI's render-path read can't silently miss under contention
     /// — the old `try_lock().unwrap_or_default()` briefly showed the wrong
@@ -196,6 +199,8 @@ impl Controller {
         };
         Self {
             state: Arc::new(Mutex::new(State::default())),
+            kick_user_ids: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            owns_sources: true,
             target: Arc::new(std::sync::Mutex::new(target)),
             session,
             events,
@@ -205,10 +210,22 @@ impl Controller {
         }
     }
 
-    /// Connects this tab (authed if logged in, else anonymous) and subscribes to
-    /// app-wide login changes so it stays in sync no matter what caused them
-    /// (user logout, token expiry, login from a future settings screen, …). Call
-    /// once when the tab connects.
+    /// Shares channel actions without sharing the feed's send target or the
+    /// destination of command/login error notices.
+    pub(crate) fn with_sources(mut self, twitch: Option<&Self>, kick: Option<&Self>) -> Self {
+        if let Some(twitch) = twitch {
+            self.state = twitch.state.clone();
+        }
+        if let Some(kick) = kick {
+            self.kick_user_ids = kick.kick_user_ids.clone();
+        }
+        self.owns_sources = false;
+        self
+    }
+
+    /// Watches app-wide login changes. A producer also connects its source;
+    /// a feed controller only keeps its own send target consistent. Call once
+    /// when the producer/feed is created.
     pub fn start(&self) {
         // Do the initial connect and then react to every login change through the
         // same path — one cause-agnostic loop, so a change racing with startup
@@ -232,10 +249,8 @@ impl Controller {
         self.connect_twitch(session::twitch_source(auth)).await;
     }
 
-    /// Subscribes to the session's login broadcast and keeps this tab in sync.
-    /// Connects once up front, then on each change reconnects Twitch (so its
-    /// read/IRC source matches the current auth) and, if Kick became logged out,
-    /// resets the send target off Kick.
+    /// Source owners reconcile their connection and moderation status once per
+    /// login change; feed controllers only reset their own target on Kick logout.
     fn watch_login_changes(&self) {
         let this = self.clone();
         let mut rx = self.session.subscribe();
@@ -243,11 +258,13 @@ impl Controller {
             let reconcile = async {
                 let mut prev = rx.borrow_and_update().clone();
                 // Initial connect with whatever's logged in right now.
-                this.reconnect_twitch().await;
-                this.refresh_kick_mod_status().await;
+                if this.owns_sources {
+                    this.reconnect_twitch().await;
+                    this.refresh_kick_mod_status().await;
+                }
                 while rx.changed().await.is_ok() {
                     let now = rx.borrow_and_update().clone();
-                    if now.twitch_generation != prev.twitch_generation {
+                    if this.owns_sources && now.twitch_generation != prev.twitch_generation {
                         this.reconnect_twitch().await;
                     }
                     if prev.kick() && !now.kick() {
@@ -255,7 +272,7 @@ impl Controller {
                     }
                     // Compare the account, not just the flag, so a re-login as a
                     // different Kick user re-resolves too.
-                    if now.kick != prev.kick {
+                    if this.owns_sources && now.kick != prev.kick {
                         this.refresh_kick_mod_status().await;
                     }
                     prev = now;
@@ -266,7 +283,9 @@ impl Controller {
                 _ = this.events.closed() => {},
                 _ = reconcile => {},
             }
-            this.stop_twitch().await;
+            if this.owns_sources {
+                this.stop_twitch().await;
+            }
         });
     }
 
@@ -351,13 +370,13 @@ impl Controller {
         }
     }
 
-    /// Records a Kick chatter's id (called by the bridge as messages arrive) so
-    /// `/ban`/`/timeout` on Kick can resolve the target.
+    /// Records a Kick chatter's id once at the producer so `/ban`/`/timeout`
+    /// from any subscribed feed can resolve the target.
     pub fn note_kick_user(&self, login: String, user_id: u64) {
-        let state = self.state.clone();
-        self.rt.spawn(async move {
-            state.lock().await.kick_user_ids.insert(login, user_id);
-        });
+        self.kick_user_ids
+            .lock()
+            .unwrap()
+            .insert(login.to_lowercase(), user_id);
     }
 
     /// Account actions for the settings UI. Each only mutates the shared
@@ -443,7 +462,9 @@ impl Controller {
     pub fn set_send_target(&self, platform: bks_core::Platform) -> bool {
         let want = match platform {
             bks_core::Platform::Twitch if self.has_twitch() => SendTarget::Twitch,
-            bks_core::Platform::Kick if self.has_kick() && self.kick_logged_in() => SendTarget::Kick,
+            bks_core::Platform::Kick if self.has_kick() && self.kick_logged_in() => {
+                SendTarget::Kick
+            }
             _ => return false,
         };
         let mut target = self.target.lock().unwrap();
@@ -552,8 +573,7 @@ impl Controller {
             if !this.require_twitch_channel() {
                 return;
             }
-            if let Err(err) = apply_role(&actions, &this.twitch_channel, role, grant, &user).await
-            {
+            if let Err(err) = apply_role(&actions, &this.twitch_channel, role, grant, &user).await {
                 this.notice(format!("{err:#}"));
             }
         });
@@ -709,11 +729,7 @@ impl Controller {
             // A failed channel listing keeps the previous cache entry (the
             // fresh send below still updates the screen with what we got).
             if channel_ok {
-                emote_cache::save(
-                    actions.own_user_id(),
-                    &this.twitch_channel,
-                    &emotes,
-                );
+                emote_cache::save(actions.own_user_id(), &this.twitch_channel, &emotes);
             }
             let _ = reply.send(emotes).await;
         });
@@ -863,10 +879,13 @@ impl Controller {
         }
         match cmd.as_str() {
             "ban" => match args.split_first() {
-                Some((user, reason)) => self.moderate(target, ModAction::Ban {
-                    user: user_arg(user),
-                    reason: join(reason),
-                }),
+                Some((user, reason)) => self.moderate(
+                    target,
+                    ModAction::Ban {
+                        user: user_arg(user),
+                        reason: join(reason),
+                    },
+                ),
                 None => self.notice("usage: /ban <user> [reason]"),
             },
             // Timeout is in seconds here; converted to minutes for Kick downstream.
@@ -874,50 +893,62 @@ impl Controller {
                 [user, duration, reason @ ..] => match bks_core::parse_duration(duration)
                     .and_then(|secs| u32::try_from(secs).ok())
                 {
-                    Some(secs) => self.moderate(target, ModAction::Timeout {
-                        user: user_arg(user),
-                        secs,
-                        reason: join(reason),
-                    }),
+                    Some(secs) => self.moderate(
+                        target,
+                        ModAction::Timeout {
+                            user: user_arg(user),
+                            secs,
+                            reason: join(reason),
+                        },
+                    ),
                     None => self.notice(
                         "usage: /timeout <user> <duration — 600, 30m, 1h, 3d, 1w> [reason]",
                     ),
                 },
-                _ => self.notice("usage: /timeout <user> <duration — 600, 30m, 1h, 3d, 1w> [reason]"),
+                _ => {
+                    self.notice("usage: /timeout <user> <duration — 600, 30m, 1h, 3d, 1w> [reason]")
+                }
             },
             "unban" | "untimeout" => match args.first() {
-                Some(user) => self.moderate(target, ModAction::Unban {
-                    user: user_arg(user),
-                }),
+                Some(user) => self.moderate(
+                    target,
+                    ModAction::Unban {
+                        user: user_arg(user),
+                    },
+                ),
                 None => self.notice(format!("usage: /{cmd} <user>")),
             },
             "delete" => match args.first() {
-                Some(id) => self.moderate(target, ModAction::Delete {
-                    message_id: id.to_string(),
-                }),
+                Some(id) => self.moderate(
+                    target,
+                    ModAction::Delete {
+                        message_id: id.to_string(),
+                    },
+                ),
                 None => self.notice("usage: /delete <message-id>"),
             },
             "me" => match join(&args) {
                 Some(text) => self.send_me(text, target),
                 None => self.notice("usage: /me <message>"),
             },
-            "announce" | "announceblue" | "announcegreen" | "announceorange"
-            | "announcepurple" => match join(&args) {
-                Some(message) => {
-                    // The suffix is the Helix color name ("" = channel accent).
-                    let color = match cmd.strip_prefix("announce").unwrap_or("") {
-                        "" => None,
-                        c => Some(match c {
-                            "blue" => "blue",
-                            "green" => "green",
-                            "orange" => "orange",
-                            _ => "purple",
-                        }),
-                    };
-                    self.twitch_cmd(target, &cmd, TwitchCmd::Announce { message, color });
+            "announce" | "announceblue" | "announcegreen" | "announceorange" | "announcepurple" => {
+                match join(&args) {
+                    Some(message) => {
+                        // The suffix is the Helix color name ("" = channel accent).
+                        let color = match cmd.strip_prefix("announce").unwrap_or("") {
+                            "" => None,
+                            c => Some(match c {
+                                "blue" => "blue",
+                                "green" => "green",
+                                "orange" => "orange",
+                                _ => "purple",
+                            }),
+                        };
+                        self.twitch_cmd(target, &cmd, TwitchCmd::Announce { message, color });
+                    }
+                    None => self.notice(format!("usage: /{cmd} <message>")),
                 }
-                None => self.notice(format!("usage: /{cmd} <message>")),
-            },
+            }
             "warn" => match args.split_first() {
                 Some((user, reason)) if !reason.is_empty() => self.twitch_cmd(
                     target,
@@ -965,15 +996,17 @@ impl Controller {
                     Some((first, rest)) if *first == "--" || *first == "-" => (None, rest),
                     Some((first, rest)) if !rest.is_empty() => {
                         let parsed = if first.bytes().all(|b| b.is_ascii_digit()) {
-                            first.parse::<u64>().ok().and_then(|mins| mins.checked_mul(60))
+                            first
+                                .parse::<u64>()
+                                .ok()
+                                .and_then(|mins| mins.checked_mul(60))
                         } else {
                             bks_core::parse_duration(first)
                         };
                         match parsed.and_then(|secs| u32::try_from(secs).ok()) {
                             Some(secs) if (30..=1800).contains(&secs) => (Some(secs), rest),
                             Some(_) => {
-                                return self
-                                    .notice("pin duration must be between 30s and 30m");
+                                return self.notice("pin duration must be between 30s and 30m");
                             }
                             None => (None, args.as_slice()),
                         }
@@ -1002,14 +1035,14 @@ impl Controller {
                 None => self.twitch_cmd(target, &cmd, TwitchCmd::Slow(Some(30))),
                 // Pre-check Helix's 3–120s range so an out-of-range value gets
                 // the usage hint instead of a raw Helix 400 error row.
-                Some(arg) => match bks_core::parse_duration(arg)
-                    .and_then(|secs| u32::try_from(secs).ok())
-                {
-                    Some(secs) if (3..=120).contains(&secs) => {
-                        self.twitch_cmd(target, &cmd, TwitchCmd::Slow(Some(secs)))
+                Some(arg) => {
+                    match bks_core::parse_duration(arg).and_then(|secs| u32::try_from(secs).ok()) {
+                        Some(secs) if (3..=120).contains(&secs) => {
+                            self.twitch_cmd(target, &cmd, TwitchCmd::Slow(Some(secs)))
+                        }
+                        _ => self.notice("usage: /slow [seconds — 3 to 120]"),
                     }
-                    _ => self.notice("usage: /slow [seconds — 3 to 120]"),
-                },
+                }
             },
             "slowoff" => self.twitch_cmd(target, &cmd, TwitchCmd::Slow(None)),
             "followers" => match args.first() {
@@ -1017,17 +1050,16 @@ impl Controller {
                 None => self.twitch_cmd(target, &cmd, TwitchCmd::Followers(Some(0))),
                 // A bare number is minutes (Helix's unit, like twitch.tv's
                 // command — and unlike /timeout's seconds); 0 = any follower.
-                Some(arg) => match arg
-                    .parse::<u32>()
-                    .ok()
-                    .or_else(|| {
-                        bks_core::parse_duration(arg)
-                            .map(|secs| u32::try_from(secs.div_ceil(60)).unwrap_or(u32::MAX))
-                    }) {
-                    Some(minutes) => self.twitch_cmd(target, &cmd, TwitchCmd::Followers(Some(minutes))),
-                    None => {
-                        self.notice("usage: /followers [duration — 10 = 10m, 1h, 30d; 0 = any follower]")
+                Some(arg) => match arg.parse::<u32>().ok().or_else(|| {
+                    bks_core::parse_duration(arg)
+                        .map(|secs| u32::try_from(secs.div_ceil(60)).unwrap_or(u32::MAX))
+                }) {
+                    Some(minutes) => {
+                        self.twitch_cmd(target, &cmd, TwitchCmd::Followers(Some(minutes)))
                     }
+                    None => self.notice(
+                        "usage: /followers [duration — 10 = 10m, 1h, 30d; 0 = any follower]",
+                    ),
                 },
             },
             "followersoff" => self.twitch_cmd(target, &cmd, TwitchCmd::Followers(None)),
@@ -1118,7 +1150,10 @@ impl Controller {
                 TwitchCmd::Pin {
                     message,
                     duration_secs,
-                } => (actions.send_and_pin(ch, &message, duration_secs).await, None),
+                } => (
+                    actions.send_and_pin(ch, &message, duration_secs).await,
+                    None,
+                ),
                 TwitchCmd::Clear => (actions.clear_chat(ch).await, None),
                 TwitchCmd::Slow(secs) => (actions.set_slow_mode(ch, secs).await, None),
                 TwitchCmd::Followers(minutes) => {
@@ -1358,10 +1393,12 @@ impl Controller {
             | ModAction::Unban { user } => user.clone(),
             ModAction::Delete { .. } => unreachable!("handled above"),
         };
-        let target_id = {
-            let s = self.state.lock().await;
-            s.kick_user_ids.get(&user.to_lowercase()).copied()
-        };
+        let target_id = self
+            .kick_user_ids
+            .lock()
+            .unwrap()
+            .get(&user.to_lowercase())
+            .copied();
         let Some(target_id) = target_id else {
             self.notice(format!(
                 "haven't seen '{user}' in Kick chat yet — can't resolve id"
@@ -1470,6 +1507,89 @@ fn user_arg(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shared_actions_keep_send_targets_and_command_notices_local() {
+        let session = Session::for_test();
+        let (source_tx, source_rx) = smol::channel::bounded(10);
+        let producer = Controller::new(
+            session.clone(),
+            source_tx,
+            Handle::current(),
+            "twitch".into(),
+            "kick".into(),
+        );
+        let (first_tx, first_rx) = smol::channel::bounded(10);
+        let first = Controller::new(
+            session.clone(),
+            first_tx,
+            Handle::current(),
+            "twitch".into(),
+            "kick".into(),
+        )
+        .with_sources(Some(&producer), Some(&producer));
+        let (second_tx, second_rx) = smol::channel::bounded(10);
+        let second = Controller::new(
+            session,
+            second_tx,
+            Handle::current(),
+            String::new(),
+            "kick".into(),
+        )
+        .with_sources(None, Some(&producer));
+        assert!(Arc::ptr_eq(&first.state, &producer.state));
+        assert!(Arc::ptr_eq(&first.kick_user_ids, &second.kick_user_ids));
+        producer.note_kick_user("Viewer".into(), 123);
+        assert_eq!(
+            second.kick_user_ids.lock().unwrap().get("viewer"),
+            Some(&123)
+        );
+        *first.target.lock().unwrap() = SendTarget::Both;
+        assert!(second.send_target() == SendTarget::Kick);
+        first.notice("local error");
+        assert!(matches!(first_rx.try_recv(), Ok(ChatEvent::Error(text)) if text == "local error"));
+        assert!(second_rx.try_recv().is_err());
+        assert!(source_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn closing_a_feed_does_not_cancel_its_shared_twitch_source() {
+        let session = Session::for_test();
+        let (source_tx, _source_rx) = smol::channel::bounded(1);
+        let producer = Controller::new(
+            session.clone(),
+            source_tx,
+            Handle::current(),
+            "channel".into(),
+            String::new(),
+        );
+        let task = tokio::spawn(std::future::pending::<()>());
+        let abort = task.abort_handle();
+        producer.state.lock().await.twitch_task = Some(task);
+        let (tx, rx) = smol::channel::bounded(1);
+        let feed = Controller::new(
+            session,
+            tx,
+            Handle::current(),
+            "channel".into(),
+            String::new(),
+        )
+        .with_sources(Some(&producer), None);
+        let target = Arc::downgrade(&feed.target);
+        feed.start();
+        drop(feed);
+        drop(rx);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while target.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!abort.is_finished());
+        producer.stop_twitch().await;
+        assert!(abort.is_finished());
+    }
 
     #[tokio::test]
     async fn stopping_twitch_cancels_a_connection_still_starting() {
