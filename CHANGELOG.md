@@ -24,6 +24,20 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
   profile details still have a visible name.
 - Read-only tabs now show a clear status instead of a message input, and
   unsupported reply buttons are hidden on read-only chat messages.
+- Tabs that include the same channel now share its connection and chat processing,
+  reducing duplicate work while keeping each tab's sending destination separate.
+- Viewer lists render only visible rows, and mentions and search results update
+  incrementally as chat arrives or expires, keeping busy channels more responsive.
+- Deleted messages now update in open search results without waiting for new chat.
+- Settings, usercards, viewer lists and search windows keep their own input and
+  editing state, so working in one panel does not interfere with another.
+- The image cache now evicts off-screen images as it reaches its 1 GiB memory
+  budget, while keeping visible images loaded.
+
+### Development
+
+- Added regression coverage for shared channel sources, image-cache eviction,
+  independent settings windows, viewer lists, mentions and search updates.
 
 ## v0.6.2
 
