@@ -81,6 +81,8 @@ pub struct PreviewTarget {
 /// One source of link previews. Implementors match a URL to their kind and fetch
 /// its metadata. Mirrors `EmoteProvider`: adding a source = implement this and
 /// push it into the registered provider list.
+// async-trait emits redundant #[must_use] attributes flagged by Clippy 1.99.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait LinkPreviewProvider: Send + Sync {
     /// A short name for logs (e.g. "youtube").

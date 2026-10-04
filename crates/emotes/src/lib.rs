@@ -23,6 +23,8 @@ use bks_core::Emote;
 /// set and a per-channel set; [`EmoteRegistry`] merges several providers and
 /// resolves words against the result. Adding a provider is implementing this
 /// trait and pushing it into the bridge's provider list — nothing else changes.
+// async-trait emits redundant #[must_use] attributes flagged by Clippy 1.99.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait EmoteProvider: Send + Sync {
     /// Short provider name for logs/UI, e.g. `"7TV"`.

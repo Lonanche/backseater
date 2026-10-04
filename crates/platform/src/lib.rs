@@ -407,6 +407,8 @@ pub fn chat_channel() -> (ChatSink, ChatStream) {
 
 /// Reading and sending chat. Every platform connector implements this; the UI
 /// depends only on the trait, never a concrete platform.
+// async-trait emits redundant #[must_use] attributes flagged by Clippy 1.99.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ChatSource: Send + Sync {
     /// Connect to a channel and return its event stream.
