@@ -1,7 +1,6 @@
-# CI + auto-release. Every push/PR runs clippy + tests (and a release-profile
-# build that keeps the dependency cache warm). On main, when the workspace
-# version in Cargo.toml has NO GitHub release yet, the same run packs the
-# Windows installer with Velopack and publishes it — so releasing is just:
+# CI + auto-release. Every push/PR runs formatting, clippy and tests. On main,
+# a separate job builds and publishes the Windows installer only when the
+# workspace version in Cargo.toml has no GitHub release — so releasing is just:
 # bump the version (append -beta.N for a beta pre-release), update
 # CHANGELOG.md, commit, push. The vX.Y.Z tag is created by the publish step;
 # tags are never pushed by hand. A failed build releases nothing.
@@ -17,13 +16,31 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
 
 jobs:
   test:
     runs-on: windows-latest
+    concurrency:
+      group: ${{ github.workflow }}-test-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install the repository Rust toolchain
+        run: |
+          rustup show
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo --version
+
+      - name: Check formatting
+        run: ./scripts/check.ps1 -Check fmt
 
       # bks-kick's `wreq` compiles BoringSSL from source: NASM for its x64
       # assembly, libclang for bindgen (LLVM is preinstalled on the runner).
@@ -31,33 +48,66 @@ jobs:
       - name: Point bindgen at the runner's libclang
         run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
       - uses: Swatinem/rust-cache@v2
+        id: check-cache
+        # rust-cache exports this globally; keep each post hook's policy scoped
+        # to its own step when two cache instances share the job.
+        env:
+          CACHE_ON_FAILURE: 'false'
         with:
-          shared-key: build
+          shared-key: checks
+          cache-on-failure: false
 
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # A failed Clippy run has no compiled test dependencies yet. Keep that
+      # partial cache separate so it cannot occupy the immutable complete key.
+      - uses: Swatinem/rust-cache@v2
+        if: steps.check-cache.outputs.cache-hit != 'true'
+        env:
+          CACHE_ON_FAILURE: 'true'
+        with:
+          shared-key: checks-partial
+          cache-on-failure: true
+
+      - name: Clippy
+        run: ./scripts/check.ps1 -Check clippy
       - name: Unit and headless GUI tests
-        run: cargo test --workspace --locked
-      - run: cargo build --release -p backseater
+        run: ./scripts/check.ps1 -Check test
 
-      # ---- Auto-release: everything below only runs on a push to main whose
-      # ---- Cargo.toml version has no published release yet.
+  release:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: ${{ github.workflow }}-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      # Check inside the concurrency slot so another run cannot publish the
+      # same version between this decision and the upload.
       - name: Check for an unreleased version
         id: version
-        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $m = Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1
+          $m = @(Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"$')
+          if ($m.Count -ne 1) { throw 'Expected one workspace version in Cargo.toml' }
           $v = $m.Matches[0].Groups[1].Value
-          gh release view "v$v" --repo $env:GITHUB_REPOSITORY *> $null
-          $exists = if ($LASTEXITCODE -eq 0) { 'true' } else { 'false' }
-          # The runner's pwsh wrapper exits the step with $LASTEXITCODE — gh's
-          # expected "not found" exit 1 must not fail the step.
-          $global:LASTEXITCODE = 0
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          try {
+            $null = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/v$v" -Headers $headers
+            $exists = 'true'
+          }
+          catch {
+            if ([int]$_.Exception.Response.StatusCode -ne 404) { throw }
+            $exists = 'false'
+          }
           echo "version=$v" >> $env:GITHUB_OUTPUT
           echo "pre=$(if ($v.Contains('-')) { 'true' } else { 'false' })" >> $env:GITHUB_OUTPUT
           echo "exists=$exists" >> $env:GITHUB_OUTPUT
@@ -82,6 +132,31 @@ jobs:
             exit 1
           }
           Set-Content notes.md $notes -Encoding utf8
+
+      - name: Install the repository Rust toolchain
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          rustup show
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo --version
+
+      - uses: ilammy/setup-nasm@v1
+        if: steps.version.outputs.exists == 'false'
+      - name: Point bindgen at the runner's libclang
+        if: steps.version.outputs.exists == 'false'
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.version.outputs.exists == 'false'
+        with:
+          shared-key: release
+          cache-on-failure: true
+
+      - name: Build release executable
+        if: steps.version.outputs.exists == 'false'
+        run: ./scripts/check.ps1 -Check release
 
       # Assets and the icon are embedded in the exe, so the install payload is
       # the single binary.

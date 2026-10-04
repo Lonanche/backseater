@@ -422,7 +422,9 @@ impl TabConfig {
     }
 
     pub fn read_only(&self) -> bool {
-        self.has_channel() && self.twitch_channel.trim().is_empty() && self.kick_channel.trim().is_empty()
+        self.has_channel()
+            && self.twitch_channel.trim().is_empty()
+            && self.kick_channel.trim().is_empty()
     }
 
     /// The label to show on the tab: the user's name if set, else the
@@ -502,7 +504,8 @@ pub fn save_active(ix: usize) {
 mod tests {
     #[test]
     fn tiktok_tabs_persist_and_old_configs_still_load() {
-        let legacy: super::TabConfig = serde_json::from_str(r#"{"name":"old","twitch_channel":"fixture"}"#).unwrap();
+        let legacy: super::TabConfig =
+            serde_json::from_str(r#"{"name":"old","twitch_channel":"fixture"}"#).unwrap();
         assert!(legacy.tiktok_channel.is_empty());
         assert!(!legacy.read_only());
         let mut config = super::TabConfig::empty();

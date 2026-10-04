@@ -502,7 +502,10 @@ mod tests {
         let msg = build_message("chan", &[], chat);
         let reply = msg.reply.expect("reply parent");
         assert_eq!(reply.author, "u_got_ratted");
-        assert_eq!(reply.parent_id.as_deref(), Some("689e3a2d-4871-4404-b721-6193ca4ff828"));
+        assert_eq!(
+            reply.parent_id.as_deref(),
+            Some("689e3a2d-4871-4404-b721-6193ca4ff828")
+        );
         // The thread root comes from the top-level `thread_parent_id`, NOT the parent.
         assert_eq!(
             reply.thread_root_id.as_deref(),
@@ -525,7 +528,9 @@ mod tests {
             "thread_parent_id": ""
         }"#;
         let chat: KickChatMessage = serde_json::from_str(data).unwrap();
-        let reply = build_message("chan", &[], chat).reply.expect("reply parent");
+        let reply = build_message("chan", &[], chat)
+            .reply
+            .expect("reply parent");
         assert_eq!(reply.thread_root_id.as_deref(), Some("m0"));
     }
 
@@ -538,8 +543,7 @@ mod tests {
 
     #[test]
     fn author_handle_at_sign_is_stripped() {
-        let data =
-            r#"{"id":"m1","content":"hi","sender":{"id":5,"username":"@StreamElements"}}"#;
+        let data = r#"{"id":"m1","content":"hi","sender":{"id":5,"username":"@StreamElements"}}"#;
         let chat: KickChatMessage = serde_json::from_str(data).unwrap();
         let msg = build_message("chan", &[], chat);
         assert_eq!(msg.author.display_name, "StreamElements");

@@ -9,13 +9,13 @@ mod history;
 mod preview;
 
 pub use actions::{AuthExpired, KickActions, OnRefreshed};
-pub use preview::KickClipPreviewProvider;
 pub use api::{
     fetch_channel_emotes, fetch_channel_info, fetch_user_info, fetch_viewer_count, slugify,
     ChannelInfo, KickUserInfo, LastStream, SubscriberBadge,
 };
 pub use connector::KickSource;
 pub use history::fetch_recent;
+pub use preview::KickClipPreviewProvider;
 
 // Re-exported for unit testing the inline-emote parser in isolation.
 pub use builder::parse_content;

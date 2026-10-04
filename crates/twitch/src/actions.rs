@@ -94,7 +94,11 @@ impl TwitchActions {
             async {
                 match &broadcaster_id {
                     Some(id) => self.helix.user_emotes(Some(id)).await,
-                    None => self.helix.personal_user_emotes().await.map(|s| (*s).clone()),
+                    None => self
+                        .helix
+                        .personal_user_emotes()
+                        .await
+                        .map(|s| (*s).clone()),
                 }
             },
             async {
@@ -108,12 +112,10 @@ impl TwitchActions {
             Ok(u) => Ok(u),
             // Channel-scoped fetch failed (e.g. 429): fall back to the shared
             // account-wide set so the picker/autocomplete still has the globals.
-            Err(e) if broadcaster_id.is_some() => {
-                match self.helix.personal_user_emotes().await {
-                    Ok(shared) => Ok((*shared).clone()),
-                    Err(_) => Err(e),
-                }
-            }
+            Err(e) if broadcaster_id.is_some() => match self.helix.personal_user_emotes().await {
+                Ok(shared) => Ok((*shared).clone()),
+                Err(_) => Err(e),
+            },
             Err(e) => Err(e),
         };
         (personal, channel_emotes)
@@ -236,7 +238,9 @@ impl TwitchActions {
         user: &str,
         restricted: bool,
     ) -> anyhow::Result<()> {
-        self.helix.add_suspicious_user(channel, user, restricted).await
+        self.helix
+            .add_suspicious_user(channel, user, restricted)
+            .await
     }
 
     /// Removes `user`'s suspicious-user treatment.

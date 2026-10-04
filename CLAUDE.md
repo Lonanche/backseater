@@ -577,7 +577,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
   title is "Backseater - {active tab}", set in `BackseaterApp::render` (memoized in `window_title`,
   so select/rename/close/restore are all covered with no per-call-site hooks).
 - **Windows installer + auto-update (Velopack)**: `.github/workflows/ci.yml` **auto-releases** —
-  on every push to main (after clippy + tests pass) it checks whether the workspace version in
+  on every push to main (after formatting, clippy + tests pass) a serialized release job checks whether the workspace version in
   `Cargo.toml` has a GitHub release yet; if not it packs the exe with the `vpk` CLI
   (`Backseater-win-Setup.exe` + portable zip + delta packages) and publishes to **GitHub
   Releases** (the `vX.Y.Z` tag is created by the publish — never push tags by hand). The in-app
@@ -594,9 +594,10 @@ platform = implement one trait + one message builder, with zero UI changes**.
   `-beta`-suffixed **version** (`0.3.0-beta.1` in Cargo.toml) publishes as a GitHub
   **pre-release**: only users with About → "Get beta updates" (`Settings.beta_updates` →
   `updater::set_beta_updates` → `GithubSource(prerelease)`) receive it, and semver moves them
-  back onto the next stable. CI runs in ~5 min warm (`rust-cache`, `shared-key: build`); a
-  version bump rewrites Cargo.lock → cache re-key → that one run takes ~15 min (expected, once
-  per release).
+  back onto the next stable. CI uses the checked-in Rust toolchain and `scripts/check.ps1`.
+  Validation and release dependencies have separate caches; failed validation uses a
+  separate fallback cache so a partial build cannot occupy the complete cache key. Only
+  unpublished main versions trigger an optimized build; obsolete PR checks are cancelled.
 - 246 passing unit tests (`cargo test`).
 
 **Not done yet (designed for, not built):**
@@ -967,10 +968,16 @@ traits, and `RenderImage::new/size/delay/frame_count`.
 ## Build & run
 
 ```sh
-cargo build                 # whole workspace
-cargo test                  # unit tests (all crates)
-cargo run -p backseater     # run the app
+cargo build --locked                 # whole workspace
+cargo test --workspace --locked      # unit tests (all crates)
+cargo run --locked -p backseater      # run the app
 ```
+
+`rust-toolchain.toml` selects Rust 1.99.0 with Clippy and rustfmt; all workspace
+crates inherit the supported minimum of 1.99. Run `./scripts/check.ps1` from
+PowerShell for the same formatting, Clippy, and test checks as CI. Use
+`./scripts/check.ps1 -Check release` for the optimized build. Update the toolchain
+pin and workspace minimum together when upgrading Rust.
 
 Channels are set per tab (right-click a tab → Settings); tabs persist to
 `<config>/backseater/tabs.json`. `BKS_DEBUG=1` env var logs received messages to stderr (handy

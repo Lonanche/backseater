@@ -88,7 +88,9 @@ pub fn channel_login(channel: &str) -> String {
 /// Accepts a TikTok username or full profile/LIVE URL, returning a normalized username.
 pub fn normalize_tiktok_channel(input: &str) -> Option<String> {
     let input = input.trim().to_ascii_lowercase();
-    let url = input.strip_prefix("https://").or_else(|| input.strip_prefix("http://"));
+    let url = input
+        .strip_prefix("https://")
+        .or_else(|| input.strip_prefix("http://"));
     let value = url.unwrap_or(&input);
     let value = if let Some((host, path)) = value.split_once('/') {
         if !matches!(host, "tiktok.com" | "www.tiktok.com" | "m.tiktok.com") {
@@ -96,14 +98,19 @@ pub fn normalize_tiktok_channel(input: &str) -> Option<String> {
         }
         let path = path.split(['?', '#']).next()?;
         let path = path.trim_end_matches('/');
-        path.strip_suffix("/live").unwrap_or(path).strip_prefix('@')?
+        path.strip_suffix("/live")
+            .unwrap_or(path)
+            .strip_prefix('@')?
     } else if url.is_some() {
         return None;
     } else {
         value.strip_prefix('@').unwrap_or(value)
     };
-    (!value.is_empty() && value.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.')))
-        .then(|| value.to_string())
+    (!value.is_empty()
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.')))
+    .then(|| value.to_string())
 }
 
 /// Percent-encodes `s` for use as one URL path segment or query value: RFC 3986
@@ -130,10 +137,30 @@ mod tests {
 
     #[test]
     fn tiktok_channel_normalizes_handles_and_live_urls() {
-        for raw in [" @Creator.Name ", "creator.name", "https://www.tiktok.com/@Creator.Name/live?lang=en", "tiktok.com/@creator.name/"] {
-            assert_eq!(normalize_tiktok_channel(raw).as_deref(), Some("creator.name"));
+        for raw in [
+            " @Creator.Name ",
+            "creator.name",
+            "https://www.tiktok.com/@Creator.Name/live?lang=en",
+            "tiktok.com/@creator.name/",
+        ] {
+            assert_eq!(
+                normalize_tiktok_channel(raw).as_deref(),
+                Some("creator.name")
+            );
         }
-        for raw in ["", "@", "@@creator", "https://creator", "https://example.com", "https://www.tiktok.com", "https://evil.com/@creator", "https://tiktok.com.evil.com/@creator", "creator&room_id=1", "creator/live", "https://tiktok.com/@creator/video/123"] {
+        for raw in [
+            "",
+            "@",
+            "@@creator",
+            "https://creator",
+            "https://example.com",
+            "https://www.tiktok.com",
+            "https://evil.com/@creator",
+            "https://tiktok.com.evil.com/@creator",
+            "creator&room_id=1",
+            "creator/live",
+            "https://tiktok.com/@creator/video/123",
+        ] {
             assert_eq!(normalize_tiktok_channel(raw), None, "{raw}");
         }
     }

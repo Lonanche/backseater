@@ -150,7 +150,8 @@ impl EmoteRegistry {
     /// The fetches run concurrently (they don't touch `self`); results are then
     /// inserted in provider order so the earlier-wins collision rule holds.
     pub async fn load_globals(&mut self, providers: &[Box<dyn EmoteProvider>]) {
-        let fetched = futures_util::future::join_all(providers.iter().map(|p| p.load_global())).await;
+        let fetched =
+            futures_util::future::join_all(providers.iter().map(|p| p.load_global())).await;
         for (provider, result) in providers.iter().zip(fetched) {
             match result {
                 Ok(global) => {
@@ -182,7 +183,8 @@ impl EmoteRegistry {
         fetch_id: &str,
     ) -> usize {
         let fetched =
-            futures_util::future::join_all(providers.iter().map(|p| p.load_channel(fetch_id))).await;
+            futures_util::future::join_all(providers.iter().map(|p| p.load_channel(fetch_id)))
+                .await;
         let mut loaded = 0;
         for (provider, result) in providers.iter().zip(fetched) {
             match result {
@@ -279,11 +281,7 @@ mod tests {
         // A channel emote shadows the global of the same name.
         reg.insert_global(emote("postySmash"));
 
-        let names: Vec<String> = reg
-            .emotes("posty")
-            .iter()
-            .map(|e| e.name.clone())
-            .collect();
+        let names: Vec<String> = reg.emotes("posty").iter().map(|e| e.name.clone()).collect();
         assert_eq!(names, vec!["Kappa", "postySmash", "zzz"]);
         // Another channel doesn't see posty's channel emotes.
         let other: Vec<String> = reg.emotes("other").iter().map(|e| e.name.clone()).collect();

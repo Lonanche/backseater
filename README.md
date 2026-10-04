@@ -91,16 +91,43 @@ Compressed bytes remain disk-cached for reloads.
 
 Windows is the primary target (GPUI's DirectX backend). Requires:
 
-- Rust (MSVC toolchain) + Visual Studio Build Tools with the C++ workload
+- Rust via rustup (MSVC toolchain) + Visual Studio Build Tools with the C++ workload
 - **NASM** (`winget install NASM.NASM`) and **LLVM** (`winget install LLVM.LLVM`,
   with `LIBCLANG_PATH` set to its `bin` dir) — the Kick crate's `wreq` client
   builds BoringSSL from source
 
+Use Visual Studio's Developer PowerShell for x64, with NASM on `PATH`.
+
 ```sh
-cargo build                 # whole workspace
-cargo test                  # unit + headless GUI interaction tests
-cargo run -p backseater     # run the app
+cargo build --locked                 # whole workspace
+cargo test --workspace --locked      # unit + headless GUI interaction tests
+cargo run --locked -p backseater      # run the app
 ```
+
+[`rust-toolchain.toml`](rust-toolchain.toml) pins Rust **1.99.0**, Clippy, and
+rustfmt for both local development and CI. Rustup selects it automatically in
+this checkout, without changing your global default. Remove any directory or
+`RUSTUP_TOOLCHAIN` override when using the project toolchain. Run `rustup show`
+to install missing components and confirm the selection.
+
+We recommend running the same validation as CI from PowerShell before pushing,
+so you can catch failures locally:
+
+```powershell
+./scripts/check.ps1                 # formatting, Clippy, then all tests
+./scripts/check.ps1 -Check clippy    # one check: fmt, clippy, or test
+./scripts/check.ps1 -Check release   # optional optimized app build
+```
+
+The script stops at the first failure and uses the committed lockfile for all
+dependency resolution. Run `cargo fmt` from the repository root to fix workspace
+formatting; the vendored connector is excluded. CI keeps Clippy and tests in
+one Windows job and only compiles an optimized executable when a release is needed.
+
+The workspace supports Rust **1.99** and newer. When upgrading the compiler,
+update the toolchain pin and workspace `rust-version` together, then run the full
+check script and the release build before committing. Include `Cargo.lock` when
+changing dependencies or bumping the workspace version.
 
 Channels are set per tab (right-click a tab → Settings). `/login` starts the
 Twitch OAuth flow, `/kicklogin` the Kick one. `BKS_DEBUG=1` logs received
@@ -120,7 +147,7 @@ It relies on TikTok's unofficial protocol, so service changes can interrupt it.
 The same connector can be tested without opening the GUI:
 
 ```sh
-cargo run -p bks-tiktok --example read_chat -- username 60
+cargo run --locked -p bks-tiktok --example read_chat -- username 60
 ```
 
 ## GUI tests
@@ -129,7 +156,7 @@ The chat view has automated interaction tests that run with `cargo test` and on
 every pull request in the Windows CI job. To run only these tests:
 
 ```sh
-cargo test -p backseater gui_
+cargo test --locked -p backseater gui_
 ```
 
 The suite exercises the production `ChatView` through GPUI's simulated keyboard

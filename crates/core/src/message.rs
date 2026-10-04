@@ -244,7 +244,10 @@ pub fn normalize_username(raw: &str) -> &str {
 /// each on-screen emote clones itself into a click closure per frame.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MessageElement {
-    Text { text: String, color: Option<Color> },
+    Text {
+        text: String,
+        color: Option<Color>,
+    },
     Emote(std::sync::Arc<Emote>),
     /// An inline GIF, with its original caption for selection and search.
     Gif {
@@ -253,8 +256,13 @@ pub enum MessageElement {
         text: String,
     },
     Badge(Badge),
-    Mention { login: String },
-    Link { url: String, text: String },
+    Mention {
+        login: String,
+    },
+    Link {
+        url: String,
+        text: String,
+    },
 }
 
 pub type ChannelId = String;

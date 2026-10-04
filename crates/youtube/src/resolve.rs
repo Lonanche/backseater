@@ -341,7 +341,9 @@ mod tests {
     #[test]
     fn is_live_now_gate() {
         // A live page: affirmative isLiveNow.
-        assert!(is_live_now(r#"…"liveBroadcastDetails":{"isLiveNow":true}…"#));
+        assert!(is_live_now(
+            r#"…"liveBroadcastDetails":{"isLiveNow":true}…"#
+        ));
         // An ended broadcast the /live page redirects to.
         assert!(!is_live_now(
             r#"…"liveBroadcastDetails":{"isLiveNow":false}…"status":"LIVE_STREAM_OFFLINE"…"#

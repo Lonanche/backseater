@@ -79,7 +79,13 @@ pub fn format_duration(secs: u64) -> String {
     }
     let mut out = String::new();
     let mut rest = secs;
-    for (unit, label) in [(604_800, 'w'), (86_400, 'd'), (3600, 'h'), (60, 'm'), (1, 's')] {
+    for (unit, label) in [
+        (604_800, 'w'),
+        (86_400, 'd'),
+        (3600, 'h'),
+        (60, 'm'),
+        (1, 's'),
+    ] {
         let n = rest / unit;
         if n > 0 {
             out.push_str(&format!("{n}{label}"));

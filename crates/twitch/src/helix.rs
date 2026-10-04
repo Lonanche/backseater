@@ -131,7 +131,11 @@ impl Helix {
 
     /// Resolves a `(broadcaster, target)` login pair to ids concurrently — every
     /// moderation action needs both, and the two lookups are independent.
-    async fn resolve_pair(&self, broadcaster: &str, target: &str) -> anyhow::Result<(String, String)> {
+    async fn resolve_pair(
+        &self,
+        broadcaster: &str,
+        target: &str,
+    ) -> anyhow::Result<(String, String)> {
         let (b, t) = tokio::join!(self.user_id(broadcaster), self.user_id(target));
         Ok((b?, t?))
     }
@@ -166,10 +170,7 @@ impl Helix {
                 created_at: u.created_at,
             })
             .ok_or_else(|| anyhow!("no such user '{login}'"))?;
-        self.user_ids
-            .lock()
-            .unwrap()
-            .insert(login, info.id.clone());
+        self.user_ids.lock().unwrap().insert(login, info.id.clone());
         Ok(info)
     }
 
@@ -241,7 +242,11 @@ impl Helix {
     /// query string) and maps every page's entries to renderable [`Emote`]s —
     /// the shared body of [`user_emotes`](Self::user_emotes) and
     /// [`channel_emotes`](Self::channel_emotes), which return the same shape.
-    async fn emote_pages(&self, base_url: String, what: &'static str) -> anyhow::Result<Vec<Emote>> {
+    async fn emote_pages(
+        &self,
+        base_url: String,
+        what: &'static str,
+    ) -> anyhow::Result<Vec<Emote>> {
         let mut emotes = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
@@ -329,8 +334,14 @@ impl Helix {
     /// only the channel owner can add/remove mods, so this 401/403s for a regular
     /// mod, surfaced as the error body). Both args are logins, resolved to ids.
     pub async fn add_moderator(&self, broadcaster: &str, target: &str) -> anyhow::Result<()> {
-        self.set_role("moderation/moderators", true, broadcaster, target, "add mod")
-            .await
+        self.set_role(
+            "moderation/moderators",
+            true,
+            broadcaster,
+            target,
+            "add mod",
+        )
+        .await
     }
 
     /// Revokes moderator from `target` in `broadcaster` (broadcaster token only).

@@ -34,7 +34,8 @@ const STORE_NAME: &str = "kick_credentials";
 
 // `moderation:chat_message:manage` = delete-message; a token from before it
 // was added keeps chatting, delete just 401/403s with a re-login hint.
-const SCOPES: &str = "user:read channel:read chat:write moderation:ban moderation:chat_message:manage";
+const SCOPES: &str =
+    "user:read channel:read chat:write moderation:ban moderation:chat_message:manage";
 
 /// A logged-in Kick session. Tokens expire, so we keep the refresh token + the
 /// broker URL needed to refresh them.

@@ -3,6 +3,7 @@ name = "bks-twitch"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 bks-core.workspace = true

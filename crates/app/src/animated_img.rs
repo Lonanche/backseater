@@ -48,7 +48,9 @@ fn next_tick(now: Instant, delay: Duration) -> (u64, Instant) {
     let epoch = epoch(now);
     let tick = ANIM_TICK.as_nanos().max(1);
     let target = (now + delay).saturating_duration_since(epoch).as_nanos();
-    let floor = (now + ANIM_TICK).saturating_duration_since(epoch).as_nanos();
+    let floor = (now + ANIM_TICK)
+        .saturating_duration_since(epoch)
+        .as_nanos();
     let index = target.max(floor).div_ceil(tick) as u64;
     (index, epoch + Duration::from_nanos(index * tick as u64))
 }

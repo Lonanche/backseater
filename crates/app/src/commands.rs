@@ -620,9 +620,13 @@ mod tests {
     #[test]
     fn matching_filters_by_platform() {
         // /warn is Twitch-only; /ban exists on both.
-        assert!(matching(Platform::Twitch, "warn").iter().any(|m| m.name == "warn"));
+        assert!(matching(Platform::Twitch, "warn")
+            .iter()
+            .any(|m| m.name == "warn"));
         assert!(matching(Platform::Kick, "warn").is_empty());
-        assert!(matching(Platform::Kick, "ban").iter().any(|m| m.name == "ban"));
+        assert!(matching(Platform::Kick, "ban")
+            .iter()
+            .any(|m| m.name == "ban"));
     }
 
     #[test]
@@ -635,7 +639,9 @@ mod tests {
         // "viewers" is an alias of chatters — the prefix surfaces it as its
         // OWN row (typed spelling shown/inserted, usage rewritten to it).
         let viewers = matching(Platform::Twitch, "view");
-        assert!(viewers.iter().any(|m| m.name == "viewers" && m.def.name == "chatters"));
+        assert!(viewers
+            .iter()
+            .any(|m| m.name == "viewers" && m.def.name == "chatters"));
         assert_eq!(
             matching(Platform::Twitch, "unt")
                 .iter()
@@ -644,7 +650,9 @@ mod tests {
             ["/untimeout <user>"]
         );
         // Case-insensitive.
-        assert!(matching(Platform::Twitch, "SLOW").iter().any(|m| m.name == "slow"));
+        assert!(matching(Platform::Twitch, "SLOW")
+            .iter()
+            .any(|m| m.name == "slow"));
         // Empty stem lists every spelling for the platform, alphabetically.
         let all = matching(Platform::Twitch, "");
         assert_eq!(
@@ -680,10 +688,7 @@ mod tests {
         // by its own scope). A missing entry here would leave the command
         // visible in the popup for a login tier that can't run it.
         for cmd in COMMANDS {
-            if cmd.platforms.contains(&Platform::Twitch)
-                && cmd.mod_only
-                && cmd.name != "usercard"
-            {
+            if cmd.platforms.contains(&Platform::Twitch) && cmd.mod_only && cmd.name != "usercard" {
                 assert!(
                     !cmd.twitch_scopes.is_empty(),
                     "/{} has no twitch_scopes",
@@ -717,7 +722,9 @@ mod tests {
         assert!(matching(Platform::Twitch, "untimeout")
             .iter()
             .any(|m| m.def.name == "unban"));
-        assert!(matching(Platform::Kick, "user").iter().any(|m| m.def.name == "usercard"));
+        assert!(matching(Platform::Kick, "user")
+            .iter()
+            .any(|m| m.def.name == "usercard"));
         assert!(matching(Platform::Twitch, "nosuch").is_empty());
     }
 }

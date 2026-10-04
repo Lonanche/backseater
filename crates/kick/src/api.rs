@@ -257,7 +257,10 @@ pub async fn fetch_viewer_count(channel: &str) -> anyhow::Result<Option<u64>> {
     .await
     .with_context(|| format!("requesting kick livestream for {slug}"))?;
     if !resp.status().is_success() {
-        anyhow::bail!("kick livestream lookup for {slug} returned {}", resp.status());
+        anyhow::bail!(
+            "kick livestream lookup for {slug} returned {}",
+            resp.status()
+        );
     }
     let body: serde_json::Value = resp
         .json()

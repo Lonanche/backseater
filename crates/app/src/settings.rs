@@ -446,9 +446,10 @@ impl Settings {
         COMPACT_CHAT.store(self.compact_chat, Ordering::Relaxed);
         LINK_PREVIEW_MODE.store(self.link_preview_mode as u8, Ordering::Relaxed);
         STREAMER_HIDE_THUMBNAILS.store(self.streamer_hide_thumbnails, Ordering::Relaxed);
-        let opacity = self
-            .suppressed_opacity
-            .clamp(*SUPPRESSED_OPACITY_RANGE.start(), *SUPPRESSED_OPACITY_RANGE.end());
+        let opacity = self.suppressed_opacity.clamp(
+            *SUPPRESSED_OPACITY_RANGE.start(),
+            *SUPPRESSED_OPACITY_RANGE.end(),
+        );
         SUPPRESSED_OPACITY.store(opacity.to_bits(), Ordering::Relaxed);
     }
 
