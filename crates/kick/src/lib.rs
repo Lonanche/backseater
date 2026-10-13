@@ -7,6 +7,7 @@ mod builder;
 mod connector;
 mod history;
 mod preview;
+mod pusher;
 
 pub use actions::{AuthExpired, KickActions, OnRefreshed};
 pub use api::{

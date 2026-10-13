@@ -1057,7 +1057,14 @@ Both. `Both` sends typed messages to both chats; mod commands are disabled in `B
 Hard-won protocol details and JSON event shapes, kept here so they don't have to be
 re-discovered:
 - Kick chat = **Pusher WebSocket** (implemented in `crates/kick`):
-  - WS: `wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=8.4.0&flash=false`.
+  - Discover the app key + cluster on every connection via anonymous POST to
+    `https://web.kick.com/api/v1/realtime/channels/{channel_id}/chat/connection`,
+    advertising only `pusher` under `capabilities.accepted_providers` (see `api.rs`).
+    Kick otherwise prefers Centrifugo. Never hard-code an app key: the old one was retired.
+    Build `wss://ws-{cluster}.pusher.com/app/{app_key}?protocol=7&client=js&version=8.4.0&flash=false`.
+  - Wait for connection establishment and the primary chat subscription acknowledgement
+    before announcing success or fetching history. Pusher `data` may be a string **or object**;
+    rejected connections must surface their error/close reason instead of silently gap-filling.
   - Subscribe: `{"event":"pusher:subscribe","data":{"auth":"","channel":"chatrooms.{chatroom_id}.v2"}}`.
   - Chat frames: event `App\Events\ChatMessageEvent`; the Pusher `data` field is a JSON *string*
     (parse twice) → `{id, content, created_at, sender:{username, identity:{color}}}`.

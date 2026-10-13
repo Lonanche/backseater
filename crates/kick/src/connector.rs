@@ -1,7 +1,7 @@
 //! Anonymous Kick chat connector over Pusher WebSocket.
 //!
 //! Kick chat is a Pusher app. We resolve the channel's chatroom id via the REST
-//! API ([`crate::api`]), open the public Pusher socket, subscribe to
+//! API ([`crate::api`]), discover the current Pusher app, subscribe to
 //! `chatrooms.{id}.v2`, and translate `App\Events\ChatMessageEvent` frames into
 //! [`Message`]s. Pusher wraps each event as `{event, channel, data}` where
 //! `data` is itself a JSON *string* that we parse a second time.
@@ -12,16 +12,11 @@ use bks_core::{plural, Message, Platform};
 use bks_platform::{
     ChannelMeta, ChatEvent, ChatModes, ChatSink, ChatSource, ChatStream, EventDetails, EventKind,
 };
-use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::api::{self, parse_kick_time, PinnedInfo, SubscriberBadge};
 use crate::builder::{build_message, KickChatMessage};
-
-/// Public Pusher endpoint + app key Kick uses for chat (same as the C++ client).
-const PUSHER_URL: &str = "wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679\
-?protocol=7&client=js&version=8.4.0&flash=false";
+use crate::pusher;
 
 /// Anonymous Kick connector. Each `join` resolves the channel and runs its own
 /// Pusher socket; events cross to the UI only through the returned stream.
@@ -56,16 +51,18 @@ impl ChatSource for KickSource {
                 let mut last_seen = chrono::Utc::now();
                 loop {
                     let started = std::time::Instant::now();
-                    let result =
-                        run_client(channel.clone(), tx.clone(), first_attempt, &mut last_seen)
-                            .await;
-                    first_attempt = false;
+                    let result = run_client(
+                        channel.clone(),
+                        tx.clone(),
+                        &mut first_attempt,
+                        &mut last_seen,
+                    )
+                    .await;
                     if tx.is_closed() {
                         break; // tab gone — no retry
                     }
-                    // `Ok` here means the server closed the socket cleanly while the
-                    // tab is still alive (Pusher does drop idle connections):
-                    // reconnect too, just without an error row.
+                    // A socket that ends without a close reason still needs a
+                    // reconnect, even though there is no error to show.
                     let err = result.err();
                     // A connection that held for a while is a fresh outage, not a
                     // continuation of the previous backoff.
@@ -104,16 +101,6 @@ impl ChatSource for KickSource {
 
         Ok(rx)
     }
-}
-
-/// The Pusher envelope: `{event, data}` with `data` a JSON string (or `"{}"`).
-/// We only decode `data` for events we handle. (Kick omits the standard Pusher
-/// top-level `channel` field, even on subscription confirmations.)
-#[derive(Deserialize)]
-struct PusherFrame {
-    event: String,
-    #[serde(default)]
-    data: String,
 }
 
 /// `UserBannedEvent` data: the banned user, the moderator (optional), and
@@ -341,14 +328,14 @@ fn ensure_crypto_provider() {
 
 /// One connection attempt: resolve the channel, subscribe over Pusher, pump
 /// events until the socket dies (`Err`, retried by the caller) or closes/the
-/// tab is gone (`Ok`). The first attempt (`first_attempt`) fetches the full
+/// tab is gone (`Ok`). The first successful join (`first_attempt`) fetches the full
 /// history backlog (faded, `historical`); reconnects instead gap-fill the
 /// disconnect window from `last_seen`, parsed as live. `last_seen` is updated
 /// as chat messages arrive so the caller can bound the next gap.
 async fn run_client(
     channel: String,
     tx: ChatSink,
-    first_attempt: bool,
+    first_attempt: &mut bool,
     last_seen: &mut chrono::DateTime<chrono::Utc>,
 ) -> anyhow::Result<()> {
     ensure_crypto_provider();
@@ -357,10 +344,17 @@ async fn run_client(
         .await
         .with_context(|| format!("resolving kick channel {channel}"))?;
 
-    let (ws, _) = tokio_tungstenite::connect_async(PUSHER_URL)
-        .await
-        .context("connecting to Kick Pusher")?;
-    let (mut write, mut read) = ws.split();
+    let url = api::fetch_pusher_url(info.channel_id).await?;
+    let chatroom = format!("chatrooms.{}.v2", info.chatroom_id);
+    let (mut ws, mut pending) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let (mut ws, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .context("connecting to Kick Pusher")?;
+        let pending = pusher::handshake(&mut ws, &chatroom).await?;
+        Ok::<_, anyhow::Error>((ws, pending))
+    })
+    .await
+    .context("Kick Pusher connection/subscription timed out")??;
 
     // Kick spreads its (undocumented) Pusher feed across several channels with
     // *inconsistent* routing and naming: chat + bans arrive on `chatrooms.X.v2`,
@@ -376,7 +370,6 @@ async fn run_client(
     // must be right or live-status (now push-based, no poll) silently never fires.
     // We keep the `user_id` variants too, since other events were observed on them.
     let subscribed = [
-        format!("chatrooms.{}.v2", info.chatroom_id),
         format!("chatrooms.{}", info.chatroom_id),
         format!("chatroom_{}", info.chatroom_id),
         format!("channel.{}", info.channel_id),
@@ -385,13 +378,7 @@ async fn run_client(
         format!("channel_{}", info.user_id),
     ];
     for channel_name in &subscribed {
-        let subscribe = format!(
-            r#"{{"event":"pusher:subscribe","data":{{"auth":"","channel":"{channel_name}"}}}}"#
-        );
-        write
-            .send(WsMessage::Text(subscribe))
-            .await
-            .with_context(|| format!("subscribing to {channel_name}"))?;
+        pusher::subscribe(&mut ws, channel_name).await?;
     }
 
     let _ = tx
@@ -446,7 +433,8 @@ async fn run_client(
     // the disconnect window as *live* messages. Run it in its own task so the
     // round-trip doesn't delay the live read loop below — the UI sorts `historical`
     // messages ahead of live ones by timestamp, so order across the two is fine.
-    // The `Channel` event was already sent above (the bridge has loaded emotes).
+    // Start only after the live subscription is confirmed: a rejected socket
+    // must not masquerade as live chat by repeatedly replaying history.
     {
         let (tx, channel) = (tx.clone(), channel.clone());
         let sub_badges = info.subscriber_badges.clone();
@@ -454,7 +442,8 @@ async fn run_client(
         // Reconnect gap-fill bound: everything since the last seen message,
         // with a margin absorbing clock skew between Kick's message timestamps
         // and our receive clock (the store's row-key dedupe eats the overlap).
-        let gap_after = (!first_attempt).then(|| *last_seen - chrono::Duration::seconds(30));
+        let gap_after = (!*first_attempt).then(|| *last_seen - chrono::Duration::seconds(30));
+        *first_attempt = false;
         tokio::spawn(async move {
             let events = match gap_after {
                 None => crate::history::fetch_recent(&channel, channel_id, &sub_badges).await,
@@ -484,25 +473,20 @@ async fn run_client(
     let mut pending_sub_messages: std::collections::HashMap<String, PendingSubMessage> =
         std::collections::HashMap::new();
 
-    while let Some(frame) = read.next().await {
+    loop {
         // The UI dropped the receiver (tab closed): only the chat-message send
         // would notice, so a quiet channel could hold the socket open for hours.
         if tx.is_closed() {
             break;
         }
-        let frame = frame.context("kick websocket error")?;
-        let text = match frame {
-            WsMessage::Text(t) => t,
-            WsMessage::Ping(p) => {
-                let _ = write.send(WsMessage::Pong(p)).await;
-                continue;
+        let envelope = match pending.pop_front() {
+            Some(frame) => frame,
+            None => {
+                let Some(frame) = pusher::next_frame(&mut ws).await? else {
+                    break;
+                };
+                frame
             }
-            WsMessage::Close(_) => break,
-            _ => continue,
-        };
-
-        let Ok(envelope) = serde_json::from_str::<PusherFrame>(&text) else {
-            continue;
         };
 
         // Kick sends the same event under two name forms depending on which
@@ -530,27 +514,9 @@ async fn run_client(
         }
 
         match event {
-            // Keep the Pusher connection alive.
-            "pusher:ping" => {
-                let _ = write
-                    .send(WsMessage::Text(
-                        r#"{"event":"pusher:pong","data":{}}"#.to_string(),
-                    ))
-                    .await;
-            }
-            // Subscription confirmations: Kick's frame carries no channel name and
-            // we subscribe to several redundant aliases, so a per-channel feed
-            // notice would just be noise — the debug log above covers it.
+            // The primary feed is already confirmed. Alias acknowledgements do
+            // not need extra notices; the debug log above records them.
             "pusher_internal:subscription_succeeded" => {}
-            // A failed subscribe — surface it so a wrong channel id is obvious.
-            "pusher:error" | "pusher:subscription_error" => {
-                let _ = tx
-                    .send(ChatEvent::Error(format!(
-                        "kick: subscription error: {}",
-                        envelope.data
-                    )))
-                    .await;
-            }
             "ChatMessageEvent" => {
                 let Ok(chat) = serde_json::from_str::<KickChatMessage>(&envelope.data) else {
                     continue;

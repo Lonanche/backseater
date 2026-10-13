@@ -16,6 +16,7 @@ chrono.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 # Cloudflare fingerprints the TLS ClientHello and 403s every plain Rust client
 # (rustls/native-tls) on Kick's read endpoints. `wreq` forges a real Chrome

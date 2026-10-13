@@ -133,6 +133,14 @@ Channels are set per tab (right-click a tab → Settings). `/login` starts the
 Twitch OAuth flow, `/kicklogin` the Kick one. `BKS_DEBUG=1` logs received
 messages to stderr.
 
+Kick discovers its current Pusher app key and region on each connection, and
+confirms the live subscription before loading history. To check that connection
+without opening the GUI (no login or chat sending):
+
+```sh
+cargo run --locked -p bks-kick --example read_kick_chat -- goes 60
+```
+
 To add TikTok, enter `@username` or `https://www.tiktok.com/@username/live` in
 the tab's **TikTok channel (read-only)** field and save. Leave the other channel
 fields blank for a TikTok-only tab, or fill them to merge chats. Offline channels

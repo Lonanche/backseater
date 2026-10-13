@@ -3,6 +3,17 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.7.1
+
+### Fixes
+
+- Fixed delayed or missing Kick chat caused by an outdated Pusher connection.
+  Backseater now discovers Kick's current connection settings on every reconnect.
+- Kick now confirms the live chat subscription before loading history, preventing
+  failed connections from repeatedly showing old messages as new chat.
+- Kick connection and subscription failures now report the server's error so
+  connection problems are visible while Backseater retries.
+
 ## v0.7.0
 
 ### Features
