@@ -632,7 +632,14 @@ async fn handle_read(
                 let milestone_value = msg
                     .tag(tmi::Tag::from("msg-param-value"))
                     .and_then(|v| v.parse().ok());
-                if let Some(event) = usernotice_event(&un, milestone_value) {
+                if let Some(event) = usernotice_event(
+                    &un,
+                    milestone_value,
+                    msg.tag("login")
+                        .zip(msg.tag("display-name"))
+                        .zip(msg.tag("user-id"))
+                        .map(|((login, name), id)| (login, name, id)),
+                ) {
                     fan_out(ch, event).await;
                 }
             }

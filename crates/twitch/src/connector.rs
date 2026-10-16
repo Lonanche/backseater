@@ -141,7 +141,7 @@ pub(crate) fn clearchat_event(cc: &tmi::msg::ClearChat<'_>, historical: bool) ->
 /// Converts a USERNOTICE (sub/resub/gift/raid/announcement) into a highlighted
 /// [`ChatEvent::Event`]. Twitch ships a ready-made `system-msg` (the exact text
 /// twitch.tv shows); it's public, so we surface it as the event's `text`. On a
-/// sub/resub the chatter can attach a chat message — that becomes a full
+/// sub/resub or watch streak the chatter can attach a chat message — that becomes a full
 /// [`Message`] (author, badges, timestamp, elements built through the same path
 /// as a PRIVMSG, so its native emotes render inline) shown under the system text
 /// like a normal chat line. `None` when there's no system-msg (nothing to show).
@@ -150,9 +150,12 @@ pub(crate) fn clearchat_event(cc: &tmi::msg::ClearChat<'_>, historical: bool) ->
 /// watch-streak length) — it can't be recovered from the parsed `UserNotice`
 /// because tmi drops it (`viewermilestone` parses as `Event::Unknown`), so the
 /// caller reads it off the raw IRC message and hands it in.
+/// `milestone_sender` preserves the raw login, display name, and user ID,
+/// which tmi also drops for these unknown events.
 pub(crate) fn usernotice_event(
     un: &tmi::msg::UserNotice<'_>,
     milestone_value: Option<u64>,
+    milestone_sender: Option<(&str, &str, &str)>,
 ) -> Option<ChatEvent> {
     // An announcement (`/announce`) ships NO system-msg — the announcement IS
     // the chatter's message, decorated with `msg-param-color` — so it must be
@@ -165,7 +168,7 @@ pub(crate) fn usernotice_event(
             timestamp: un.timestamp(),
             // No text = nothing to announce (shouldn't happen, but an empty
             // highlighted row would just be noise).
-            message: Some(usernotice_message(un)?),
+            message: Some(usernotice_message(un, None)?),
             details: EventDetails {
                 actor: un.sender().map(|s| s.name().to_string()),
                 compact: Some("made an announcement".to_string()),
@@ -180,30 +183,42 @@ pub(crate) fn usernotice_event(
         kind: usernotice_kind(un),
         text,
         timestamp: un.timestamp(),
-        message: usernotice_message(un),
+        message: usernotice_message(un, milestone_sender),
         details: usernotice_details(un, milestone_value),
     })
 }
 
 /// The chat message attached to a USERNOTICE (a sub/resub's optional line, an
-/// announcement's body) as a full [`Message`] — author, badges, timestamp, and
+/// watch streak's optional line, or announcement's body) as a full [`Message`] — author, badges, timestamp, and
 /// elements built through the same path as a PRIVMSG so its native emotes
 /// render inline. The USERNOTICE `emotes` tag is indexed against the raw text,
 /// so it's passed un-trimmed (trimming would shift those positions).
-fn usernotice_message(un: &tmi::msg::UserNotice<'_>) -> Option<Box<Message>> {
+fn usernotice_message(
+    un: &tmi::msg::UserNotice<'_>,
+    milestone_sender: Option<(&str, &str, &str)>,
+) -> Option<Box<Message>> {
     let user_msg = un.text().filter(|s| !s.trim().is_empty())?;
-    let sender = un.sender()?;
+    // tmi treats unknown event types as anonymous, including viewermilestone.
+    // Recover its identity from the raw tags without affecting anonymous gifts.
+    let (login, display_name, user_id) = if let Some(sender) = un.sender() {
+        (sender.login(), sender.name(), sender.id())
+    } else if un.event_id() == "viewermilestone" {
+        let (login, name, id) = milestone_sender?;
+        (login, name.into(), id)
+    } else {
+        return None;
+    };
     Some(Box::new(Message {
         id: un.message_id().to_string(),
         platform: Platform::Twitch,
         channel: bks_core::strip_channel(un.channel()).to_string(),
         timestamp: un.timestamp(),
         author: Author {
-            login: sender.login().to_string(),
-            display_name: sender.name().to_string(),
+            login: login.to_string(),
+            display_name: display_name.to_string(),
             color: un.color().and_then(Color::from_hex),
             badges: un.badges().map(badge_from_irc).collect(),
-            user_id: sender.id().to_string(),
+            user_id: user_id.to_string(),
             paint: None,
         },
         elements: build_privmsg_elements(user_msg, un.raw_emotes(), None),
@@ -700,7 +715,13 @@ mod tests {
 
     /// `usernotice_event` driven from a raw line the way the live loop does.
     fn usernotice_event_raw(raw: &str) -> Option<ChatEvent> {
-        usernotice_event(&parse_usernotice(raw), milestone_value(raw))
+        let irc = IrcMessageRef::parse(raw)?;
+        let sender = irc
+            .tag("login")
+            .zip(irc.tag("display-name"))
+            .zip(irc.tag("user-id"))
+            .map(|((login, name), id)| (login, name, id));
+        usernotice_event(&parse_usernotice(raw), milestone_value(raw), sender)
     }
 
     /// `usernotice_details` driven from a raw line the way the live loop does.
@@ -721,6 +742,22 @@ mod tests {
                    :tmi.twitch.tv USERNOTICE #posty :hi";
         let un = parse_usernotice(raw);
         assert_eq!(usernotice_kind(&un), EventKind::WatchStreak);
+        let ChatEvent::Event {
+            message: Some(message),
+            ..
+        } = usernotice_event_raw(raw).unwrap()
+        else {
+            panic!("watch streak should retain its attached message");
+        };
+        assert_eq!(message.raw_text, "hi");
+        assert_eq!(message.author.login, "viewer");
+        assert_eq!(message.author.display_name, "viewer");
+        assert_eq!(message.author.user_id, "40286300");
+        assert_eq!(message.author.badges.len(), 1);
+        assert!(matches!(
+            usernotice_event_raw(&raw.replace(" :hi", "")),
+            Some(ChatEvent::Event { message: None, .. })
+        ));
     }
 
     #[test]

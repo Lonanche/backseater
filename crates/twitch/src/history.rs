@@ -115,7 +115,12 @@ fn parse_history_line(channel: &str, line: &str, historical: bool) -> Option<Cha
     let milestone_value = irc
         .tag(tmi::Tag::from("msg-param-value"))
         .and_then(|v| v.parse().ok());
-    match tmi::Message::from_irc(irc).ok()? {
+    let milestone_sender = irc
+        .tag("login")
+        .zip(irc.tag("display-name"))
+        .zip(irc.tag("user-id"))
+        .map(|((login, name), id)| (login, name, id));
+    match tmi::Message::from_irc(irc.clone()).ok()? {
         tmi::Message::Privmsg(pm) => {
             // Historical messages don't carry the live "first message" highlight.
             // The "Highlight My Message" tint (set from the msg-id tag inside
@@ -127,7 +132,7 @@ fn parse_history_line(channel: &str, line: &str, historical: bool) -> Option<Cha
             Some(ChatEvent::Message(Box::new(msg)))
         }
         tmi::Message::UserNotice(un) => {
-            let mut event = usernotice_event(&un, milestone_value)?;
+            let mut event = usernotice_event(&un, milestone_value, milestone_sender)?;
             if historical {
                 if let ChatEvent::Event {
                     details, message, ..
