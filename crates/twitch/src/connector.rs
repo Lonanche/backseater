@@ -177,14 +177,29 @@ pub(crate) fn usernotice_event(
             },
         });
     }
-    let text = un.system_message()?.to_string();
+    let mut text = un.system_message()?.to_string();
+    let mut details = usernotice_details(un, milestone_value);
+    if un.event_id() == "modiversary" {
+        // Unlike most USERNOTICEs, the modiversary system text omits the name.
+        // tmi also drops the sender for this unknown event type.
+        if let Some((login, name, _)) = milestone_sender {
+            let name = if name.is_empty() {
+                login.to_string()
+            } else {
+                tmi::maybe_unescape(name).into_owned()
+            };
+            details.actor = Some(name.clone());
+            details.compact = Some(text.trim().to_string());
+            text = format!("{name} {}", text.trim());
+        }
+    }
     Some(ChatEvent::Event {
         platform: Platform::Twitch,
         kind: usernotice_kind(un),
         text,
         timestamp: un.timestamp(),
         message: usernotice_message(un, milestone_sender),
-        details: usernotice_details(un, milestone_value),
+        details,
     })
 }
 
@@ -202,9 +217,9 @@ fn usernotice_message(
     // Recover its identity from the raw tags without affecting anonymous gifts.
     let (login, display_name, user_id) = if let Some(sender) = un.sender() {
         (sender.login(), sender.name(), sender.id())
-    } else if un.event_id() == "viewermilestone" {
+    } else if matches!(un.event_id(), "viewermilestone" | "modiversary") {
         let (login, name, id) = milestone_sender?;
-        (login, name.into(), id)
+        (login, tmi::maybe_unescape(name), id)
     } else {
         return None;
     };
@@ -758,6 +773,50 @@ mod tests {
             usernotice_event_raw(&raw.replace(" :hi", "")),
             Some(ChatEvent::Event { message: None, .. })
         ));
+    }
+
+    #[test]
+    fn modiversary_includes_the_moderators_name() {
+        let raw = "@badge-info=;badges=moderator/1;color=#123456;\
+                   display-name=ModViewer;emotes=;id=mod-event;login=modviewer;\
+                   msg-id=modiversary;room-id=11148817;\
+                   system-msg=has\\sbeen\\sa\\smoderator\\sfor\\s78\\smonths!;\
+                   tmi-sent-ts=1594555275886;user-id=40286300 \
+                   :tmi.twitch.tv USERNOTICE #posty";
+        let Some(ChatEvent::Event {
+            text,
+            kind,
+            details,
+            message,
+            ..
+        }) = usernotice_event_raw(raw)
+        else {
+            panic!("expected a modiversary event");
+        };
+        assert_eq!(kind, EventKind::Other);
+        assert_eq!(text, "ModViewer has been a moderator for 78 months!");
+        assert_eq!(details.actor.as_deref(), Some("ModViewer"));
+        assert_eq!(
+            details.compact.as_deref(),
+            Some("has been a moderator for 78 months!")
+        );
+        assert!(message.is_none());
+        let Some(ChatEvent::Event {
+            message: Some(message),
+            ..
+        }) = usernotice_event_raw(&format!("{raw} :Thanks everyone!"))
+        else {
+            panic!("expected the moderator's attached message");
+        };
+        assert_eq!(message.author.display_name, "ModViewer");
+        assert_eq!(message.author.login, "modviewer");
+        assert_eq!(message.raw_text, "Thanks everyone!");
+        let Some(ChatEvent::Event { text, .. }) =
+            usernotice_event_raw(&raw.replace("display-name=ModViewer", "display-name="))
+        else {
+            panic!("expected login fallback");
+        };
+        assert_eq!(text, "modviewer has been a moderator for 78 months!");
     }
 
     #[test]
