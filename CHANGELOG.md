@@ -3,6 +3,15 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.7.2
+
+### Fixes
+
+- Twitch watch streaks now display attached chat messages, including the viewer's
+  name, badges, color and emotes, in live chat and history.
+- Twitch moderator anniversaries now display the name of the moderator sharing
+  them in chat and the events panel, and preserve attached messages.
+
 ## v0.7.1
 
 ### Fixes
