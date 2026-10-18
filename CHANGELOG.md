@@ -3,6 +3,16 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.7.3
+
+### Features
+
+- Localized Twitch display names now include the account login in parentheses
+  in chat, attached event messages and reply threads.
+- Twitch cheers now show animated cheermotes with colored Bits amounts and
+  appear in the events panel. Channel-specific cheermotes load when logged in,
+  and standard Cheer artwork is available for anonymous readers.
+
 ## v0.7.2
 
 ### Fixes
