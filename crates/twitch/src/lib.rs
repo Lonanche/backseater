@@ -4,6 +4,7 @@
 mod actions;
 mod badges;
 mod builder;
+mod cheers;
 mod connector;
 mod eventsub;
 mod eventsub_manager;
@@ -19,6 +20,7 @@ mod viewers;
 
 pub use actions::{TwitchActions, TwitchUserCard};
 pub use badges::{fetch_badges, BadgeMap};
+pub use cheers::{load_cheermotes, resolve_cheermotes};
 pub use connector::{TwitchAuth, TwitchSource};
 pub use eventsub::EventsubAuth;
 pub use eventsub_manager::{register as register_eventsub, Registration as EventsubRegistration};

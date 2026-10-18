@@ -84,6 +84,8 @@ pub struct ChannelMeta {
 /// leaves this default and the panel falls back to showing `text`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EventDetails {
+    /// Authoritative Bits total on a Twitch cheer (not a Bits badge milestone).
+    pub bits: Option<u64>,
     /// Display name of the acting user (subscriber, gifter, raider, …), shown
     /// emphasized before `compact`.
     pub actor: Option<String>,

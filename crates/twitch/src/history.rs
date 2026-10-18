@@ -129,7 +129,7 @@ fn parse_history_line(channel: &str, line: &str, historical: bool) -> Option<Cha
             // scrollback (Twitch web keeps it too).
             let mut msg = privmsg_to_message(channel, &pm, false, raw_gifs);
             msg.historical = historical;
-            Some(ChatEvent::Message(Box::new(msg)))
+            Some(crate::cheers::privmsg_event(msg, irc.tag("bits")))
         }
         tmi::Message::UserNotice(un) => {
             let mut event = usernotice_event(&un, milestone_value, milestone_sender)?;
@@ -154,6 +154,37 @@ fn parse_history_line(channel: &str, line: &str, historical: bool) -> Option<Cha
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cheers_are_bits_events_for_gap_fill_and_history() {
+        let raw = "@badge-info=;badges=;bits=500;color=;display-name=Viewer;emotes=;id=cheer-id;room-id=123;tmi-sent-ts=1507246572675;user-id=42 :viewer!viewer@viewer.tmi.twitch.tv PRIVMSG #test :Cheer500 thanks";
+        for historical in [false, true] {
+            let event = parse_history_line("#test", raw, historical).unwrap();
+            let ChatEvent::Event {
+                kind,
+                details,
+                message: Some(message),
+                ..
+            } = event
+            else {
+                panic!("expected cheer event with attached message");
+            };
+            assert_eq!(kind, bks_platform::EventKind::Bits);
+            assert_eq!(details.bits, Some(500));
+            assert_eq!(details.compact.as_deref(), Some("cheered 500 Bits"));
+            assert_eq!(details.historical, historical);
+            assert_eq!(message.historical, historical);
+            assert_eq!(message.id, "cheer-id");
+            assert_eq!(message.raw_text, "Cheer500 thanks");
+        }
+        for bits in ["", "bits=0;", "bits=invalid;"] {
+            let raw = raw.replace("bits=500;", bits);
+            assert!(matches!(
+                parse_history_line("#test", &raw, false),
+                Some(ChatEvent::Message(_))
+            ));
+        }
+    }
 
     #[test]
     fn twitch_documented_gif_message_survives_history_and_gap_fill() {

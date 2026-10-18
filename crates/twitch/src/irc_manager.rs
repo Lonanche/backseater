@@ -591,7 +591,7 @@ async fn handle_read(
                     first_message,
                     msg.tag("gifs").unwrap_or_default(),
                 );
-                fan_out(ch, ChatEvent::Message(Box::new(message))).await;
+                fan_out(ch, crate::cheers::privmsg_event(message, msg.tag("bits"))).await;
             }
         }
         tmi::Message::UserState(us) => {

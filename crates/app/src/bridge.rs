@@ -647,7 +647,16 @@ pub async fn run_twitch(
                         }
                     };
                     let emote_fut = load_emotes(&mut registry, &emote_providers, &meta);
-                    let (_, b, h) = tokio::join!(emote_fut, badge_fut, history_fut);
+                    let cheer_fut = async {
+                        if let Some(auth) = eventsub.as_ref() {
+                            if let Err(err) =
+                                bks_twitch::load_cheermotes(auth, &meta.name, &meta.id).await
+                            {
+                                tracing::warn!("failed to load Twitch cheermotes: {err:#}");
+                            }
+                        }
+                    };
+                    let (_, b, h, _) = tokio::join!(emote_fut, badge_fut, history_fut, cheer_fut);
                     badges = b;
                     raw_history = h;
                 }
@@ -726,6 +735,12 @@ fn resolve_chat_event(registry: &EmoteRegistry, badges: &BadgeMap, event: ChatEv
             text,
             timestamp,
             message: message.map(|mut msg| {
+                if platform == bks_core::Platform::Twitch
+                    && kind == bks_platform::EventKind::Bits
+                    && details.bits.is_some()
+                {
+                    bks_twitch::resolve_cheermotes(&mut msg);
+                }
                 resolve_message(&mut msg, registry, badges);
                 msg
             }),
