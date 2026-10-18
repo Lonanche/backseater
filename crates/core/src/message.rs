@@ -223,6 +223,57 @@ pub struct Author {
     pub user_id: String,
 }
 
+impl Author {
+    /// Twitch shows the account login alongside a localized display name.
+    /// Keep this presentation separate from names used for mentions and lookups.
+    pub fn chat_name(&self, platform: Platform) -> std::borrow::Cow<'_, str> {
+        if platform == Platform::Twitch
+            && !self.display_name.is_ascii()
+            && !self.login.is_empty()
+            && !self.display_name.eq_ignore_ascii_case(&self.login)
+        {
+            format!("{} ({})", self.display_name, self.login).into()
+        } else {
+            self.display_name.as_str().into()
+        }
+    }
+}
+
+#[cfg(test)]
+mod author_tests {
+    use super::{Author, Platform};
+
+    #[test]
+    fn twitch_localized_names_include_the_account_login() {
+        for name in ["한글이름", "日本語", "中文"] {
+            let author = Author {
+                display_name: name.into(),
+                login: "viewer123".into(),
+                ..Author::default()
+            };
+            assert_eq!(
+                author.chat_name(Platform::Twitch),
+                format!("{name} (viewer123)")
+            );
+            for platform in [Platform::Kick, Platform::YouTube, Platform::TikTok] {
+                assert_eq!(author.chat_name(platform), name);
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_or_missing_logins_do_not_add_parentheses() {
+        for (name, login) in [("Viewer", "viewer"), ("日本語", ""), ("日本語", "日本語")] {
+            let author = Author {
+                display_name: name.into(),
+                login: login.into(),
+                ..Author::default()
+            };
+            assert_eq!(author.chat_name(Platform::Twitch), name);
+        }
+    }
+}
+
 /// Normalizes a raw platform username into a bare identity name: strips a
 /// leading `@` sigil (Kick and YouTube deliver some accounts as `@name`; the
 /// `@` is a mention/handle marker, never part of the identity) and surrounding

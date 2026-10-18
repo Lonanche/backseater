@@ -1633,7 +1633,7 @@ pub fn render_message(
     tokens.push(name_token(
         &ctx,
         ordinal,
-        format!("{}:", msg.author.display_name),
+        format!("{}:", msg.author.chat_name(msg.platform)),
         name_color,
         resolved_paint(&msg.author, cosmetics),
         name_click,
@@ -3161,7 +3161,10 @@ fn event_message_line(
                 .mr_1()
                 .font_weight(NAME_WEIGHT)
                 .text_color(rgb(name_color))
-                .child(SharedString::from(format!("{}:", msg.author.display_name)));
+                .child(SharedString::from(format!(
+                    "{}:",
+                    msg.author.chat_name(msg.platform)
+                )));
             // The author (the user who typed the attached message) opens their
             // usercard on click, like their name would in the main log.
             match mention_click {
@@ -3359,7 +3362,7 @@ pub fn render_thread_line(
 ) -> impl IntoElement {
     let scale = Scale::new(font_size);
     let name_color = author_name_color(&msg.author);
-    let name_text = SharedString::from(format!("{}:", msg.author.display_name));
+    let name_text = SharedString::from(format!("{}:", msg.author.chat_name(msg.platform)));
     let name = div()
         .flex_none()
         .font_weight(FontWeight::MEDIUM)
