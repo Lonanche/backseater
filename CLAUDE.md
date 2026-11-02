@@ -1160,6 +1160,7 @@ re-discovered:
 ## Conventions (user's global prefs)
 
 - **Commit messages: one sentence.**
+- **Branch names:** Start each new feature or fix on its own branch named `<type>/<short-description>`: `feat`, `fix`, `docs` or `chore`, then a few lowercase words joined by hyphens, under 40 characters in total (for example `feat/region-filter`). Create it from the latest `main` and push to it instead of the session's generated `claude/<random-words>` branch. Follow-up work on an open pull request stays on that pull request's branch.
 - **Comment only when code is genuinely complex** — the existing files follow this; match it.
 - **The user runs and validates the app, not Claude.** This is a live GUI chat client — Claude
   cannot meaningfully see whether emotes/badges/icons render. After building, **stop and let the
