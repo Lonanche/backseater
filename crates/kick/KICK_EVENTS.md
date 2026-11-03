@@ -13,7 +13,7 @@ its real payload shape and know why it was skipped.
 
 | Event | What we do | Payload notes |
 |---|---|---|
-| `ChatMessageEvent` | `Message` | Normal chat line. `content`, `sender.identity.{color,badges,badges_v2}`. |
+| `ChatMessageEvent` | `Message` (or `Event{Sub}`) | Normal chat line. `content`, `sender.identity.{color,badges,badges_v2}`. `type` is `message`/`reply`/`celebration`; a `celebration` with `metadata.celebration.type:"subscription_renewed"` is a shared resub → `Event{Sub}` — see the celebration note below. |
 | `SubscriptionEvent` | `Event{Sub}` | `{chatroom_id, username, months}`. **No message field** — see resub note below. |
 | `GiftedSubscriptionsEvent` | `Event{Gift}` | `{gifter_username, gifted_usernames[], gifter_total}`. `gifter_username:"Anonymous"` for anon gifts. |
 | `StreamHostEvent` | `Event{Raid}` | Kick's host (its "raid" equivalent). `{host_username, number_viewers}`. |
@@ -63,6 +63,29 @@ attached message carries no badges/color — the sub frame sends no identity blo
 sub line. If no `ChatMessageSentEvent` with text preceded the sub (the common case — nobody attaches
 text), `message` is `None` and it renders as a bare sub line. `ChannelSubscriptionEvent` stays
 ignored — it's the redundant third frame with no message.
+
+## Resub celebrations (captured 2026-11-03)
+
+Most Kick **resubs do not fire `SubscriptionEvent` at all**. A 15-minute live capture across 24
+busy channels saw 3 `SubscriptionEvent`s (new subs / a manual resub, each with the three-frame
+sequence above) but 7 resubs that arrived only as a `ChatMessageEvent` with `type:"celebration"`:
+
+```json
+{"id":"…","content":"11 miesiąc dziekuje","type":"celebration","created_at":"2026-11-03T20:41:04+00:00",
+ "sender":{…full identity…},
+ "metadata":{"celebration":{"id":"chceleb_…","type":"subscription_renewed","total_months":11,
+   "created_at":"2026-11-03T19:06:22.416979Z"}}}
+```
+
+It's Kick's version of Twitch's "share your resub": the renewal happened earlier
+(`celebration.created_at`, minutes to days before) and the chatter shares it later with an optional
+message. The connector turns it into the same `Event{Sub}` text as a `SubscriptionEvent`
+(`sub_celebration_event`), with the content attached as a normal chat line (full badges/color),
+timestamped at the share time. The `/history` backlog includes them too (`type:"celebration"`,
+`metadata` as a JSON *string*), so `history.rs` parses that string for the same conversion. Other
+celebration types (none seen yet) stay plain chat messages. A renewal also sends
+`ChannelSubscriptionEvent` + `NewSubscriberUpdatedEvent` + `NewActivityFeedEvent` with no
+`SubscriptionEvent` at billing time (seen once); those stay ignored.
 
 ## Chattiness warning
 

@@ -62,6 +62,28 @@ pub struct Metadata {
     pub original_sender: Option<ReplyUser>,
     #[serde(default)]
     pub original_message: Option<ReplyMessage>,
+    /// Present on a `type:"celebration"` message: a milestone the chatter
+    /// shared, e.g. `{type:"subscription_renewed", total_months}`.
+    #[serde(default)]
+    pub celebration: Option<Celebration>,
+}
+
+#[derive(Deserialize)]
+pub struct Celebration {
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub total_months: u64,
+}
+
+/// The month count when `metadata` marks a shared resub (a `subscription_renewed`
+/// celebration); `None` for every other message.
+pub fn renewal_months(metadata: Option<&Metadata>) -> Option<u64> {
+    metadata?
+        .celebration
+        .as_ref()
+        .filter(|c| c.kind == "subscription_renewed")
+        .map(|c| c.total_months)
 }
 
 #[derive(Deserialize)]

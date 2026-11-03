@@ -15,7 +15,7 @@ use bks_platform::{
 use serde::Deserialize;
 
 use crate::api::{self, parse_kick_time, PinnedInfo, SubscriberBadge};
-use crate::builder::{build_message, KickChatMessage};
+use crate::builder::{build_message, renewal_months, KickChatMessage};
 use crate::pusher;
 
 /// Anonymous Kick connector. Each `join` resolves the channel and runs its own
@@ -521,13 +521,22 @@ async fn run_client(
                 let Ok(chat) = serde_json::from_str::<KickChatMessage>(&envelope.data) else {
                     continue;
                 };
-                let message = build_message(&channel, &info.subscriber_badges, chat);
                 *last_seen = chrono::Utc::now();
-                if tx
-                    .send(ChatEvent::Message(Box::new(message)))
-                    .await
-                    .is_err()
-                {
+                let event = match renewal_months(chat.metadata.as_ref()) {
+                    Some(months) => sub_celebration_event(
+                        &channel,
+                        &info.subscriber_badges,
+                        chat,
+                        months,
+                        false,
+                    ),
+                    None => ChatEvent::Message(Box::new(build_message(
+                        &channel,
+                        &info.subscriber_badges,
+                        chat,
+                    ))),
+                };
+                if tx.send(event).await.is_err() {
                     break; // UI dropped the stream.
                 }
             }
@@ -974,6 +983,39 @@ fn sub_message(
     )
 }
 
+/// A `subscription_renewed` celebration (see [`renewal_months`]) as the same
+/// `Event{Sub}` a `SubscriptionEvent` produces, with the shared text attached as
+/// its chat line. Kick delivers most resubs this way — the chatter shares the
+/// renewal later, Twitch-resub style — not as a `SubscriptionEvent` (verified
+/// live). Unlike [`sub_message`], the line keeps the sender's badges and color.
+pub(crate) fn sub_celebration_event(
+    channel: &str,
+    sub_badges: &[SubscriberBadge],
+    chat: KickChatMessage,
+    months: u64,
+    historical: bool,
+) -> ChatEvent {
+    let ev = SubscriptionEvent {
+        username: bks_core::normalize_username(&chat.sender.username).to_string(),
+        months,
+    };
+    let mut message = build_message(channel, sub_badges, chat);
+    message.historical = historical;
+    let timestamp = message.timestamp;
+    let message = (!message.raw_text.trim().is_empty()).then(|| Box::new(message));
+    ChatEvent::Event {
+        platform: Platform::Kick,
+        kind: EventKind::Sub,
+        text: sub_event_text(&ev),
+        timestamp,
+        message,
+        details: EventDetails {
+            historical,
+            ..sub_event_details(&ev)
+        },
+    }
+}
+
 /// "gifter gifted N subscriptions to a, b, and c. They've gifted T in total."
 /// `None` if the gift list is empty (nothing to show).
 fn gift_event_text(ev: &GiftedSubscriptionsEvent) -> Option<String> {
@@ -1135,6 +1177,38 @@ mod tests {
             months: 6,
         };
         assert_eq!(sub_event_text(&many), "alice subscribed for 6 months.");
+    }
+
+    #[test]
+    fn renewal_celebration_becomes_sub_event_with_message() {
+        // Trimmed from a live capture: a resub shared as a `celebration` chat message.
+        let data = r##"{"id":"10a8a03d","chatroom_id":4338066,"content":"[emote:3007307:drb7h9] hi","type":"celebration","created_at":"2026-11-03T20:31:44+00:00","sender":{"id":5511631,"username":"lonewolf_x","slug":"lonewolf-x","identity":{"color":"#00CCB3","badges":[{"type":"subscriber","text":"Subscriber","count":32,"sort_order":9}]}},"metadata":{"celebration":{"id":"chceleb_01","type":"subscription_renewed","total_months":32,"created_at":"2026-11-03T20:18:00.498576Z"}}}"##;
+        let chat: KickChatMessage = serde_json::from_str(data).unwrap();
+        let months = renewal_months(chat.metadata.as_ref());
+        assert_eq!(months, Some(32));
+        let ChatEvent::Event {
+            kind,
+            text,
+            message,
+            details,
+            ..
+        } = sub_celebration_event("drb7h", &[], chat, 32, false)
+        else {
+            panic!("expected an Event");
+        };
+        assert_eq!(kind, EventKind::Sub);
+        assert_eq!(text, "lonewolf_x subscribed for 32 months.");
+        assert_eq!(details.compact.as_deref(), Some("resubbed · 32 mo"));
+        let message = message.expect("shared text attached");
+        assert_eq!(message.raw_text, "[emote:3007307:drb7h9] hi");
+        assert_eq!(message.author.badges.len(), 1);
+        assert!(message.author.color.is_some());
+
+        let plain: KickChatMessage = serde_json::from_str(
+            r#"{"id":"m1","content":"hi","type":"message","sender":{"id":5,"username":"Bob"}}"#,
+        )
+        .unwrap();
+        assert_eq!(renewal_months(plain.metadata.as_ref()), None);
     }
 
     #[test]

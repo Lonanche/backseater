@@ -16,7 +16,7 @@ use serde::Deserialize;
 use bks_platform::ChatEvent;
 
 use crate::api::{PinnedInfo, SubscriberBadge};
-use crate::builder::{build_message, KickChatMessage, Sender};
+use crate::builder::{build_message, renewal_months, KickChatMessage, Metadata, Sender};
 
 /// The `/history` response: `{ data: { messages: [ … ], pinned_message } }`. Each
 /// message is the same shape as a live `ChatMessageEvent`, plus a `type`
@@ -37,10 +37,11 @@ struct HistoryData {
 }
 
 /// One history entry. Kick mixes plain chat (`type: "message"`) with other kinds
-/// (e.g. `"reply"`). The fields mirror the live `ChatMessageEvent` *except*
-/// `metadata`, which the history endpoint serializes as a JSON *string* (`"[]"`)
-/// rather than the object the live socket sends — so we drop it here (a faded
-/// backlog doesn't need reply context) and hand the rest to the live builder.
+/// (`"reply"`, `"celebration"`). The fields mirror the live `ChatMessageEvent`
+/// *except* `metadata`, which the history endpoint serializes as a JSON *string*
+/// (`"[]"`) rather than the object the live socket sends — it's only read for a
+/// shared resub (a faded backlog doesn't need reply context), and the rest goes
+/// to the live builder.
 #[derive(Deserialize)]
 struct HistoryMessage {
     #[serde(rename = "type", default)]
@@ -51,9 +52,20 @@ struct HistoryMessage {
     #[serde(default)]
     created_at: Option<String>,
     sender: Sender,
+    #[serde(default)]
+    metadata: serde_json::Value,
 }
 
 impl HistoryMessage {
+    /// [`renewal_months`] for the string-encoded history `metadata`.
+    fn renewal_months(&self) -> Option<u64> {
+        let meta: Metadata = match &self.metadata {
+            serde_json::Value::String(s) => serde_json::from_str(s).ok()?,
+            v => Metadata::deserialize(v).ok()?,
+        };
+        renewal_months(Some(&meta))
+    }
+
     fn into_chat(self) -> KickChatMessage {
         KickChatMessage {
             id: self.id,
@@ -84,21 +96,46 @@ async fn fetch_data(channel: &str, channel_id: u64) -> anyhow::Result<HistoryDat
     Ok(resp.data)
 }
 
-/// The chat messages of a history payload, oldest-first (Kick returns them
-/// newest-first), run through the same [`build_message`] as live chat.
-fn parse_messages<'a>(
+/// The chat entries of a history payload, oldest-first (Kick returns them
+/// newest-first), converted like live chat: messages via [`build_message`],
+/// shared resubs via [`sub_celebration_event`]. `after` = a gap-fill (only newer
+/// entries, parsed as live); `None` = the join backlog, flagged `historical`.
+///
+/// [`sub_celebration_event`]: crate::connector::sub_celebration_event
+fn parse_events(
     data: Vec<HistoryMessage>,
-    channel: &'a str,
-    sub_badges: &'a [SubscriberBadge],
-) -> impl Iterator<Item = bks_core::Message> + 'a {
+    channel: &str,
+    sub_badges: &[SubscriberBadge],
+    after: Option<chrono::DateTime<chrono::Utc>>,
+) -> Vec<ChatEvent> {
+    let historical = after.is_none();
     data.into_iter()
         .rev()
-        .filter(|m| m.kind.is_empty() || m.kind == "message" || m.kind == "reply")
-        .map(move |m| build_message(channel, sub_badges, m.into_chat()))
+        .filter(|m| matches!(m.kind.as_str(), "" | "message" | "reply" | "celebration"))
+        .filter(|m| {
+            let ts = m.created_at.as_deref().and_then(bks_core::parse_rfc3339);
+            after.is_none_or(|after| ts.is_none_or(|ts| ts > after))
+        })
+        .map(|m| match m.renewal_months() {
+            Some(months) => crate::connector::sub_celebration_event(
+                channel,
+                sub_badges,
+                m.into_chat(),
+                months,
+                historical,
+            ),
+            None => {
+                let mut msg = build_message(channel, sub_badges, m.into_chat());
+                msg.historical = historical;
+                ChatEvent::Message(Box::new(msg))
+            }
+        })
+        .collect()
 }
 
 /// Fetches recent chat history directly from Kick (via the emulated client),
-/// oldest-first, converted to [`ChatEvent::Message`]s flagged `historical`.
+/// oldest-first, converted to [`ChatEvent::Message`]s (shared resubs to
+/// `Event{Sub}`s) flagged `historical`.
 /// `channel_id` is the history id (the v2 `chatroom.channel_id` from channel
 /// resolution, distinct from the Pusher chatroom id) — passed directly so we skip
 /// a redundant channel lookup; when it's `0` we resolve it from the slug.
@@ -110,12 +147,7 @@ pub async fn fetch_recent(
     sub_badges: &[SubscriberBadge],
 ) -> anyhow::Result<Vec<ChatEvent>> {
     let data = fetch_data(channel, channel_id).await?;
-    let mut events: Vec<ChatEvent> = parse_messages(data.messages, channel, sub_badges)
-        .map(|mut msg| {
-            msg.historical = true;
-            ChatEvent::Message(Box::new(msg))
-        })
-        .collect();
+    let mut events = parse_events(data.messages, channel, sub_badges, None);
 
     // The history payload carries the channel's active pin (there's no anonymous
     // pin GET endpoint), so seed the banner from it. Not `live`, so it stays until
@@ -140,10 +172,7 @@ pub async fn fetch_gap(
     after: chrono::DateTime<chrono::Utc>,
 ) -> anyhow::Result<Vec<ChatEvent>> {
     let data = fetch_data(channel, channel_id).await?;
-    let mut events: Vec<ChatEvent> = parse_messages(data.messages, channel, sub_badges)
-        .filter(|msg| msg.timestamp > after)
-        .map(|msg| ChatEvent::Message(Box::new(msg)))
-        .collect();
+    let mut events = parse_events(data.messages, channel, sub_badges, Some(after));
     if let Some(pin) = data.pinned_message {
         events.push(crate::connector::pin_event(channel, sub_badges, pin, false));
     }
@@ -190,6 +219,43 @@ mod tests {
         }"#;
         let resp: HistoryResponse = serde_json::from_str(raw).unwrap();
         assert_eq!(resp.data.messages.len(), 1);
+    }
+
+    #[test]
+    fn history_celebration_becomes_historical_sub_event() {
+        // Trimmed from a live `/history` capture: `metadata` is string-encoded.
+        let raw = r##"{
+            "data": { "messages": [
+                {
+                    "id": "d5f512bd", "chat_id": 4351775, "type": "celebration",
+                    "content": "hello",
+                    "metadata": "{\"celebration\":{\"id\":\"chceleb_01\",\"type\":\"subscription_renewed\",\"total_months\":2,\"created_at\":\"2026-10-14T09:43:01.39496Z\"}}",
+                    "created_at": "2026-11-03T20:42:22Z",
+                    "sender": { "id": 83777067, "username": "habeeb82",
+                        "identity": { "color": "#F2708A", "badges": [] } }
+                },
+                { "id": "m1", "type": "message", "content": "hi",
+                  "metadata": "{\"message_ref\":\"123\"}",
+                  "sender": { "id": 5, "username": "Bob" } }
+            ] }
+        }"##;
+        let resp: HistoryResponse = serde_json::from_str(raw).unwrap();
+        let events = parse_events(resp.data.messages, "chan", &[], None);
+        assert_eq!(events.len(), 2);
+        // Oldest-first: the payload is newest-first, so the plain message leads.
+        assert!(matches!(&events[0], ChatEvent::Message(m) if m.historical));
+        let ChatEvent::Event {
+            text,
+            message,
+            details,
+            ..
+        } = &events[1]
+        else {
+            panic!("expected the celebration as an Event");
+        };
+        assert_eq!(text, "habeeb82 subscribed for 2 months.");
+        assert!(details.historical);
+        assert!(message.as_ref().is_some_and(|m| m.historical));
     }
 
     #[test]
