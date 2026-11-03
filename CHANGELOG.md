@@ -3,6 +3,27 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.7.5
+
+### Features
+
+- Kick channels now show their active chat restrictions (slow mode,
+  followers-only, emote-only, subscribers-only) as soon as you join, instead of
+  only after a mode changes.
+- Kick Kicks gifts that include a message now show that message under the gift
+  event, with the sender's name color and emotes.
+- Kick's newer badges, such as the per-channel Kicks gifter tiers, now appear
+  before usernames.
+
+### Fixes
+
+- Kick resubscriptions now appear in the events panel. Kick sends most resubs
+  as a shared "celebration" chat message, which was previously shown as a
+  plain chat line; it now shows as a sub event with the chatter's message
+  attached, in live chat and in the join history.
+- Kick level badges now only show for chatters who have chosen to display them,
+  matching kick.com.
+
 ## v0.7.3
 
 ### Features
