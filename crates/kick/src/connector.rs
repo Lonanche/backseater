@@ -203,8 +203,26 @@ struct StreamHostEvent {
 /// `KicksGifted` data: a "Kicks" gift (Kick's bits/cheer equivalent).
 #[derive(Deserialize)]
 struct KicksGiftedEvent {
-    sender: KickUserRef,
+    #[serde(default)]
+    gift_transaction_id: String,
+    sender: KicksSender,
     gift: KicksGift,
+    /// The text a higher-tier gift (e.g. Rage Quit, `character_limit` 150)
+    /// carries — kick.com pins it in chat for a while. Absent on basic gifts.
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct KicksSender {
+    #[serde(default)]
+    id: u64,
+    username: String,
+    /// `#RRGGBB`.
+    #[serde(default)]
+    username_color: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -390,6 +408,14 @@ async fn run_client(
             id: info.user_id.to_string(),
             name: channel.clone(),
         }))
+        .await;
+
+    // `ChatroomUpdatedEvent` only reports changes, so seed the modes active at join.
+    let _ = tx
+        .send(ChatEvent::ChatModes {
+            platform: Platform::Kick,
+            modes: info.chat_modes,
+        })
         .await;
 
     // Seed the initial live state from the join lookup: when live, so opening a tab
@@ -638,14 +664,17 @@ async fn run_client(
             // Kicks gifted: Kick's bits/cheer equivalent.
             "KicksGifted" => {
                 if let Ok(ev) = serde_json::from_str::<KicksGiftedEvent>(&envelope.data) {
+                    let text = kicks_event_text(&ev);
+                    let details = kicks_event_details(&ev);
+                    let message = kicks_message(&channel, &info.subscriber_badges, ev);
                     let _ = tx
                         .send(ChatEvent::Event {
                             platform: Platform::Kick,
                             kind: EventKind::Bits,
-                            text: kicks_event_text(&ev),
+                            text,
                             timestamp: chrono::Utc::now(),
-                            message: None,
-                            details: kicks_event_details(&ev),
+                            message,
+                            details,
                         })
                         .await;
                 }
@@ -776,8 +805,11 @@ async fn run_client(
             // `ChannelSubscriptionEvent` is the other redundant sibling of a
             // (re)sub — we render the sub solely from `SubscriptionEvent`.
             // PollUpdate/leaderboard events are the high-volume feeds we
-            // intentionally don't display.
+            // intentionally don't display. `KicksGiftedDeleted` takes a gift's
+            // message off kick.com's pinned rail (seen minutes after benign
+            // messages, so it's a dismissal, not a mod removal) — ours stays.
             "ChannelSubscriptionEvent"
+            | "KicksGiftedDeleted"
             | "PollUpdateEvent"
             | "PollDeleteEvent"
             | "GiftsLeaderboardUpdated"
@@ -1014,6 +1046,35 @@ pub(crate) fn sub_celebration_event(
             ..sub_event_details(&ev)
         },
     }
+}
+
+/// The chat line under a Kicks gift that carries a message, Twitch-cheer style.
+/// The gift frame has only the sender's name color, no badges.
+fn kicks_message(
+    channel: &str,
+    sub_badges: &[SubscriberBadge],
+    ev: KicksGiftedEvent,
+) -> Option<Box<Message>> {
+    let content = ev.message.filter(|m| !m.trim().is_empty())?;
+    Some(Box::new(build_message(
+        channel,
+        sub_badges,
+        KickChatMessage {
+            id: ev.gift_transaction_id,
+            content,
+            created_at: ev.created_at,
+            sender: crate::builder::Sender {
+                id: ev.sender.id,
+                username: ev.sender.username,
+                identity: crate::builder::Identity {
+                    color: ev.sender.username_color,
+                    ..Default::default()
+                },
+            },
+            metadata: None,
+            thread_parent_id: None,
+        },
+    )))
 }
 
 /// "gifter gifted N subscriptions to a, b, and c. They've gifted T in total."
@@ -1353,14 +1414,26 @@ mod tests {
 
     #[test]
     fn kicks_text_names_gift_and_amount() {
-        let ev = KicksGiftedEvent {
-            sender: user("alice"),
-            gift: KicksGift {
-                name: "Rocket".into(),
-                amount: 100,
-            },
-        };
+        let ev: KicksGiftedEvent = serde_json::from_str(
+            r#"{"sender":{"id":1,"username":"alice"},"gift":{"name":"Rocket","amount":100}}"#,
+        )
+        .unwrap();
         assert_eq!(kicks_event_text(&ev), "alice gifted Rocket (100 Kicks).");
+        // A basic gift carries no message, so no chat line is attached.
+        assert!(kicks_message("chan", &[], ev).is_none());
+    }
+
+    #[test]
+    fn kicks_gift_message_becomes_chat_line() {
+        // Trimmed from a live capture of a message-carrying (LEVEL_UP) gift.
+        let data = r##"{"gift_transaction_id":"416c7512","message":"gg [emote:42:KEKW]","sender":{"id":8941000,"username":"Daalj","username_color":"#E9113C","profile_picture":"https://x/p.webp"},"gift":{"gift_id":"rage_quit","name":"Rage Quit","amount":500,"type":"LEVEL_UP","tier":"MID","character_limit":150,"pinned_time":600000000000},"created_at":"2026-11-03T20:28:38.145715556Z","expires_at":"2026-11-03T20:38:38.145715556Z"}"##;
+        let ev: KicksGiftedEvent = serde_json::from_str(data).unwrap();
+        assert_eq!(kicks_event_text(&ev), "Daalj gifted Rage Quit (500 Kicks).");
+        let msg = kicks_message("chan", &[], ev).expect("message attached");
+        assert_eq!(msg.id, "416c7512");
+        assert_eq!(msg.raw_text, "gg [emote:42:KEKW]");
+        assert_eq!(msg.author.display_name, "Daalj");
+        assert!(msg.author.color.is_some());
     }
 
     #[test]

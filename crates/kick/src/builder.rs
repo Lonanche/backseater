@@ -137,12 +137,13 @@ pub struct KickBadge {
     pub count: u64,
 }
 
-/// A `badges_v2` entry — a self-describing badge with its own CDN image, used for
-/// Kick's global "level" badge. We read its image + level straight off the event
-/// (no asset bundling or channel resolution needed).
+/// A `badges_v2` entry — a self-describing badge with its own CDN image (the
+/// global "level" badge, the per-channel `kicks_gifter` tiers, event badges like
+/// `rs_ags_blade`). We read its image straight off the event (no asset bundling
+/// or channel resolution needed).
 #[derive(Deserialize)]
 pub struct KickBadgeV2 {
-    /// e.g. `level`.
+    /// e.g. `level`, `kicks_gifter`.
     #[serde(default)]
     pub name: String,
     /// The badge's CDN image, ready to render as-is.
@@ -150,6 +151,12 @@ pub struct KickBadgeV2 {
     pub image_url: String,
     #[serde(default)]
     pub metadata: KickBadgeMetadata,
+    /// Whether the chatter chose to display it: kick.com hides unselected ones
+    /// (verified live against its chat). Absent = shown.
+    #[serde(default)]
+    pub selected: Option<bool>,
+    #[serde(default)]
+    pub sort_order: i64,
 }
 
 #[derive(Deserialize, Default)]
@@ -255,12 +262,14 @@ fn title_case(s: &str) -> String {
         .join(" ")
 }
 
-/// Builds the chatter's full badge list from their identity. The `badges_v2`
-/// entries (Kick's global "level" badge, which carries its own CDN image) come
-/// first — that matches Kick's own display order (level `sort_order` 1 precedes
-/// the inline subscriber/vip/... badges) — followed by the inline `badges`.
+/// Builds the chatter's full badge list from their identity. The displayed
+/// `badges_v2` entries (each carries its own CDN image) come first in
+/// `sort_order` — that matches Kick's own display order (level 1, kicks gifter 4
+/// precede the inline subscriber/vip/... badges) — followed by the inline `badges`.
 pub fn build_badges(identity: &Identity, sub_badges: &[SubscriberBadge]) -> Vec<Badge> {
-    let level = identity.badges_v2.iter().filter_map(level_badge);
+    let mut v2: Vec<&KickBadgeV2> = identity.badges_v2.iter().collect();
+    v2.sort_by_key(|b| b.sort_order);
+    let v2 = v2.into_iter().filter_map(v2_badge);
     // Kick sends inline badges with no image: subscriber badges get a per-tier
     // image (resolved here from the channel set); the rest keep an empty url for
     // the app to fill from bundled assets.
@@ -287,20 +296,30 @@ pub fn build_badges(identity: &Identity, sub_badges: &[SubscriberBadge]) -> Vec<
             }
         }
     });
-    level.chain(inline).collect()
+    v2.chain(inline).collect()
 }
 
-/// Converts a `badges_v2` level badge into a [`Badge`] with its CDN image and a
-/// "Level N" tooltip. Returns `None` for entries without an image or that aren't
-/// the level badge (the only `badges_v2` kind we render today).
-fn level_badge(b: &KickBadgeV2) -> Option<Badge> {
-    if b.name != "level" || b.image_url.is_empty() {
+/// Converts a displayed `badges_v2` entry into a [`Badge`] with its CDN image.
+/// The level badge reads "Level N"; others title-case their name
+/// (`kicks_gifter` → "Kicks Gifter"). `None` for an unselected or imageless one.
+fn v2_badge(b: &KickBadgeV2) -> Option<Badge> {
+    if b.image_url.is_empty() || b.selected == Some(false) {
         return None;
     }
+    let (id, title) = if b.name == "level" {
+        (
+            format!("level/{}", b.metadata.level),
+            format!("Level {}", b.metadata.level),
+        )
+    } else {
+        // The image distinguishes tiers of one badge (e.g. kicks gifter levels).
+        let tier = b.image_url.rsplit('/').next().unwrap_or_default();
+        (format!("{}/{tier}", b.name), title_case(&b.name))
+    };
     Some(Badge {
-        id: format!("level/{}", b.metadata.level),
+        id,
         url: b.image_url.clone(),
-        title: Some(format!("Level {}", b.metadata.level)),
+        title: Some(title),
     })
 }
 
@@ -470,15 +489,32 @@ mod tests {
     }
 
     #[test]
-    fn non_level_or_imageless_v2_badge_is_skipped() {
+    fn unselected_or_imageless_v2_badge_is_skipped() {
         let identity: Identity = serde_json::from_str(
             r#"{"badges_v2":[
                 {"name":"level","image_url":"","metadata":{"level":3}},
-                {"name":"other","image_url":"https://x/y.png","metadata":{}}
+                {"name":"level","image_url":"https://x/4.png","metadata":{"level":4},"selected":false}
             ]}"#,
         )
         .unwrap();
         assert!(build_badges(&identity, &[]).is_empty());
+    }
+
+    #[test]
+    fn other_v2_badges_render_in_sort_order() {
+        // Real shapes from a live capture: a channel kicks-gifter tier + level.
+        let identity: Identity = serde_json::from_str(
+            r#"{"badges_v2":[
+                {"name":"kicks_gifter","badge_type":"channel","image_url":"https://content.kick.com/public/chat/badges/01a19acb.png","selected":true,"sort_order":4},
+                {"name":"level","badge_type":"global","image_url":"https://x/34.png","metadata":{"level":34},"selected":true,"sort_order":1}
+            ]}"#,
+        )
+        .unwrap();
+        let badges = build_badges(&identity, &[]);
+        assert_eq!(badges.len(), 2);
+        assert_eq!(badges[0].id, "level/34");
+        assert_eq!(badges[1].id, "kicks_gifter/01a19acb.png");
+        assert_eq!(badges[1].title.as_deref(), Some("Kicks Gifter"));
     }
 
     #[test]

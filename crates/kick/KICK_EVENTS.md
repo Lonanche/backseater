@@ -17,7 +17,7 @@ its real payload shape and know why it was skipped.
 | `SubscriptionEvent` | `Event{Sub}` | `{chatroom_id, username, months}`. **No message field** — see resub note below. |
 | `GiftedSubscriptionsEvent` | `Event{Gift}` | `{gifter_username, gifted_usernames[], gifter_total}`. `gifter_username:"Anonymous"` for anon gifts. |
 | `StreamHostEvent` | `Event{Raid}` | Kick's host (its "raid" equivalent). `{host_username, number_viewers}`. |
-| `KicksGifted` | `Event{Bits}` | Kick's bits/cheer. `{sender, gift:{name, amount, ...}}`. |
+| `KicksGifted` | `Event{Bits}` | Kick's bits/cheer. `{gift_transaction_id, sender:{id, username, username_color}, gift:{name, amount, type, tier, character_limit, pinned_time}, message?, created_at, expires_at?}`. Higher tiers (e.g. Rage Quit, `LEVEL_UP`, 150 chars) carry a `message` that kick.com pins in chat until `expires_at` (~10 min); we attach it as the event's chat line (no badges in the frame). |
 | `RewardRedeemedEvent` | `Event{Reward}` | Channel-point redemption. `{reward_title, username, user_input}`. |
 | `UserBannedEvent` | `ClearChat` + `Notice` | `{user, banned_by, permanent, duration?, expires_at?}`. `banned_by.id:0` when the actor id is hidden but name is present. |
 | `UserUnbannedEvent` | `Notice` | `{user, unbanned_by, permanent}`. No un-fade. |
@@ -42,6 +42,10 @@ its real payload shape and know why it was skipped.
 | `KicksLeaderboardUpdated` | Leaderboard not shown; fires alongside every `KicksGifted` | `{gifts_lifetime[], gifts_week[], gifts_month[], *_enabled}` |
 | `ChatMoveToSupportedChannelEvent` | Raid-out redirect (host moving viewers); not acted on | `{channel:{...current_livestream...}, hosted:{username, viewers_count, is_live, ...}}` |
 | `StreamHostedEvent` | Sibling of `StreamHostEvent` (which we do handle) | `{message:{numberOfViewers, optionalMessage}, user:{username}}` |
+| `KicksGiftedDeleted` | Takes a gift message off kick.com's pinned rail. Seen 3–4 min after benign messages, so it's a dismissal, not a mod removal — we keep the row as-is | `{gifted_transaction_id}` (== the gift's `gift_transaction_id`) |
+| `GoalProgressUpdateEvent` | No goal UI (yet); fires on every follow/sub toward an active goal | `{id, channel_id:"channel_…", type:"followers", target_value, current_value, progress_bar_emoji_id, status:"active", achieved_at, end_date}` |
+| `NewSubscriberUpdatedEvent` / `NewActivityFeedEvent` | Sub-count / activity-feed siblings of a sub (on the `channel.X` channel) | `{channel_id, last_subscriber, count}` / `{channel_id, type:"new_subscriber", username, created_at(ms)}` |
+| `EventParticipantJoined` | Kick "event" (e.g. an RP server event) membership | `{event_id, channel_id, slug, title, thumbnail, participant_role}` |
 
 ## The resub-message note (important)
 

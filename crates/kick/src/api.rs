@@ -186,6 +186,9 @@ pub struct ChannelInfo {
     /// The channel's most recent past broadcast (the latest VOD), for the offline
     /// tooltip. `None` when live or when the channel has no VODs.
     pub last_stream: Option<LastStream>,
+    /// The chat restrictions active at join. `ChatroomUpdatedEvent` only fires
+    /// on a change, so this seeds the mode bar.
+    pub chat_modes: bks_platform::ChatModes,
 }
 
 /// A subscriber tier badge: shown once a chatter has been subscribed `months`+.
@@ -225,6 +228,36 @@ struct RawChatroom {
     id: u64,
     #[serde(default)]
     channel_id: u64,
+    #[serde(default)]
+    slow_mode: bool,
+    /// Seconds between one user's messages.
+    #[serde(default)]
+    message_interval: Option<u64>,
+    #[serde(default)]
+    followers_mode: bool,
+    /// Minimum follow age in minutes.
+    #[serde(default)]
+    following_min_duration: Option<u64>,
+    #[serde(default)]
+    subscribers_mode: bool,
+    #[serde(default)]
+    emotes_mode: bool,
+}
+
+impl RawChatroom {
+    fn chat_modes(&self) -> bks_platform::ChatModes {
+        use std::time::Duration;
+        let interval = self.message_interval.unwrap_or(0);
+        bks_platform::ChatModes {
+            emote_only: self.emotes_mode,
+            subscribers_only: self.subscribers_mode,
+            followers_only: self
+                .followers_mode
+                .then(|| Duration::from_secs(self.following_min_duration.unwrap_or(0) * 60)),
+            slow: (self.slow_mode && interval > 0).then(|| Duration::from_secs(interval)),
+            unique: false,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -328,6 +361,7 @@ pub async fn fetch_channel_info(channel: &str) -> anyhow::Result<ChannelInfo> {
     };
 
     Ok(ChannelInfo {
+        chat_modes: raw.chatroom.chat_modes(),
         chatroom_id: raw.chatroom.id,
         user_id: raw.user_id,
         channel_id: raw.chatroom.channel_id,
@@ -714,6 +748,10 @@ mod tests {
         assert_eq!(raw.user_id, 676);
         assert_eq!(raw.chatroom.id, 12);
         assert_eq!(raw.chatroom.channel_id, 668);
+        assert_eq!(
+            raw.chatroom.chat_modes(),
+            bks_platform::ChatModes::default()
+        );
         assert_eq!(raw.subscriber_badges.len(), 2);
         let live = raw.livestream.unwrap();
         assert!(live.is_live);
@@ -738,6 +776,25 @@ mod tests {
         let no_count: serde_json::Value =
             serde_json::from_str(r#"{ "data": { "id": 5, "viewers": null } }"#).unwrap();
         assert_eq!(viewer_count_from(&no_count), None);
+    }
+
+    #[test]
+    fn chatroom_fields_seed_chat_modes() {
+        // Trimmed from a live v2 channel lookup.
+        let raw: RawChatroom = serde_json::from_str(
+            r#"{ "id": 49788994, "channel_id": 50077341, "chat_mode": "public",
+                 "slow_mode": true, "followers_mode": true, "subscribers_mode": false,
+                 "emotes_mode": true, "message_interval": 5, "following_min_duration": 60 }"#,
+        )
+        .unwrap();
+        let modes = raw.chat_modes();
+        assert!(modes.emote_only);
+        assert!(!modes.subscribers_only);
+        assert_eq!(modes.slow, Some(std::time::Duration::from_secs(5)));
+        assert_eq!(
+            modes.followers_only,
+            Some(std::time::Duration::from_secs(3600))
+        );
     }
 
     #[test]

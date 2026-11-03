@@ -68,6 +68,9 @@ platform = implement one trait + one message builder, with zero UI changes**.
 - **Twitch sub/VIP/mod/etc. badges** rendered before the username (no auth — see badge note below).
 - **Kick standard badges** (mod/vip/og/founder/staff/broadcaster/verified/...) rendered before the
   username from bundled images (`crates/app/assets/kick/badges/`).
+  Kick's self-describing `badges_v2` (global level, per-channel `kicks_gifter` tiers, event
+  badges) render from their own `image_url`, in `sort_order`, **only when `selected`** —
+  kick.com hides unselected ones (verified live against its chat; absent = shown).
 - **Kick subscriber badges** (per-tier images) — resolved at channel join from the Cloudflare-fronted
   channels endpoint (fetched in-process via the `wreq` browser-TLS client), then matched to each
   chatter's month count. See the Kick note below.
@@ -379,9 +382,10 @@ platform = implement one trait + one message builder, with zero UI changes**.
   tag (tmi maps missing → `None` = no change); `followers-only` -1/0/N maps to off / zero minimum
   / N minutes, `slow=0` is off; the first ROOMSTATE of each session re-emits unconditionally so a
   mode flipped while disconnected can't leave the bar stale (the store's dedupe eats the no-op
-  case). **Kick later**: emit `ChatModes` from the Pusher `ChatroomUpdatedEvent`
-  (slow/subscribers/followers/emotes modes; currently in the ignored bucket) + seed from the
-  channel lookup's `chatroom` fields — zero UI changes needed. Durations format via
+  case). **Kick** emits `ChatModes` from the Pusher `ChatroomUpdatedEvent` (changes only) and
+  seeds the join state from the channel lookup's `chatroom` fields (`slow_mode` +
+  `message_interval` secs, `followers_mode` + `following_min_duration` mins, `emotes_mode`,
+  `subscribers_mode` — `api.rs::RawChatroom::chat_modes`), re-sent on every reconnect. Durations format via
   `bks_core::format_duration` (compact "1h30m", the inverse of `parse_duration`).
 - **Dark + light + custom themes**, switched live in the Appearance/Themes settings tabs
   (persisted in `settings.json`). The kit chrome switches via `gpui_component::Theme::change`; the chat
