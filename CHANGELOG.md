@@ -3,6 +3,15 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.7.6
+
+### Features
+
+- Twitch shared chat: messages relayed from another channel in the session now
+  show that channel's avatar before the line (hover it to see which channel),
+  like on twitch.tv. Their badges are the chatter's badges in that channel, so
+  subscriber badges show the right channel's images.
+
 ## v0.7.5
 
 ### Features
