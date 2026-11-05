@@ -65,6 +65,20 @@ platform = implement one trait + one message builder, with zero UI changes**.
   the text baseline and the image centers), and icons/badges sit in `render::image_line_box`, which
   centers the image on the text's *optical* center (baseline − cap/2, rounded to whole px —
   geometric `items_center` sat images ~1px off the glyphs and on fractional pixels).
+- **Shared chat source icon + badges (Twitch)**: a PRIVMSG whose `source-room-id` differs from
+  `room-id` (relayed from another channel in a shared-chat session) gets `Message::source`
+  (`bks_core::MessageSource { id }`) and takes its badges from `source-badges` (the chatter's
+  standing *there*). Rendered as the source channel's round avatar after the timestamp, before
+  badges, with a "Sent from X's chat" tooltip (`render::source_badge`; a neutral dot until
+  loaded). ⚠️ **Messages never wait for the lookup**: the bridge forwards them immediately and a
+  per-tab `bridge.rs::SourceQueue` calls `bks_twitch::load_shared_source` (IVR `/v2/twitch/user?id=`
+  for name/avatar + GQL `fetch_badges` by that login; process-wide cache, one shared in-flight
+  fetch, 5-min retry for failed/badge-less lookups — `twitch/src/shared_chat.rs`). When it lands,
+  `ChatEvent::SourceResolved` → `RowChange::Source` re-measures that channel's rows; render reads
+  the cache via the non-blocking `bks_twitch::shared_source(id)` and resolves the relayed badges
+  there (`SharedSource::resolve_badges`; none shown until loaded, so never the wrong channel's).
+  `bridge.rs::resolve_badges` skips relayed messages, and the usercard ignores their roles
+  (source-channel mod ≠ mod here).
 - **Twitch sub/VIP/mod/etc. badges** rendered before the username (no auth — see badge note below).
 - **Kick standard badges** (mod/vip/og/founder/staff/broadcaster/verified/...) rendered before the
   username from bundled images (`crates/app/assets/kick/badges/`).

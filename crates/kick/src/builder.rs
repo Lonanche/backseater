@@ -397,6 +397,7 @@ pub fn build_message(
         highlighted: false,
         historical: false,
         reward_id: None,
+        source: None,
     }
 }
 

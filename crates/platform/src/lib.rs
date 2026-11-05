@@ -315,6 +315,13 @@ pub enum ChatEvent {
         paint: Option<NamePaint>,
         badge: Option<Badge>,
     },
+    /// A shared-chat source channel's info (avatar, badge set) finished loading.
+    /// Relayed messages are shown before it's ready; this tells the UI to
+    /// re-render the rows whose `Message::source` is `source_id`.
+    SourceResolved {
+        platform: Platform,
+        source_id: String,
+    },
     /// A stream went live or offline. Twitch emits this on a transition from the
     /// bridge's live-status poll; Kick emits it from its Pusher
     /// `StreamerIsLive`/`StopStreamBroadcast` events (and an initial seed on join).

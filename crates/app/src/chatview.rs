@@ -2960,7 +2960,11 @@ impl ChatView {
             msg.platform,
             msg.author.color.map(bks_core::Color::to_u32),
         );
-        card.set_roles_from_badges(&msg.author.badges);
+        // A relayed shared-chat message carries the chatter's roles in the
+        // *source* channel, not this one.
+        if msg.source.is_none() {
+            card.set_roles_from_badges(&msg.author.badges);
+        }
         self.show_usercard(card, cx);
     }
 
@@ -5774,6 +5778,7 @@ mod tests {
                 highlighted: false,
                 historical,
                 reward_id: None,
+                source: None,
             }),
         }
     }

@@ -766,6 +766,43 @@ fn platform_badge(platform: Platform, scale: Scale) -> gpui::Div {
     }
 }
 
+/// The shared-chat source channel's avatar (Twitch shared chat relays messages
+/// from the other channels in the session), round and badge-sized like
+/// twitch.tv's. Hovering names the channel. Before the lookup resolves (or if it
+/// failed) a neutral dot holds the slot so the row still reads as relayed.
+fn source_badge(
+    source: Option<&bks_twitch::SharedSource>,
+    row_id: &str,
+    scale: Scale,
+) -> gpui::AnyElement {
+    let size = px(scale.badge);
+    let icon_url = source.map_or("", |s| s.icon_url.as_str());
+    let name = source.map_or("", |s| s.name.as_str());
+    let icon = if icon_url.is_empty() {
+        div()
+            .size(size)
+            .rounded_full()
+            .bg(rgb(palette().timestamp))
+            .into_any_element()
+    } else {
+        img(SharedString::from(icon_url.to_string()))
+            .size(size)
+            .rounded_full()
+            .into_any_element()
+    };
+    let tip = SharedString::from(if name.is_empty() {
+        "Sent from another channel (shared chat)".to_string()
+    } else {
+        format!("Sent from {name}'s chat")
+    });
+    image_line_box(scale, scale.badge)
+        .id(SharedString::from(format!("{row_id}-source")))
+        .mr_1()
+        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+        .child(icon)
+        .into_any_element()
+}
+
 /// Height of the large emote/badge preview image shown at the top of a hover
 /// tooltip. Fixed (not font-scaled) — it's a popover, not a
 /// row item.
@@ -1807,36 +1844,50 @@ pub fn render_message(
 
     // Author badges (subscriber/VIP/mod/...), each a small CDN image. The bridge
     // fills these in with resolved URLs; unresolved ones were already dropped.
-    let author_badges: Vec<gpui::AnyElement> = resolved_badges(&msg.author, cosmetics)
-        .enumerate()
-        .map(|(i, badge)| {
-            let image = animated_img(ids.badge(i), badge.url.clone(), px(scale.badge));
-            // Twitch fills the badge title; Kick leaves it None (no tooltip yet).
-            // When present, hovering shows a larger preview + the title.
-            let tip = badge.title.clone().map(|title| {
-                (
-                    SharedString::from(badge.url.clone()),
-                    SharedString::from(title),
-                )
-            });
-            image_line_box(scale, scale.badge)
-                .id(ids.badge(i))
-                .mr_1()
-                .when_some(tip, |b, (url, title)| {
-                    b.tooltip(move |window, cx| {
-                        image_tooltip(
-                            url.clone(),
-                            title.clone(),
-                            TOOLTIP_BADGE_PREVIEW_HEIGHT,
-                            window,
-                            cx,
-                        )
+    // A relayed shared-chat message's badges belong to its source channel and
+    // resolve against that channel's set once it has loaded (none until then).
+    let shared_source = msg
+        .source
+        .as_ref()
+        .and_then(|source| bks_twitch::shared_source(&source.id));
+    let relayed_author = msg.source.as_ref().map(|_| Author {
+        badges: shared_source
+            .as_ref()
+            .map(|source| source.resolve_badges(&msg.author.badges))
+            .unwrap_or_default(),
+        ..msg.author.clone()
+    });
+    let author_badges: Vec<gpui::AnyElement> =
+        resolved_badges(relayed_author.as_ref().unwrap_or(&msg.author), cosmetics)
+            .enumerate()
+            .map(|(i, badge)| {
+                let image = animated_img(ids.badge(i), badge.url.clone(), px(scale.badge));
+                // Twitch fills the badge title; Kick leaves it None (no tooltip yet).
+                // When present, hovering shows a larger preview + the title.
+                let tip = badge.title.clone().map(|title| {
+                    (
+                        SharedString::from(badge.url.clone()),
+                        SharedString::from(title),
+                    )
+                });
+                image_line_box(scale, scale.badge)
+                    .id(ids.badge(i))
+                    .mr_1()
+                    .when_some(tip, |b, (url, title)| {
+                        b.tooltip(move |window, cx| {
+                            image_tooltip(
+                                url.clone(),
+                                title.clone(),
+                                TOOLTIP_BADGE_PREVIEW_HEIGHT,
+                                window,
+                                cx,
+                            )
+                        })
                     })
-                })
-                .child(image)
-                .into_any_element()
-        })
-        .collect();
+                    .child(image)
+                    .into_any_element()
+            })
+            .collect();
 
     // The left-side moderation-button strip. The view supplies the context only
     // when the strip should show on this row (visibility mode + hover tracking
@@ -1874,6 +1925,11 @@ pub fn render_message(
                     .child(time),
             )
         })
+        .children(
+            msg.source
+                .as_ref()
+                .map(|_| source_badge(shared_source.as_deref(), &msg.id, scale)),
+        )
         .children(author_badges)
         .children(tokens);
 

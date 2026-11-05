@@ -530,6 +530,7 @@ pub async fn run_twitch(
     let mut badges = BadgeMap::default();
     // Recent authors are deduplicated here; results are also process-cached.
     let mut cosmetics = CosmeticsQueue::new(tx.clone());
+    let mut sources = SourceQueue::new(tx.clone());
 
     let mut stream = match source.join(&channel).await {
         Ok(stream) => stream,
@@ -679,6 +680,7 @@ pub async fn run_twitch(
                     &badges,
                     raw_history,
                     &mut cosmetics,
+                    &mut sources,
                     &tx,
                 )
                 .await;
@@ -686,6 +688,7 @@ pub async fn run_twitch(
             }
             ChatEvent::Message(mut msg) => {
                 resolve_message(&mut msg, &registry, &badges);
+                sources.enqueue(&msg);
                 cosmetics.enqueue(&msg.author.user_id, msg.platform);
                 ChatEvent::Message(msg)
             }
@@ -845,6 +848,70 @@ impl Drop for CosmeticsQueue {
     }
 }
 
+/// Background loads of shared-chat source channels (avatar + badge set).
+/// Relayed messages are forwarded immediately; when a source finishes loading
+/// a `SourceResolved` tells the UI to re-render that channel's rows. The load
+/// itself is shared process-wide, so tabs on the same session fetch it once.
+struct SourceQueue {
+    sink: Sink,
+    pending: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl SourceQueue {
+    fn new(sink: Sink) -> Self {
+        Self {
+            sink,
+            pending: Default::default(),
+            tasks: Vec::new(),
+        }
+    }
+
+    fn enqueue(&mut self, msg: &bks_core::Message) {
+        let Some(source) = &msg.source else {
+            return;
+        };
+        if bks_twitch::shared_source(&source.id).is_some() {
+            return;
+        }
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if !pending.insert(source.id.clone()) {
+            return;
+        }
+        drop(pending);
+        self.tasks.retain(|task| !task.is_finished());
+        let (sink, pending, id, platform) = (
+            self.sink.clone(),
+            self.pending.clone(),
+            source.id.clone(),
+            msg.platform,
+        );
+        self.tasks.push(runtime().spawn(async move {
+            let loaded = bks_twitch::load_shared_source(&id).await;
+            pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
+            if loaded {
+                let _ = sink
+                    .send(ChatEvent::SourceResolved {
+                        platform,
+                        source_id: id,
+                    })
+                    .await;
+            }
+        }));
+    }
+}
+
+impl Drop for SourceQueue {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
 /// Applies 3rd-party emotes + badge images to a message (live or history).
 fn resolve_message(msg: &mut bks_core::Message, registry: &EmoteRegistry, badges: &BadgeMap) {
     if !registry.is_empty() {
@@ -868,6 +935,7 @@ async fn emit_history(
     badges: &BadgeMap,
     raw_history: anyhow::Result<Vec<ChatEvent>>,
     cosmetics: &mut CosmeticsQueue,
+    sources: &mut SourceQueue,
     tx: &Sink,
 ) {
     let events = match raw_history {
@@ -888,6 +956,7 @@ async fn emit_history(
         // lookup per distinct backlog author.
         if let ChatEvent::Message(msg) = &event {
             cosmetics.enqueue(&msg.author.user_id, msg.platform);
+            sources.enqueue(msg);
         }
         if tx.send(event).await.is_err() {
             break; // UI side dropped the receiver.
@@ -978,7 +1047,12 @@ async fn load_badges(channel: &str) -> BadgeMap {
 
 /// Fills in each badge's image URL from the map (the connector leaves it empty,
 /// storing only the `set/version` id), dropping badges with no known image.
+/// A shared-chat message's badges belong to its source channel and were
+/// already resolved against that channel's set, so it's skipped.
 fn resolve_badges(msg: &mut bks_core::Message, badges: &BadgeMap) {
+    if msg.source.is_some() {
+        return;
+    }
     if badges.is_empty() {
         msg.author.badges.clear();
         return;
@@ -1327,6 +1401,7 @@ mod shared_source_tests {
             highlighted: false,
             historical: false,
             reward_id: None,
+            source: None,
         }))
     }
 

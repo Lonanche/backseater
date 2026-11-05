@@ -383,6 +383,7 @@ fn pin_event(data: PinData) -> Option<ChatEvent> {
         highlighted: false,
         historical: false,
         reward_id: None,
+        source: None,
     };
     Some(ChatEvent::PinMessage {
         platform: Platform::Twitch,
