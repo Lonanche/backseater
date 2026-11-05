@@ -381,6 +381,19 @@ pub struct Message {
     /// messages and non-Twitch platforms.
     #[serde(default)]
     pub reward_id: Option<String>,
+    /// Set when the message was relayed from another channel (Twitch shared
+    /// chat): the UI shows that channel's avatar before the line, like the
+    /// native client. `None` for messages sent in the channel itself.
+    #[serde(default)]
+    pub source: Option<MessageSource>,
+}
+
+/// The channel a relayed message was originally sent in (Twitch shared chat),
+/// by platform channel id. Its name/avatar are looked up separately and drawn
+/// at render time, so the message never waits for them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageSource {
+    pub id: String,
 }
 
 impl Message {

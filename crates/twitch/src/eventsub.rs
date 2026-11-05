@@ -556,6 +556,7 @@ fn suspicious_message(event: &Value, now: DateTime<Utc>) -> Option<ChatEvent> {
         highlighted: false,
         historical: false,
         reward_id: None,
+        source: None,
     };
     Some(ChatEvent::Suspicious {
         platform: Platform::Twitch,

@@ -109,6 +109,10 @@ fn history_url(
 fn parse_history_line(channel: &str, line: &str, historical: bool) -> Option<ChatEvent> {
     let irc = IrcMessageRef::parse(line)?;
     let raw_gifs = irc.tag("gifs").unwrap_or_default();
+    let shared = crate::shared_chat::SharedChatTags {
+        room_id: irc.tag("source-room-id"),
+        badges: irc.tag("source-badges"),
+    };
     // `msg-param-value` (the watch-streak length) is dropped by tmi's parse, so
     // read it off the raw line before `from_irc` consumes it — same value the
     // live loop reads.
@@ -127,7 +131,7 @@ fn parse_history_line(channel: &str, line: &str, historical: bool) -> Option<Cha
             // privmsg_to_message) is kept, though: unlike an ephemeral event row,
             // a highlighted message is a real chat line that stays highlighted in
             // scrollback (Twitch web keeps it too).
-            let mut msg = privmsg_to_message(channel, &pm, false, raw_gifs);
+            let mut msg = privmsg_to_message(channel, &pm, false, raw_gifs, shared);
             msg.historical = historical;
             Some(crate::cheers::privmsg_event(msg, irc.tag("bits")))
         }

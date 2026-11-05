@@ -15,6 +15,7 @@ mod irc_manager;
 mod ivr;
 mod preview;
 mod pubsub;
+mod shared_chat;
 mod videos;
 mod viewers;
 
@@ -29,6 +30,7 @@ pub use history::{fetch_gap, fetch_recent};
 pub use ivr::{fetch_live_status, LiveStatus, SubAge};
 pub use preview::TwitchClipPreviewProvider;
 pub use pubsub::run as run_pubsub;
+pub use shared_chat::{load_shared_source, shared_source, SharedSource};
 pub use videos::fetch_last_stream;
 pub use viewers::fetch_viewer_count;
 

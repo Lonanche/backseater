@@ -357,6 +357,7 @@ fn chat_message(ix: usize) -> Box<Message> {
         highlighted: false,
         historical: false,
         reward_id: None,
+        source: None,
     })
 }
 

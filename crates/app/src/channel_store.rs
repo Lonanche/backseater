@@ -216,6 +216,8 @@ pub enum RowChange {
     All,
     Message(Platform, String),
     Author(Platform, String),
+    /// Relayed (shared-chat) messages from one source channel.
+    Source(Platform, String),
 }
 
 impl RowChange {
@@ -233,6 +235,9 @@ impl RowChange {
             Self::All => true,
             Self::Message(platform, id) => *platform == msg.platform && *id == msg.id,
             Self::Author(platform, id) => *platform == msg.platform && *id == msg.author.user_id,
+            Self::Source(platform, id) => {
+                *platform == msg.platform && msg.source.as_ref().is_some_and(|s| s.id == *id)
+            }
         }
     }
 }
@@ -1206,6 +1211,14 @@ impl ChannelModel {
                 );
                 cx.emit(ChannelEvent::RowsChanged(RowChange::Author(
                     platform, user_id,
+                )));
+            }
+            ChatEvent::SourceResolved {
+                platform,
+                source_id,
+            } => {
+                cx.emit(ChannelEvent::RowsChanged(RowChange::Source(
+                    platform, source_id,
                 )));
             }
             ChatEvent::Channel(_) => {}

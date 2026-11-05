@@ -154,6 +154,7 @@ fn message(
         highlighted: false,
         historical,
         reward_id: None,
+        source: None,
     })
 }
 

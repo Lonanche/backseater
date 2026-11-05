@@ -154,6 +154,7 @@ mod tests {
             highlighted: false,
             historical: false,
             reward_id: None,
+            source: None,
         })
     }
 

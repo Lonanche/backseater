@@ -590,6 +590,10 @@ async fn handle_read(
                     &pm,
                     first_message,
                     msg.tag("gifs").unwrap_or_default(),
+                    crate::shared_chat::SharedChatTags {
+                        room_id: msg.tag("source-room-id"),
+                        badges: msg.tag("source-badges"),
+                    },
                 );
                 fan_out(ch, crate::cheers::privmsg_event(message, msg.tag("bits"))).await;
             }

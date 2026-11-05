@@ -188,7 +188,11 @@ impl UserCardView {
         self.card.is_broadcaster = false;
         self.card.is_moderator = false;
         if let Some((_, message)) = self.history.rows.last() {
-            self.card.set_roles_from_badges(&message.author.badges);
+            // A relayed shared-chat message carries the chatter's roles in the
+            // *source* channel, not this one.
+            if message.source.is_none() {
+                self.card.set_roles_from_badges(&message.author.badges);
+            }
         }
         self.timeout_error = None;
         self.warn_error = None;
@@ -298,6 +302,12 @@ impl UserCardView {
                     RowChange::Author(platform, id) => {
                         self.history.rows.iter().any(|(_, message)| {
                             *platform == message.platform && *id == message.author.user_id
+                        })
+                    }
+                    RowChange::Source(platform, id) => {
+                        self.history.rows.iter().any(|(_, message)| {
+                            *platform == message.platform
+                                && message.source.as_ref().is_some_and(|s| s.id == *id)
                         })
                     }
                 };
@@ -910,6 +920,7 @@ mod tests {
             highlighted: false,
             historical,
             reward_id: None,
+            source: None,
         })
     }
 

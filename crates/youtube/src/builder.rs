@@ -95,6 +95,7 @@ fn build_text_message(channel: &str, r: &Value) -> ParsedItem {
         highlighted: false,
         historical: false,
         reward_id: None,
+        source: None,
     }))
 }
 
@@ -171,6 +172,7 @@ fn paid_event(r: &Value, kind: EventKind, with_body: bool) -> ParsedItem {
             highlighted: false,
             historical: false,
             reward_id: None,
+            source: None,
         }))
     };
 
