@@ -39,6 +39,8 @@ pub struct CommandDef {
 
 const TWITCH: &[Platform] = &[Platform::Twitch];
 const TWITCH_KICK: &[Platform] = &[Platform::Twitch, Platform::Kick];
+/// The ban family + delete, which YouTube's Data API covers too.
+const TWITCH_KICK_YOUTUBE: &[Platform] = &[Platform::Twitch, Platform::Kick, Platform::YouTube];
 
 // Named scope slices — every entry below uses one, and the `pub` ones are the
 // single source the ad-hoc UI gates reference too (`ChatView::can_pin`, the
@@ -116,7 +118,7 @@ pub const COMMANDS: &[CommandDef] = &[
         aliases: &[],
         usage: "/ban <user> [reason]",
         description: "Ban a user from chat",
-        platforms: TWITCH_KICK,
+        platforms: TWITCH_KICK_YOUTUBE,
         broadcaster_only: false,
         mod_only: true,
     },
@@ -148,7 +150,7 @@ pub const COMMANDS: &[CommandDef] = &[
         // Twitch = Helix; Kick = public `DELETE /chat/{id}` (needs the
         // moderation:chat_message:manage scope — re-login on older tokens).
         description: "Delete a single message",
-        platforms: TWITCH_KICK,
+        platforms: TWITCH_KICK_YOUTUBE,
         broadcaster_only: false,
         mod_only: true,
     },
@@ -288,7 +290,7 @@ pub const COMMANDS: &[CommandDef] = &[
         aliases: &[],
         usage: "/timeout <user> <duration> [reason]",
         description: "Time a user out (600, 30m, 1h, 3d, 1w)",
-        platforms: TWITCH_KICK,
+        platforms: TWITCH_KICK_YOUTUBE,
         broadcaster_only: false,
         mod_only: true,
     },
@@ -298,7 +300,7 @@ pub const COMMANDS: &[CommandDef] = &[
         aliases: &["untimeout"],
         usage: "/unban <user>",
         description: "Lift a ban or timeout",
-        platforms: TWITCH_KICK,
+        platforms: TWITCH_KICK_YOUTUBE,
         broadcaster_only: false,
         mod_only: true,
     },
@@ -609,6 +611,8 @@ mod tests {
         // /delete works on both (Kick added the public endpoint); /unpin and
         // /warn are Twitch-only.
         assert!(supported_on("/delete", Platform::Kick));
+        assert!(supported_on("/timeout 600", Platform::YouTube));
+        assert!(!supported_on("/warn {user} spam", Platform::YouTube));
         assert!(!supported_on("/unpin", Platform::Kick));
         assert!(!supported_on("/warn {user} spam", Platform::Kick));
         assert!(supported_on("/warn {user} spam", Platform::Twitch));

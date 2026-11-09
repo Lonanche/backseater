@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Privacy policy — Backseater</title>
+    <meta name="description" content="What the Backseater chat client accesses, stores and shares." />
+    <link rel="icon" href="/icon.png" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <a class="brand" href="/"><img src="/icon.png" alt="" />Backseater</a>
+      <nav>
+        <a href="https://github.com/Lonanche/backseater">GitHub</a>
+        <a href="/privacy">Privacy</a>
+      </nav>
+    </header>
+
+    <main>
+      <h1>Privacy policy</h1>
+      <p class="note">Effective 9 November 2026.</p>
+
+      <p>
+        Backseater is a free, open-source desktop chat client for Windows, made by an independent
+        developer. This policy covers the Backseater app and this website.
+      </p>
+
+      <h2>The short version</h2>
+      <ul>
+        <li>There is no Backseater account, and the app has no analytics, telemetry or ads.</li>
+        <li>The app talks directly from your computer to the chat platforms you use.</li>
+        <li>Logins are stored only on your computer and are never sent to the developer.</li>
+        <li>Nothing is sold or shared with anyone.</li>
+      </ul>
+
+      <h2>What the app stores on your computer</h2>
+      <ul>
+        <li>
+          <strong>Logins.</strong> If you log in to Twitch, Kick or YouTube, the access tokens and
+          your account name and id are saved in Windows Credential Manager. Your password is never
+          seen by the app: you sign in on the platform's own page in your browser.
+        </li>
+        <li><strong>Settings and tabs.</strong> Your preferences, tab list, highlight and ignore terms.</li>
+        <li><strong>An image cache.</strong> Emote and badge images, so they load quickly.</li>
+      </ul>
+      <p>
+        Chat messages are kept in memory while the app runs and are not saved to disk. Logging out
+        deletes that login from your computer. Settings stay in the app's folder under
+        <code>%APPDATA%ackseater</code> until you delete it.
+      </p>
+
+      <h2>What the app connects to</h2>
+      <p>
+        To show and send chat, the app connects from your computer to the services you choose to
+        use. Each of them sees your IP address and handles your data under its own privacy policy.
+      </p>
+      <ul>
+        <li><strong>Chat platforms:</strong> Twitch, Kick, YouTube and TikTok.</li>
+        <li><strong>Emote services:</strong> 7TV, BetterTTV and FrankerFaceZ.</li>
+        <li>
+          <strong>Twitch helper services:</strong> api.ivr.fi (public channel info) and
+          recent-messages.robotty.de (recent chat history when you open a Twitch channel).
+        </li>
+        <li><strong>GitHub:</strong> to check for and download app updates.</li>
+        <li>
+          <strong>Link previews:</strong> if enabled, the app fetches the title and thumbnail of
+          YouTube, Twitch and Kick links posted in chat.
+        </li>
+      </ul>
+
+      <h2>Kick login</h2>
+      <p>
+        Kick requires a server to complete its login. When you log in to Kick, the one-time login
+        code, and later your refresh token, pass through a small service run by the developer on
+        Cloudflare. It exchanges them with Kick and returns the result to your app. It stores
+        nothing and logs nothing.
+      </p>
+
+      <h2>YouTube and Google</h2>
+      <p>
+        Reading YouTube chat needs no login. If you choose to log in to YouTube, Backseater uses
+        <strong>YouTube API Services</strong> to act on your behalf. By using these features you
+        agree to be bound by the
+        <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a>, and your data is
+        also covered by the
+        <a href="https://www.google.com/policies/privacy">Google Privacy Policy</a>.
+      </p>
+      <p>What Backseater does with your YouTube account:</p>
+      <ul>
+        <li>Reads your channel's id and name, to show which account is logged in and recognise your own messages.</li>
+        <li>Sends live chat messages you type.</li>
+        <li>Deletes live chat messages, and times out, bans or unbans users, when you ask it to in a chat you own or moderate.</li>
+      </ul>
+      <p>
+        Google's permission screen describes this access more broadly ("see, edit and permanently
+        delete your YouTube videos, ratings, comments and captions") because YouTube offers no
+        narrower permission for live chat. Backseater does not read, change or delete your videos,
+        ratings, comments or captions.
+      </p>
+      <p>
+        Your Google access tokens, channel id and channel name are stored only in Windows
+        Credential Manager on your computer. They are sent only to Google. They are never sent to
+        the developer or any third party, and are not used for advertising.
+      </p>
+      <p>
+        Backseater's use and transfer of information received from Google APIs adheres to the
+        <a href="https://developers.google.com/terms/api-services-user-data-policy"
+          >Google API Services User Data Policy</a
+        >, including the Limited Use requirements.
+      </p>
+      <p>To remove Backseater's access:</p>
+      <ul>
+        <li>In the app, open Settings &rarr; Account and log out of YouTube. This deletes the stored tokens and revokes them with Google.</li>
+        <li>
+          Or remove it in your Google account at
+          <a href="https://security.google.com/settings/security/permissions"
+            >security.google.com/settings/security/permissions</a
+          >.
+        </li>
+      </ul>
+
+      <h2>This website</h2>
+      <p>
+        This site sets no cookies and uses no analytics. It is hosted on Cloudflare, which
+        processes standard request data such as IP addresses to deliver and protect the site.
+      </p>
+
+      <h2>Children</h2>
+      <p>Backseater is not directed at children under 13.</p>
+
+      <h2>Changes</h2>
+      <p>If this policy changes, the new version will be posted here with a new effective date.</p>
+
+      <h2>Contact</h2>
+      <p>
+        Questions or requests: <a href="mailto:lonanche@gmail.com">lonanche@gmail.com</a>, or open
+        an issue on <a href="https://github.com/Lonanche/backseater/issues">GitHub</a>.
+      </p>
+    </main>
+
+    <footer>
+      Backseater is an independent project and is not affiliated with or endorsed by Twitch, Kick,
+      YouTube, Google or TikTok. &middot; <a href="/">Home</a>
+    </footer>
+  </body>
+</html>

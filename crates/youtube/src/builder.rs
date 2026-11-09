@@ -423,6 +423,24 @@ fn author_badges(r: &Value) -> Vec<AuthorBadge> {
         .collect()
 }
 
+/// The author's moderator/owner standing from a chat item's icon-only badges
+/// (`icon.iconType` MODERATOR / OWNER) — not rendered (no art), but it's how
+/// the app learns whether the logged-in account moderates a chat.
+pub(crate) fn item_author_roles(item: &Value) -> crate::seen::AuthorRoles {
+    let mut roles = crate::seen::AuthorRoles::default();
+    let Some((_, r)) = item.as_object().and_then(|o| o.iter().next()) else {
+        return roles;
+    };
+    for b in r["authorBadges"].as_array().into_iter().flatten() {
+        match b["liveChatAuthorBadgeRenderer"]["icon"]["iconType"].as_str() {
+            Some("MODERATOR") => roles.moderator = true,
+            Some("OWNER") => roles.owner = true,
+            _ => {}
+        }
+    }
+    roles
+}
+
 /// The name color from `authorNameTextColor` (an ARGB int YouTube sends), if set.
 fn author_name_color(r: &Value) -> Option<Color> {
     let argb = r.get("authorNameTextColor")?.as_i64()?;

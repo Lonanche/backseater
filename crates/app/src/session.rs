@@ -1,6 +1,6 @@
 //! App-wide login, the single source of truth for auth — and observable.
 //!
-//! There is one Twitch login and one Kick login for the whole app. Login state is
+//! There is one Twitch, one Kick and one YouTube login for the whole app. Login state is
 //! owned *only* here and mutated *only* through these methods, callable from
 //! anywhere (a tab command today, a settings screen or a token-refresh task
 //! later). Tabs never own or assume auth; they **observe** it.
@@ -21,6 +21,7 @@ use bks_auth::twitch::ScopeChoice;
 use bks_kick::KickActions;
 use bks_platform::ChatEvent;
 use bks_twitch::{EventsubAuth, TwitchActions, TwitchAuth, TwitchSource};
+use bks_youtube::YoutubeActions;
 use tokio::runtime::Handle;
 use tokio::sync::{watch, Mutex};
 
@@ -69,6 +70,11 @@ pub fn twitch_scope_missing(required: &[&str]) -> bool {
 pub struct LoginState {
     pub twitch: Option<String>,
     pub kick: Option<String>,
+    /// The YouTube channel title, when logged in.
+    pub youtube: Option<String>,
+    /// The logged-in YouTube account's own channel id (`UC…`) — matched against
+    /// chat authors to learn whether the account moderates a chat.
+    pub youtube_channel_id: Option<String>,
     pub twitch_generation: u64,
 }
 
@@ -81,6 +87,11 @@ impl LoginState {
     /// Whether Kick is logged in.
     pub fn kick(&self) -> bool {
         self.kick.is_some()
+    }
+
+    /// Whether YouTube is logged in.
+    pub fn youtube(&self) -> bool {
+        self.youtube.is_some()
     }
 }
 
@@ -97,6 +108,9 @@ struct State {
     twitch_eventsub: Option<EventsubAuth>,
     kick_actions: Option<Arc<KickActions>>,
     kick_login: Option<String>,
+    youtube_actions: Option<Arc<YoutubeActions>>,
+    /// (channel title, channel id) of the YouTube login.
+    youtube_account: Option<(String, String)>,
 }
 
 impl State {
@@ -104,6 +118,8 @@ impl State {
         LoginState {
             twitch: self.twitch_auth.as_ref().map(|a| a.login.clone()),
             kick: self.kick_login.clone(),
+            youtube: self.youtube_account.as_ref().map(|(name, _)| name.clone()),
+            youtube_channel_id: self.youtube_account.as_ref().map(|(_, id)| id.clone()),
             twitch_generation: self.twitch_generation,
         }
     }
@@ -160,6 +176,10 @@ impl Session {
             state.kick_actions = Some(Arc::new(kick_actions(&creds)));
             state.kick_login = Some(creds.username);
         }
+        if let Ok(Some(creds)) = bks_auth::youtube::load() {
+            state.youtube_actions = Some(Arc::new(youtube_actions(&creds)));
+            state.youtube_account = Some((creds.channel_title, creds.channel_id));
+        }
 
         let (changes, _) = watch::channel(state.snapshot());
         let session = Self {
@@ -214,6 +234,70 @@ impl Session {
 
     pub fn kick_logged_in(&self) -> bool {
         self.changes.borrow().kick()
+    }
+
+    pub async fn youtube_actions(&self) -> Option<Arc<YoutubeActions>> {
+        self.state.lock().await.youtube_actions.clone()
+    }
+
+    pub fn youtube_logged_in(&self) -> bool {
+        self.changes.borrow().youtube()
+    }
+
+    /// Runs the Google login in the browser with the configured client (see
+    /// `bks_auth::youtube::active_client`), saves, and applies it.
+    pub fn youtube_login(&self, events: Sink) {
+        let this = self.clone();
+        let Some((client, _)) = bks_auth::youtube::active_client() else {
+            let _ = events.try_send(ChatEvent::Error(
+                "YouTube login needs a Google OAuth client — add one in Settings → Account".into(),
+            ));
+            return;
+        };
+        tracing::info!("opening browser for YouTube login");
+        self.rt.spawn(async move {
+            let creds = match bks_auth::youtube::login(client).await {
+                Ok(c) => c,
+                Err(err) => {
+                    let _ = events
+                        .send(ChatEvent::Error(format!("youtube login failed: {err:#}")))
+                        .await;
+                    return;
+                }
+            };
+            if let Err(err) = bks_auth::youtube::save(&creds) {
+                let _ = events
+                    .send(ChatEvent::Error(format!(
+                        "could not save YouTube login: {err:#}"
+                    )))
+                    .await;
+            }
+            let actions = Arc::new(youtube_actions(&creds));
+            {
+                let mut s = this.state.lock().await;
+                s.youtube_actions = Some(actions);
+                s.youtube_account = Some((creds.channel_title.clone(), creds.channel_id));
+            }
+            this.broadcast(&format!("logged in to YouTube as {}", creds.channel_title))
+                .await;
+        });
+    }
+
+    pub fn youtube_logout(&self) {
+        let this = self.clone();
+        let stored = bks_auth::youtube::load().ok().flatten();
+        let _ = bks_auth::youtube::clear();
+        self.rt.spawn(async move {
+            {
+                let mut s = this.state.lock().await;
+                s.youtube_actions = None;
+                s.youtube_account = None;
+            }
+            this.broadcast("logged out of YouTube").await;
+            if let Some(creds) = stored {
+                bks_auth::youtube::revoke(&creds).await;
+            }
+        });
     }
 
     /// The current login snapshot, read synchronously (no await) so the GPUI side
@@ -383,6 +467,32 @@ fn persist_refreshed_kick() -> bks_kick::OnRefreshed {
             _ => tracing::warn!("refreshed Kick token but no stored credentials to update"),
         },
     )
+}
+
+/// Builds [`YoutubeActions`] from saved credentials; a refreshed access token
+/// is merged back into the stored login so it survives a restart.
+fn youtube_actions(creds: &bks_auth::youtube::Credentials) -> YoutubeActions {
+    let actions = YoutubeActions::new(
+        creds.access_token.clone(),
+        creds.refresh_token.clone(),
+        creds.expires_at,
+        creds.client.id.clone(),
+        creds.client.secret.clone(),
+    );
+    actions.set_on_refreshed(Arc::new(
+        |access, refresh, expires_at| match bks_auth::youtube::load() {
+            Ok(Some(mut creds)) => {
+                creds.access_token = access;
+                creds.refresh_token = refresh;
+                creds.expires_at = expires_at;
+                if let Err(err) = bks_auth::youtube::save(&creds) {
+                    tracing::warn!("could not persist refreshed YouTube token: {err:#}");
+                }
+            }
+            _ => tracing::warn!("refreshed YouTube token but no stored credentials to update"),
+        },
+    ));
+    actions
 }
 
 /// A Twitch source for a tab: authenticated if logged in, else anonymous.

@@ -154,8 +154,13 @@ jobs:
           shared-key: release
           cache-on-failure: true
 
+      # The built-in Google OAuth client for YouTube login is compiled in
+      # (bks-auth `option_env!`); unset secrets just mean no built-in client.
       - name: Build release executable
         if: steps.version.outputs.exists == 'false'
+        env:
+          BKS_BUILTIN_YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          BKS_BUILTIN_YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
         run: ./scripts/check.ps1 -Check release
 
       # Assets and the icon are embedded in the exe, so the install payload is

@@ -138,7 +138,7 @@ async fn watch_live_chat(source: &str, video_id: &str, tx: &ChatSink) -> anyhow:
 
     let live_chat_renderer =
         &next["contents"]["twoColumnWatchNextResults"]["conversationBar"]["liveChatRenderer"];
-    let Some(mut continuation) = initial_continuation(live_chat_renderer) else {
+    let Some(continuation) = initial_continuation(live_chat_renderer) else {
         // No live chat continuation → not a live stream (VOD/ended).
         return Ok(Outcome::StreamEnded);
     };
@@ -180,6 +180,22 @@ async fn watch_live_chat(source: &str, video_id: &str, tx: &ChatSink) -> anyhow:
         })
         .await;
 
+    // The send/moderate actions target this video's chat (cleared when the
+    // session ends — `run` re-resolves before the next).
+    crate::seen::set_live_video(source, Some(video_id));
+    let outcome = poll_live_chat(source, video_id, &ctx, continuation, tx).await;
+    crate::seen::set_live_video(source, None);
+    outcome
+}
+
+/// The chat poll loop of one live session (see [`watch_live_chat`]).
+async fn poll_live_chat(
+    source: &str,
+    video_id: &str,
+    ctx: &InnertubeContext,
+    mut continuation: String,
+    tx: &ChatSink,
+) -> anyhow::Result<Outcome> {
     let mut seen: HashSet<String> = HashSet::new();
     // Skip the first page's backlog so we don't dump a wall of old messages on
     // join. History interleaving is handled elsewhere.
@@ -194,7 +210,7 @@ async fn watch_live_chat(source: &str, video_id: &str, tx: &ChatSink) -> anyhow:
         // stay frozen on screen for the rest of the session.
         if tokio::time::Instant::now() >= next_viewer_check {
             next_viewer_check = tokio::time::Instant::now() + VIEWER_POLL;
-            if let Some(fetched) = fetch_viewer_count(&ctx, video_id).await {
+            if let Some(fetched) = fetch_viewer_count(ctx, video_id).await {
                 tracing::debug!("youtube viewer count for {source}: {fetched:?}");
                 if viewers != fetched {
                     viewers = fetched;
@@ -219,6 +235,12 @@ async fn watch_live_chat(source: &str, video_id: &str, tx: &ChatSink) -> anyhow:
 
         if !skip_backlog {
             for action in live_chat["actions"].as_array().into_iter().flatten() {
+                if let Some(event) = moderation_event(action) {
+                    if tx.send(event).await.is_err() {
+                        return Ok(Outcome::Stopped);
+                    }
+                    continue;
+                }
                 let item = &action["addChatItemAction"]["item"];
                 if item.is_null() {
                     continue;
@@ -228,6 +250,9 @@ async fn watch_live_chat(source: &str, video_id: &str, tx: &ChatSink) -> anyhow:
                     continue;
                 }
                 if let Some(event) = item_to_event(source, item) {
+                    if let ChatEvent::Message(msg) = &event {
+                        crate::seen::record(msg, crate::builder::item_author_roles(item));
+                    }
                     if tx.send(event).await.is_err() {
                         return Ok(Outcome::Stopped);
                     }
@@ -254,6 +279,27 @@ async fn watch_live_chat(source: &str, video_id: &str, tx: &ChatSink) -> anyhow:
             return Ok(Outcome::Stopped);
         }
     }
+}
+
+/// A moderation action in the chat feed: one deleted message
+/// (`markChatItemAsDeletedAction`) strikes that row; a ban/timeout
+/// (`markChatItemsByAuthorAsDeletedAction`, which names only the channel id)
+/// strikes the author's messages when we've seen them chat.
+fn moderation_event(action: &Value) -> Option<ChatEvent> {
+    if let Some(id) = action["markChatItemAsDeletedAction"]["targetItemId"].as_str() {
+        return Some(ChatEvent::DeleteMessage {
+            platform: Platform::YouTube,
+            message_id: id.to_string(),
+        });
+    }
+    let channel_id =
+        action["markChatItemsByAuthorAsDeletedAction"]["externalChannelId"].as_str()?;
+    Some(ChatEvent::ClearChat {
+        platform: Platform::YouTube,
+        user: Some(crate::seen::login_for(channel_id)?),
+        historical: false,
+        timestamp: None,
+    })
 }
 
 /// The initial continuation token from the `liveChatRenderer` (its first
@@ -427,6 +473,20 @@ async fn sleep_or_stop(tx: &ChatSink, delay: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleted_item_actions_become_delete_events() {
+        let action: Value = serde_json::from_str(
+            r#"{ "markChatItemAsDeletedAction": { "targetItemId": "ChwKGk" } }"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            moderation_event(&action),
+            Some(ChatEvent::DeleteMessage { message_id, .. }) if message_id == "ChwKGk"
+        ));
+        let add: Value = serde_json::from_str(r#"{ "addChatItemAction": {} }"#).unwrap();
+        assert!(moderation_event(&add).is_none());
+    }
 
     #[test]
     fn viewership_count_parses_watching_now_runs() {

@@ -6,6 +6,7 @@ use gpui::ScrollHandle;
 use gpui_component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::searchable_list::SearchableVec;
+use gpui_component::Disableable as _;
 use gpui_component::IndexPath;
 
 #[cfg(test)]
@@ -61,6 +62,8 @@ enum SettingsInput {
     ModName,
     ModIcon,
     ModCommand,
+    GoogleClientId,
+    GoogleClientSecret,
 }
 
 /// The font-family dropdown's state type: a searchable list of font names.
@@ -101,6 +104,8 @@ struct SettingsInputs {
     mod_name: Entity<InputState>,
     mod_icon: Entity<InputState>,
     mod_command: Entity<InputState>,
+    google_client_id: Entity<InputState>,
+    google_client_secret: Entity<InputState>,
 }
 
 impl SettingsInputs {
@@ -121,6 +126,8 @@ impl SettingsInputs {
             mod_name: settings_input(SettingsInput::ModName, window, cx),
             mod_icon: settings_input(SettingsInput::ModIcon, window, cx),
             mod_command: settings_input(SettingsInput::ModCommand, window, cx),
+            google_client_id: settings_input(SettingsInput::GoogleClientId, window, cx),
+            google_client_secret: settings_input(SettingsInput::GoogleClientSecret, window, cx),
         }
     }
 }
@@ -143,8 +150,15 @@ fn settings_input(which: SettingsInput, window: &mut Window, cx: &mut App) -> En
         SettingsInput::ModName => "Button name (the tooltip)",
         SettingsInput::ModIcon => "Icon — pick below or type text/emoji",
         SettingsInput::ModCommand => "/timeout 1h reason",
+        SettingsInput::GoogleClientId => "Client ID (….apps.googleusercontent.com)",
+        SettingsInput::GoogleClientSecret => "Client secret",
     };
-    cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
+    let masked = matches!(which, SettingsInput::GoogleClientSecret);
+    cx.new(|cx| {
+        InputState::new(window, cx)
+            .placeholder(placeholder)
+            .masked(masked)
+    })
 }
 
 /// The ignore/suppress input placeholder for an add-entry mode. The static
@@ -1303,6 +1317,10 @@ impl SettingsView {
             |c| c.kick_login(),
             |c| c.kick_logout(),
         ));
+        card = card
+            .child(card_divider())
+            .child(self.youtube_account_row(state.youtube, cx))
+            .child(self.google_client_editor(cx));
         v_flex()
             .gap_2()
             .child(section_title("Accounts"))
@@ -1371,6 +1389,139 @@ impl SettingsView {
             cx,
         )
     }
+    /// The YouTube account row. Log in is disabled until a Google OAuth client
+    /// is configured (see [`Self::google_client_editor`]).
+    fn youtube_account_row(
+        &self,
+        account: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let client = bks_auth::youtube::active_client();
+        let status = match (&account, &client) {
+            (Some(name), _) => format!("Logged in as {name} — send, delete, ban (Data API quota)"),
+            (None, Some(_)) => "Not logged in".to_string(),
+            (None, None) => "Not logged in — needs a Google OAuth client (below)".to_string(),
+        };
+        let button = if account.is_some() {
+            Button::new("logout-YouTube")
+                .label("Log out")
+                .small()
+                .danger()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(c) = this.active_controller(cx) {
+                        c.youtube_logout();
+                    }
+                    cx.notify();
+                }))
+        } else {
+            Button::new("login-YouTube")
+                .label("Log in")
+                .small()
+                .primary()
+                .disabled(client.is_none())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(c) = this.active_controller(cx) {
+                        c.youtube_login();
+                    }
+                    cx.notify();
+                }))
+        };
+        self.account_row_shell(
+            bks_core::Platform::YouTube,
+            status,
+            button.into_any_element(),
+            cx,
+        )
+    }
+
+    /// The Google OAuth client YouTube logs in with. Each Google Cloud project
+    /// has its own Data API quota (10,000 units/day ≈ 500 messages or 50 bans),
+    /// so a user's own client keeps their sends off a shared pool. Env vars
+    /// (`BKS_YOUTUBE_CLIENT_ID`/`_SECRET`) take precedence and hide the editor.
+    fn google_client_editor(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use bks_auth::youtube::ClientSource;
+        let muted = cx.theme().muted_foreground;
+        let note = |text: &str| {
+            div()
+                .text_xs()
+                .text_color(muted)
+                .child(SharedString::from(text.to_string()))
+        };
+        let body = match bks_auth::youtube::active_client() {
+            Some((_, ClientSource::Env)) => v_flex().child(note(
+                "Using the Google client from BKS_YOUTUBE_CLIENT_ID / BKS_YOUTUBE_CLIENT_SECRET.",
+            )),
+            Some((client, ClientSource::User)) => v_flex().gap_1().child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().flex_1().min_w_0().child(note(&format!(
+                        "Using your own Google client ({}).",
+                        client.id
+                    ))))
+                    .child(
+                        Button::new("google-client-remove")
+                            .label("Remove")
+                            .small()
+                            .outline()
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                if let Err(err) = bks_auth::youtube::clear_client() {
+                                    tracing::warn!("removing the Google client failed: {err:#}");
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            ),
+            built_in => v_flex()
+                .gap_1p5()
+                .child(note(if built_in.is_some() {
+                    "Optional: use your own Google Cloud project for its own daily quota \
+                     (the built-in one is shared by everyone)."
+                } else {
+                    "Create a Google Cloud project, enable \"YouTube Data API v3\", and add an \
+                     OAuth client of type \"Desktop app\". Its quota is 10,000 units/day \
+                     (about 500 messages or 50 bans)."
+                }))
+                .child(Input::new(&self.settings_inputs.google_client_id).small())
+                .child(Input::new(&self.settings_inputs.google_client_secret).small())
+                .child(
+                    h_flex().justify_end().child(
+                        Button::new("google-client-save")
+                            .label("Save client")
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.save_google_client(window, cx)
+                            })),
+                    ),
+                ),
+        };
+        div().px_3().pb_2p5().child(body).into_any_element()
+    }
+
+    fn save_google_client(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let read = |input: &Entity<InputState>, cx: &Context<Self>| {
+            input.read(cx).value().trim().to_string()
+        };
+        let client = bks_auth::youtube::GoogleClient {
+            id: read(&self.settings_inputs.google_client_id, cx),
+            secret: read(&self.settings_inputs.google_client_secret, cx),
+        };
+        if client.id.is_empty() || client.secret.is_empty() {
+            return;
+        }
+        if let Err(err) = bks_auth::youtube::save_client(&client) {
+            tracing::warn!("saving the Google client failed: {err:#}");
+            return;
+        }
+        for input in [
+            &self.settings_inputs.google_client_id,
+            &self.settings_inputs.google_client_secret,
+        ] {
+            input.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        cx.notify();
+    }
+
     /// The shared account-row layout (platform icon, name + status column, the
     /// action buttons at the right) both platform rows render through, so they
     /// can't drift apart inside the same card.

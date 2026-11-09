@@ -620,11 +620,25 @@ platform = implement one trait + one message builder, with zero UI changes**.
 
 **Not done yet (designed for, not built):**
 - **TikTok send / moderation.** Anonymous read-only chat is implemented in `crates/tiktok`. The locally patched PirateTok source (including the Windows build fix) and update instructions are documented in [vendor/piratetok-live-rs/UPSTREAM.md](vendor/piratetok-live-rs/UPSTREAM.md).
-- **YouTube send / moderation.** Reads are done (anonymous InnerTube, above); sending + ban/timeout/delete
-  need the **Data API v3** (quota-limited: ~2000 reads/day, which is why *reads* use InnerTube) + **Google
-  OAuth** (`youtube.force-ssl`). Google requires a client **secret**, which we won't ship in the binary —
-  so, like Kick, it needs a **broker Worker** to hold the secret plus a Google Cloud OAuth app
-  (we won't ship an obfuscated secret in the binary).
+- **YouTube send / moderation — built, not yet verified live** (no Google client registered yet).
+  Reads stay on anonymous InnerTube; writes use the official **Data API v3** (`bks_youtube::
+  YoutubeActions`: send 20 units, delete 20, ban/timeout/unban 200, `videos.list` chat-id lookup 1;
+  default 10,000 units/day **per Google Cloud project**, shared by every user of that client).
+  Login is Google's desktop **auth-code + PKCE** loopback flow (`bks_auth::youtube`, port 38277,
+  scope `youtube.force-ssl`) — desktop clients are *public*, so no broker. Client resolution:
+  `BKS_YOUTUBE_CLIENT_ID`/`_SECRET` env → a user's own client saved from Settings → Account
+  (keyring `youtube_client`, its own quota) → the built-in client, compiled in via
+  `option_env!("BKS_BUILTIN_YOUTUBE_CLIENT_ID"/"_SECRET")` (CI release builds set them from the
+  `YOUTUBE_CLIENT_ID`/`YOUTUBE_CLIENT_SECRET` repo secrets; a local build has none).
+  The reader maps InnerTube `markChatItemAsDeletedAction` / `markChatItemsByAuthorAsDeletedAction`
+  to `DeleteMessage` / `ClearChat`, so deletes and bans strike rows.
+  ⚠️ Data API message ids ≠ InnerTube ids, so delete re-finds the message via
+  `liveChatMessages.list` by author + timestamp (`bks_youtube::seen` remembers recent messages,
+  login → `UC…` id, and per-chat roles). Unban only works for bans made this session (the ban
+  resource id is only in the insert response). Mod status is inferred: owner id from the reader's
+  channel meta, else MODERATOR/OWNER icon badges on the account's own messages
+  (`bridge.rs::YoutubeModStatus`). YouTube is its own `SendTarget` (never part of Both); replies
+  send as `@name text` (no threads). An unverified Google app is capped at 100 users.
 - BTTV / FFZ emotes on **Kick** (Kick gets 7TV + native only; the seam supports adding them).
 
 ## Architecture

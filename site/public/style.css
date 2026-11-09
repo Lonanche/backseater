@@ -1,0 +1,158 @@
+:root {
+  --bg: #f6f6f8;
+  --surface: #ffffff;
+  --text: #17171c;
+  --muted: #5d5f6b;
+  --border: #dfe0e6;
+  --accent: #6d4aff;
+  --accent-text: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121217;
+    --surface: #1b1b22;
+    --text: #ececf1;
+    --muted: #9c9eab;
+    --border: #2c2c36;
+    --accent: #9179ff;
+    --accent-text: #121217;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+main,
+header,
+footer {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 20px;
+  padding-bottom: 20px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.brand img {
+  width: 32px;
+  height: 32px;
+}
+
+nav a {
+  margin-left: 16px;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+nav a:hover,
+a {
+  color: var(--accent);
+}
+
+.hero {
+  padding: 40px 0 24px;
+  text-align: center;
+}
+
+.hero img {
+  width: 96px;
+  height: 96px;
+}
+
+h1 {
+  margin: 12px 0 8px;
+  font-size: 2rem;
+  line-height: 1.2;
+}
+
+h2 {
+  margin: 36px 0 8px;
+  font-size: 1.2rem;
+}
+
+.lead {
+  margin: 0 auto 24px;
+  max-width: 560px;
+  color: var(--muted);
+  font-size: 1.1rem;
+}
+
+.button {
+  display: inline-block;
+  margin: 4px;
+  padding: 10px 20px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.button.secondary {
+  background: transparent;
+  color: var(--accent);
+}
+
+.note {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.grid li {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.grid strong {
+  display: block;
+  margin-bottom: 2px;
+}
+
+.grid span {
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+footer {
+  margin-top: 48px;
+  padding-top: 20px;
+  padding-bottom: 32px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.9rem;
+}

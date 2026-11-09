@@ -421,10 +421,12 @@ impl TabConfig {
             || !self.tiktok_channel.trim().is_empty()
     }
 
+    /// A tab with no platform we can send to (TikTok-only today).
     pub fn read_only(&self) -> bool {
         self.has_channel()
             && self.twitch_channel.trim().is_empty()
             && self.kick_channel.trim().is_empty()
+            && self.youtube_channel.trim().is_empty()
     }
 
     /// The label to show on the tab: the user's name if set, else the
@@ -517,6 +519,9 @@ mod tests {
         let restored: super::TabConfig = serde_json::from_str(&saved).unwrap();
         assert_eq!(restored.tiktok_channel, config.tiktok_channel);
         config.kick_channel = "another".into();
+        assert!(!config.read_only());
+        config.kick_channel.clear();
+        config.youtube_channel = "@creator".into();
         assert!(!config.read_only());
     }
 

@@ -2138,8 +2138,18 @@ impl ChatView {
                 };
             }
         }
+        // YouTube names aren't unique, so its commands get the author's
+        // channel id (plain-text templates keep the readable name).
+        let by_id = msg.platform == bks_core::Platform::YouTube
+            && template.starts_with('/')
+            && !msg.author.user_id.is_empty();
+        let user = if by_id {
+            &msg.author.user_id
+        } else {
+            &msg.author.login
+        };
         let line = template
-            .replace("{user}", &msg.author.login)
+            .replace("{user}", user)
             .replace("{msg-id}", &msg.id);
         self.controller.handle_input_at(&line, msg.platform);
     }
@@ -3419,8 +3429,7 @@ impl ChatView {
     /// The platform(s) popup candidates are drawn from: the send target
     /// narrowed to this tab's configured channels. When that intersection is
     /// empty (e.g. a Kick-only tab whose default target is Twitch), falls back
-    /// to whatever chat platforms the tab has. YouTube is excluded — we can't
-    /// send there at all.
+    /// to whatever chat platforms the tab has (YouTube only when targeted).
     fn target_platforms(&self) -> Vec<bks_core::Platform> {
         use bks_core::Platform;
         let has_twitch = !self.config.twitch_channel.is_empty();
@@ -3429,6 +3438,9 @@ impl ChatView {
         match self.controller.send_target() {
             controller::SendTarget::Twitch if has_twitch => plats.push(Platform::Twitch),
             controller::SendTarget::Kick if has_kick => plats.push(Platform::Kick),
+            controller::SendTarget::YouTube if !self.config.youtube_channel.is_empty() => {
+                plats.push(Platform::YouTube)
+            }
             controller::SendTarget::Both => {
                 if has_twitch {
                     plats.push(Platform::Twitch);
@@ -3545,6 +3557,7 @@ impl ChatView {
         let set_for = |p: &Platform| -> Vec<&bks_core::Emote> {
             match p {
                 Platform::Kick => model.emotes_kick.iter().collect(),
+                Platform::YouTube => model.emotes_youtube.iter().collect(),
                 _ => model
                     .emotes_twitch
                     .iter()
@@ -3791,14 +3804,10 @@ impl ChatView {
         )
     }
 
-    /// A clickable chip showing/cycling the send target — only when logged into
-    /// Kick and this tab has both a Twitch and a Kick channel (a
-    /// single-platform tab has nothing to switch).
+    /// A clickable chip showing/cycling the send target — only when the tab
+    /// has two or more sendable targets (`Controller::send_targets`).
     fn send_target_toggle(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if !self.controller.kick_logged_in()
-            || !self.controller.has_kick()
-            || !self.controller.has_twitch()
-        {
+        if self.controller.send_targets().len() < 2 {
             return None;
         }
         use bks_core::Platform;
@@ -3807,6 +3816,7 @@ impl ChatView {
         let (platforms, tip): (&[Platform], &str) = match self.controller.send_target() {
             controller::SendTarget::Twitch => (&[Platform::Twitch], "Sending to Twitch"),
             controller::SendTarget::Kick => (&[Platform::Kick], "Sending to Kick"),
+            controller::SendTarget::YouTube => (&[Platform::YouTube], "Sending to YouTube"),
             controller::SendTarget::Both => (
                 &[Platform::Twitch, Platform::Kick],
                 "Sending to Twitch + Kick",
@@ -3816,6 +3826,7 @@ impl ChatView {
         let ring = match self.controller.send_target() {
             controller::SendTarget::Twitch => 0x9147ff,
             controller::SendTarget::Kick => 0x53fc18,
+            controller::SendTarget::YouTube => 0xff0033,
             controller::SendTarget::Both => 0x808080,
         };
         let icons = platforms.iter().filter_map(|p| {
@@ -5276,17 +5287,19 @@ impl ChatView {
         }
         let has_twitch = !self.config.twitch_channel.trim().is_empty();
         let has_kick = !self.config.kick_channel.trim().is_empty();
+        let has_youtube = !self.config.youtube_channel.trim().is_empty();
         let twitch = has_twitch && self.controller.twitch_logged_in();
         let kick = has_kick && self.controller.kick_logged_in();
-        let text = match (twitch, kick) {
-            (true, true) => match self.controller.send_target() {
-                controller::SendTarget::Twitch => "Send a message to Twitch",
-                controller::SendTarget::Kick => "Send a message to Kick",
-                controller::SendTarget::Both => "Send a message to Twitch + Kick",
-            },
-            (true, false) => "Send a message to Twitch",
-            (false, true) => "Send a message to Kick",
-            (false, false) => "Log in from Settings (⚙) → Account to chat",
+        let youtube = has_youtube && self.controller.youtube_logged_in();
+        let text = match self.controller.send_target() {
+            controller::SendTarget::YouTube if youtube => "Send a message to YouTube",
+            controller::SendTarget::Both if twitch && kick => "Send a message to Twitch + Kick",
+            controller::SendTarget::Kick if kick => "Send a message to Kick",
+            controller::SendTarget::Twitch if twitch => "Send a message to Twitch",
+            _ if twitch => "Send a message to Twitch",
+            _ if kick => "Send a message to Kick",
+            _ if youtube => "Send a message to YouTube",
+            _ => "Log in from Settings (⚙) → Account to chat",
         };
         format!(" {text}")
     }

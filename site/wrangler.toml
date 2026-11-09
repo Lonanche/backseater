@@ -1,0 +1,14 @@
+# The project home page + privacy policy (static files only, no script) at
+# backseater.trausi.dev. Kept separate from `worker/` — that one is the
+# locked-down Kick OAuth broker and serves nothing else.
+#
+# Deploy from this folder (trausi.dev must be a zone in the same Cloudflare
+# account; the custom domain's DNS record + certificate are created for you):
+#   npx wrangler deploy
+name = "backseater-site"
+compatibility_date = "2024-11-01"
+routes = [{ pattern = "backseater.trausi.dev", custom_domain = true }]
+
+[assets]
+directory = "./public"
+not_found_handling = "404-page"

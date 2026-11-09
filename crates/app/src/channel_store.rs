@@ -331,6 +331,10 @@ pub struct ChannelModel {
     /// controller (own-usercard lookup at connect/login, refreshed from our own
     /// messages' badges) and delivered as `ModStatus`, like Twitch's USERSTATE.
     pub kick_mod: bool,
+    /// Whether the YouTube login moderates / owns this chat — learned from the
+    /// account's own messages' role badges (and the owner channel id).
+    pub youtube_mod: bool,
+    pub youtube_broadcaster: bool,
     /// Platforms whose rich moderator feed (Twitch EventSub) is live — suppresses
     /// the generic ban/timeout notice fallback.
     pub rich_mod_feed: HashSet<Platform>,
@@ -396,6 +400,7 @@ impl ChannelModel {
         match platform {
             Platform::Twitch => self.twitch_mod,
             Platform::Kick => self.kick_mod,
+            Platform::YouTube => self.youtube_mod,
             _ => false,
         }
     }
@@ -407,11 +412,12 @@ impl ChannelModel {
     /// feed keep their message text horizontally aligned — see
     /// `render::ModStrip`.
     pub fn mod_platforms(&self) -> Vec<Platform> {
-        [Platform::Twitch, Platform::Kick]
+        [Platform::Twitch, Platform::Kick, Platform::YouTube]
             .into_iter()
             .filter(|p| match p {
                 Platform::Twitch => self.controller.has_twitch(),
                 Platform::Kick => self.controller.has_kick(),
+                Platform::YouTube => self.controller.has_youtube(),
                 _ => false,
             })
             .filter(|p| self.can_moderate(*p))
@@ -426,6 +432,7 @@ impl ChannelModel {
         match platform {
             Platform::Twitch => self.twitch_broadcaster,
             Platform::Kick => self.controller.kick_is_broadcaster(),
+            Platform::YouTube => self.youtube_broadcaster,
             _ => false,
         }
     }
@@ -1070,6 +1077,13 @@ impl ChannelModel {
                         self.kick_mod = is_mod;
                         changed
                     }
+                    Platform::YouTube => {
+                        let changed = self.youtube_mod != is_mod
+                            || self.youtube_broadcaster != is_broadcaster;
+                        self.youtube_mod = is_mod;
+                        self.youtube_broadcaster = is_broadcaster;
+                        changed
+                    }
                     _ => false,
                 };
                 if changed {
@@ -1394,6 +1408,8 @@ fn model_from_connection(
             twitch_mod: false,
             twitch_broadcaster: false,
             kick_mod: false,
+            youtube_mod: false,
+            youtube_broadcaster: false,
             // Kick's connector always posts its own rich ban/timeout/unban notices
             // (`kick/connector.rs`), so it's a "rich mod feed" from the start —
             // seeded here so the generic-notice suppression below needn't name it.
