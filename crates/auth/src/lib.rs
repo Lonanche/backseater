@@ -5,6 +5,8 @@
 //! - [`kick`]: authorization-code flow with PKCE; the token exchange needs a
 //!   client secret, which a small Cloudflare Worker broker holds (see `worker/`)
 //!   so it never ships in the binary.
+//! - [`youtube`]: Google's desktop authorization-code + PKCE flow (a public
+//!   client — no broker).
 //!
 //! Both run a throwaway local HTTP server ([`server`]) as the redirect target
 //! and persist credentials via [`store`] (the OS keyring on Windows).
@@ -15,6 +17,7 @@ mod server;
 /// data like the tab list; the OS keyring for credentials (`*_secret` fns).
 pub mod store;
 pub mod twitch;
+pub mod youtube;
 
 /// The `reqwest::Client` for all auth-side requests (token validation, broker
 /// exchange/refresh, user lookup), with timeouts — reqwest's default has none,

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use bks_kick::{KickActions, KickUserInfo};
 use bks_platform::{ChatEvent, ChatSource};
 use bks_twitch::{TwitchActions, TwitchSource, TwitchUserCard};
+use bks_youtube::YoutubeActions;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
@@ -42,6 +43,8 @@ pub enum SendTarget {
     #[default]
     Twitch,
     Kick,
+    /// YouTube is never part of `Both` (which stays Twitch + Kick).
+    YouTube,
     Both,
 }
 
@@ -51,6 +54,7 @@ impl SendTarget {
         match self {
             SendTarget::Twitch => "Twitch",
             SendTarget::Kick => "Kick",
+            SendTarget::YouTube => "YouTube",
             SendTarget::Both => "Twitch + Kick",
         }
     }
@@ -180,6 +184,9 @@ pub struct Controller {
     twitch_channel: String,
     /// This tab's Kick channel (slug), empty if none.
     kick_channel: String,
+    /// This tab's YouTube source (the canonical channel/video string the reader
+    /// joined with), empty if none.
+    youtube_channel: String,
 }
 
 impl Controller {
@@ -207,7 +214,18 @@ impl Controller {
             rt,
             twitch_channel,
             kick_channel,
+            youtube_channel: String::new(),
         }
+    }
+
+    /// Sets this tab's YouTube source; a tab with nothing else to send to
+    /// targets YouTube from the start.
+    pub(crate) fn with_youtube_channel(mut self, channel: String) -> Self {
+        if self.twitch_channel.is_empty() && self.kick_channel.is_empty() && !channel.is_empty() {
+            self.target = Arc::new(std::sync::Mutex::new(SendTarget::YouTube));
+        }
+        self.youtube_channel = channel;
+        self
     }
 
     /// Shares channel actions without sharing the feed's send target or the
@@ -257,6 +275,7 @@ impl Controller {
         self.rt.spawn(async move {
             let reconcile = async {
                 let mut prev = rx.borrow_and_update().clone();
+                this.normalize_target();
                 // Initial connect with whatever's logged in right now.
                 if this.owns_sources {
                     this.reconnect_twitch().await;
@@ -270,6 +289,10 @@ impl Controller {
                     if prev.kick() && !now.kick() {
                         this.reset_target_off_kick();
                     }
+                    if prev.youtube() && !now.youtube() {
+                        this.reset_target_off_youtube();
+                    }
+                    this.normalize_target();
                     // Compare the account, not just the flag, so a re-login as a
                     // different Kick user re-resolves too.
                     if this.owns_sources && now.kick != prev.kick {
@@ -370,6 +393,35 @@ impl Controller {
         }
     }
 
+    /// Moves a target the tab can't send to (e.g. Kick on a Kick + YouTube tab
+    /// logged into YouTube only) onto its first sendable one. With nothing
+    /// sendable the target stays put, so a send gets that platform's login hint.
+    fn normalize_target(&self) {
+        let targets = self.send_targets();
+        let mut target = self.target.lock().unwrap();
+        if let Some(first) = targets.first() {
+            if !targets.contains(&target) {
+                *target = *first;
+            }
+        }
+    }
+
+    /// On YouTube logout, a YouTube-targeted tab falls back to Twitch, else
+    /// Kick (if logged in); a YouTube-only tab keeps it for the login hint.
+    fn reset_target_off_youtube(&self) {
+        let fallback = if self.has_twitch() {
+            SendTarget::Twitch
+        } else if self.has_kick() && self.kick_logged_in() {
+            SendTarget::Kick
+        } else {
+            return;
+        };
+        let mut target = self.target.lock().unwrap();
+        if *target == SendTarget::YouTube {
+            *target = fallback;
+        }
+    }
+
     /// Records a Kick chatter's id once at the producer so `/ban`/`/timeout`
     /// from any subscribed feed can resolve the target.
     pub fn note_kick_user(&self, login: String, user_id: u64) {
@@ -396,6 +448,45 @@ impl Controller {
 
     pub fn kick_logout(&self) {
         self.session.kick_logout();
+    }
+
+    pub fn youtube_login(&self) {
+        self.session.youtube_login(self.events.clone());
+    }
+
+    pub fn youtube_logout(&self) {
+        self.session.youtube_logout();
+    }
+
+    /// Whether the user is logged into YouTube.
+    pub fn youtube_logged_in(&self) -> bool {
+        self.session.youtube_logged_in()
+    }
+
+    /// Whether this tab has a YouTube source set.
+    pub fn has_youtube(&self) -> bool {
+        !self.youtube_channel.is_empty()
+    }
+
+    /// The send targets this tab can cycle through, in toggle order: each
+    /// platform it has (Kick/YouTube only while logged in), plus Both when
+    /// Twitch and Kick both qualify.
+    pub fn send_targets(&self) -> Vec<SendTarget> {
+        let mut out = Vec::new();
+        let kick = self.has_kick() && self.kick_logged_in();
+        if self.has_twitch() {
+            out.push(SendTarget::Twitch);
+        }
+        if kick {
+            out.push(SendTarget::Kick);
+        }
+        if self.has_youtube() && self.youtube_logged_in() {
+            out.push(SendTarget::YouTube);
+        }
+        if self.has_twitch() && kick {
+            out.push(SendTarget::Both);
+        }
+        out
     }
 
     /// The send target, for the UI toggle to render.
@@ -438,19 +529,19 @@ impl Controller {
         &self.twitch_channel
     }
 
-    /// Cycles the send target Twitch → Kick → Both (only meaningful when logged
-    /// into Kick and this tab has both channels — a single-platform tab has
-    /// nothing to switch to).
+    /// Cycles to the next of [`send_targets`](Self::send_targets) (a no-op
+    /// with fewer than two — a single-platform tab has nothing to switch to).
     pub fn cycle_send_target(&self) {
-        if !self.kick_logged_in() || !self.has_kick() || !self.has_twitch() {
+        let targets = self.send_targets();
+        if targets.len() < 2 {
             return;
         }
         let mut target = self.target.lock().unwrap();
-        *target = match *target {
-            SendTarget::Twitch => SendTarget::Kick,
-            SendTarget::Kick => SendTarget::Both,
-            SendTarget::Both => SendTarget::Twitch,
-        };
+        let next = targets
+            .iter()
+            .position(|t| t == &*target)
+            .map_or(0, |i| (i + 1) % targets.len());
+        *target = targets[next];
         tracing::info!("send target: {}", target.label());
     }
 
@@ -464,6 +555,9 @@ impl Controller {
             bks_core::Platform::Twitch if self.has_twitch() => SendTarget::Twitch,
             bks_core::Platform::Kick if self.has_kick() && self.kick_logged_in() => {
                 SendTarget::Kick
+            }
+            bks_core::Platform::YouTube if self.has_youtube() && self.youtube_logged_in() => {
+                SendTarget::YouTube
             }
             _ => return false,
         };
@@ -502,6 +596,15 @@ impl Controller {
         let actions = self.session.kick_actions().await;
         if actions.is_none() {
             self.notice("log into Kick first (Settings → Account)");
+        }
+        actions
+    }
+
+    /// The YouTube actions client, posting the "log in first" hint when logged out.
+    async fn youtube_actions_or_hint(&self) -> Option<Arc<YoutubeActions>> {
+        let actions = self.session.youtube_actions().await;
+        if actions.is_none() {
+            self.notice("log into YouTube first (Settings → Account)");
         }
         actions
     }
@@ -857,6 +960,7 @@ impl Controller {
         let target = match platform {
             bks_core::Platform::Twitch => SendTarget::Twitch,
             bks_core::Platform::Kick => SendTarget::Kick,
+            bks_core::Platform::YouTube => SendTarget::YouTube,
             _ => return self.notice("mod actions aren't supported on this platform"),
         };
         if let Some(rest) = line.strip_prefix('/') {
@@ -1114,7 +1218,7 @@ impl Controller {
     /// when the target is Kick (the Both case is gated in
     /// [`Self::handle_command`]).
     fn twitch_cmd(&self, target: SendTarget, name: &str, cmd: TwitchCmd) {
-        if target == SendTarget::Kick {
+        if target != SendTarget::Twitch {
             return self.notice(format!(
                 "/{name} is Twitch-only — switch the send target to Twitch"
             ));
@@ -1196,7 +1300,7 @@ impl Controller {
     /// Sends `/me text` as an action message on Twitch (the one slash command
     /// Twitch IRC still interprets inside a PRIVMSG). Kick has no equivalent.
     fn send_me(&self, text: String, target: SendTarget) {
-        if target == SendTarget::Kick {
+        if target != SendTarget::Twitch {
             return self.notice("/me is Twitch-only — switch the send target to Twitch");
         }
         let this = self.clone();
@@ -1240,7 +1344,31 @@ impl Controller {
                     None => this.notice("not logged into Kick (Settings → Account)"),
                 }
             }
+            if target == SendTarget::YouTube {
+                this.send_youtube(&text).await;
+            }
         });
+    }
+
+    /// YouTube send through the Data API (20 quota units per message). The
+    /// message shows up in chat through the InnerTube reader, so no local echo.
+    async fn send_youtube(&self, text: &str) {
+        if self.youtube_channel.is_empty() {
+            return self.notice("this tab has no YouTube channel");
+        }
+        if let Some(actions) = self.youtube_actions_or_hint().await {
+            if let Err(err) = actions.send(&self.youtube_channel, text).await {
+                self.report_youtube_error(&err);
+            }
+        }
+    }
+
+    /// Reports a YouTube action error; an expired login logs out everywhere.
+    fn report_youtube_error(&self, err: &anyhow::Error) {
+        self.notice(format!("{err:#}"));
+        if err.downcast_ref::<bks_youtube::AuthExpired>().is_some() {
+            self.session.youtube_logout();
+        }
     }
 
     /// Sends `text` as a threaded reply to `reply.message_id` on the parent's
@@ -1278,6 +1406,11 @@ impl Controller {
                     }
                     None => this.notice("log into Kick to reply (Settings → Account)"),
                 },
+                // YouTube chat has no threads — mention the author instead.
+                bks_core::Platform::YouTube => {
+                    let name = reply.parent.author.trim_start_matches('@');
+                    this.send_youtube(&format!("@{name} {text}")).await;
+                }
                 _ => this.notice("replies aren't supported on this platform"),
             }
         });
@@ -1323,8 +1456,48 @@ impl Controller {
                         this.moderate_kick(&a, action).await;
                     }
                 }
+                SendTarget::YouTube => {
+                    if let Some(a) = this.youtube_actions_or_hint().await {
+                        this.moderate_youtube(&a, action).await;
+                    }
+                }
             }
         });
+    }
+
+    /// YouTube moderation through the Data API. Bans key on the chatter's
+    /// channel id, resolved from chatters the reader has seen (or a raw `UC…`).
+    async fn moderate_youtube(&self, actions: &YoutubeActions, action: ModAction) {
+        if self.youtube_channel.is_empty() {
+            return self.notice("this tab has no YouTube channel");
+        }
+        let source = &self.youtube_channel;
+        let user = match &action {
+            ModAction::Delete { message_id } => {
+                if let Err(err) = actions.delete_message(source, message_id).await {
+                    self.report_youtube_error(&err);
+                }
+                return;
+            }
+            ModAction::Ban { user, .. }
+            | ModAction::Timeout { user, .. }
+            | ModAction::Unban { user } => user.clone(),
+        };
+        let Some(channel_id) = bks_youtube::channel_id_for(&user) else {
+            return self.notice(format!(
+                "haven't seen '{user}' in YouTube chat yet — can't resolve their channel"
+            ));
+        };
+        // YouTube bans carry no reason field.
+        let result = match action {
+            ModAction::Ban { .. } => actions.ban(source, &channel_id, None).await,
+            ModAction::Timeout { secs, .. } => actions.ban(source, &channel_id, Some(secs)).await,
+            ModAction::Unban { .. } => actions.unban(source, &channel_id).await,
+            ModAction::Delete { .. } => unreachable!("handled above"),
+        };
+        if let Err(err) = result {
+            self.report_youtube_error(&err);
+        }
     }
 
     async fn moderate_twitch(&self, actions: &TwitchActions, action: ModAction) {

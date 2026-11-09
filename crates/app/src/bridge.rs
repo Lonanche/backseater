@@ -78,6 +78,7 @@ pub fn connect(
         twitch.channel,
         kick.channel,
     )
+    .with_youtube_channel(youtube.channel)
     .with_sources(
         producer(bks_core::Platform::Twitch),
         producer(bks_core::Platform::Kick),
@@ -248,7 +249,7 @@ fn source_pipe(session: Session, key: SourceKey) -> Arc<SharedSource> {
 
 fn start_source(session: Session, key: SourceKey) -> Arc<SharedSource> {
     use bks_core::Platform;
-    let source = source_pipe(session, key);
+    let source = source_pipe(session.clone(), key);
     let key = &source.key;
     let tx = &source.ingress;
     let controller = &source.controller;
@@ -276,6 +277,7 @@ fn start_source(session: Session, key: SourceKey) -> Arc<SharedSource> {
                 Arc::new(YouTubeSource::new()),
                 key.channel.clone(),
                 tx.clone(),
+                session.clone(),
             ),
         ),
         Platform::TikTok => spawn_connection(tx, run_tiktok(key.channel.clone(), tx.clone())),
@@ -1214,8 +1216,10 @@ async fn run_kick(source: Arc<KickSource>, channel: String, tx: Sink, controller
 /// text runs. On the `Channel` event (which carries the owner `UC…` id) we load
 /// 7TV for that channel and emit the picker set; native YouTube emojis are
 /// harvested from messages as they arrive (there's no channel-emoji endpoint).
-async fn run_youtube(source: Arc<YouTubeSource>, channel: String, tx: Sink) {
+async fn run_youtube(source: Arc<YouTubeSource>, channel: String, tx: Sink, session: Session) {
     let emote_providers = youtube_providers();
+    let mut login = session.subscribe();
+    let mut mod_status = YoutubeModStatus::default();
     let mut registry = EmoteRegistry::with_globals(youtube_globals().await);
     let mut yt_emotes: Vec<bks_core::Emote> = Vec::new();
     let mut seen_emote_names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1230,7 +1234,25 @@ async fn run_youtube(source: Arc<YouTubeSource>, channel: String, tx: Sink) {
         }
     };
 
-    while let Some(event) = stream.recv().await {
+    loop {
+        let event = tokio::select! {
+            event = stream.recv() => match event {
+                Some(event) => event,
+                None => break,
+            },
+            changed = login.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let me = login.borrow_and_update().youtube_channel_id.clone();
+                if let Some(status) = mod_status.login_changed(me) {
+                    if tx.send(status).await.is_err() {
+                        break;
+                    }
+                }
+                continue;
+            }
+        };
         let forward = match event {
             ChatEvent::Message(mut msg) => {
                 if !registry.is_empty() {
@@ -1239,11 +1261,19 @@ async fn run_youtube(source: Arc<YouTubeSource>, channel: String, tx: Sink) {
                 if harvest_emotes(&msg, &mut yt_emotes, &mut seen_emote_names) {
                     emit_emotes(bks_core::Platform::YouTube, &yt_emotes, &tx).await;
                 }
+                let me = session.login_state().youtube_channel_id;
+                if let Some(status) = mod_status.own_message(me.as_deref(), &msg) {
+                    let _ = tx.send(status).await;
+                }
                 ChatEvent::Message(msg)
             }
             // Channel identity carries the owner `UC…` id; load its 7TV set for the
             // picker's YouTube tab, then drop it (not shown in chat).
             ChatEvent::Channel(meta) => {
+                let me = session.login_state().youtube_channel_id;
+                if let Some(status) = mod_status.owner_known(me, meta.id.clone()) {
+                    let _ = tx.send(status).await;
+                }
                 load_emotes(&mut registry, &emote_providers, &meta).await;
                 for emote in registry.emotes(&meta.name) {
                     if seen_emote_names.insert(emote.name.clone()) {
@@ -1258,6 +1288,65 @@ async fn run_youtube(source: Arc<YouTubeSource>, channel: String, tx: Sink) {
         if tx.send(forward).await.is_err() {
             break;
         }
+    }
+}
+
+/// Whether the YouTube login moderates this chat. YouTube exposes no "am I a
+/// mod here" read, so it's inferred: the owner channel id (from the reader's
+/// channel meta) says broadcaster; otherwise the role badges on the account's
+/// own chat messages say moderator (until then: not a mod).
+#[derive(Default)]
+struct YoutubeModStatus {
+    owner: Option<String>,
+    /// The (is_mod, is_broadcaster) last reported, to skip re-sends.
+    reported: Option<(bool, bool)>,
+}
+
+impl YoutubeModStatus {
+    fn owner_known(&mut self, me: Option<String>, owner: String) -> Option<ChatEvent> {
+        self.owner = (!owner.is_empty()).then_some(owner);
+        self.recompute(me, None)
+    }
+
+    fn login_changed(&mut self, me: Option<String>) -> Option<ChatEvent> {
+        self.reported = None;
+        self.recompute(me, None)
+    }
+
+    fn own_message(&mut self, me: Option<&str>, msg: &bks_core::Message) -> Option<ChatEvent> {
+        let me = me?;
+        if msg.historical || msg.author.user_id != me {
+            return None;
+        }
+        let roles = bks_youtube::author_roles(&msg.channel, me).unwrap_or_default();
+        self.recompute(Some(me.to_string()), Some(roles))
+    }
+
+    fn recompute(
+        &mut self,
+        me: Option<String>,
+        roles: Option<bks_youtube::AuthorRoles>,
+    ) -> Option<ChatEvent> {
+        let owner = me.is_some() && me == self.owner;
+        let (is_mod, is_broadcaster) = match (me, roles) {
+            (None, _) => (false, false),
+            (Some(_), Some(r)) => (owner || r.owner || r.moderator, owner || r.owner),
+            // No message seen yet: keep a known mod flag (a reconnect re-sends
+            // the owner meta) rather than flapping it off.
+            (Some(_), None) => {
+                let was_mod = self.reported.is_some_and(|(m, _)| m);
+                (owner || was_mod, owner)
+            }
+        };
+        if self.reported == Some((is_mod, is_broadcaster)) {
+            return None;
+        }
+        self.reported = Some((is_mod, is_broadcaster));
+        Some(ChatEvent::ModStatus {
+            platform: bks_core::Platform::YouTube,
+            is_mod,
+            is_broadcaster,
+        })
     }
 }
 
