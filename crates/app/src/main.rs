@@ -2284,6 +2284,11 @@ impl BackseaterApp {
                         cx,
                     ))
                     .child(self.login_indicator(bks_core::Platform::Kick, state.kick.clone(), cx))
+                    .child(self.login_indicator(
+                        bks_core::Platform::YouTube,
+                        state.youtube.clone(),
+                        cx,
+                    ))
                     .child(self.titlebar_gear(cx)),
             )
     }
