@@ -11,6 +11,12 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
   show that channel's avatar before the line (hover it to see which channel),
   like on twitch.tv. Their badges are the chatter's badges in that channel, so
   subscriber badges show the right channel's images.
+- YouTube login: log in with your Google account (Settings → Account) to send
+  messages, delete messages, and time out, ban or unban users in YouTube chats
+  you own or moderate. Reading YouTube chat still needs no login. If the Log in
+  button is disabled, add your own Google OAuth client in the same place first.
+- YouTube chat now strikes through deleted messages and the messages of users
+  who were timed out or banned.
 
 ## v0.7.5
 
