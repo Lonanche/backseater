@@ -244,13 +244,13 @@ impl Session {
         self.changes.borrow().youtube()
     }
 
-    /// Runs the Google login in the browser with the configured client (see
+    /// Runs the Google login in the browser with the app's Google client (see
     /// `bks_auth::youtube::active_client`), saves, and applies it.
     pub fn youtube_login(&self, events: Sink) {
         let this = self.clone();
-        let Some((client, _)) = bks_auth::youtube::active_client() else {
+        let Some(client) = bks_auth::youtube::active_client() else {
             let _ = events.try_send(ChatEvent::Error(
-                "YouTube login needs a Google OAuth client — add one in Settings → Account".into(),
+                "YouTube login isn't available in this build".into(),
             ));
             return;
         };

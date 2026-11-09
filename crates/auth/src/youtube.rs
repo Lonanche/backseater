@@ -6,11 +6,9 @@
 //! unlike Kick — no broker is needed; PKCE protects the code exchange. The
 //! token endpoint still expects the secret, so it rides along with the id.
 //!
-//! The client comes from (first match): the `BKS_YOUTUBE_CLIENT_ID` /
-//! `BKS_YOUTUBE_CLIENT_SECRET` env vars, a user-supplied client saved from
-//! Settings → Account ([`save_client`]), or the built-in one. A user-supplied
-//! client is their own Google Cloud project, which gets its *own* Data API
-//! quota (10,000 units/day) instead of sharing the app's.
+//! The client is the built-in one compiled into release builds; the
+//! `BKS_YOUTUBE_CLIENT_ID` / `BKS_YOUTUBE_CLIENT_SECRET` env vars override it
+//! at runtime (how a local dev build, which has none built in, logs in).
 
 use anyhow::{anyhow, Context};
 use base64::Engine;
@@ -27,8 +25,8 @@ pub const CLIENT_SECRET_ENV: &str = "BKS_YOUTUBE_CLIENT_SECRET";
 /// from repository secrets for release builds). Not confidential — Google
 /// treats a desktop client's secret as public — but kept out of the repo so
 /// forks and scrapers don't spend the project's quota. A build without them
-/// (local `cargo run`, fork PRs) has no built-in client: a user-supplied one
-/// is required.
+/// (local `cargo run`, fork PRs) has no built-in client and needs the runtime
+/// env vars to log in.
 const DEFAULT_CLIENT_ID: &str = match option_env!("BKS_BUILTIN_YOUTUBE_CLIENT_ID") {
     Some(id) => id,
     None => "",
@@ -47,7 +45,6 @@ const CHANNELS_URL: &str = "https://www.googleapis.com/youtube/v3/channels";
 /// Send messages + delete messages + ban/unban (`liveChatMessages`/`liveChatBans`).
 const SCOPE: &str = "https://www.googleapis.com/auth/youtube.force-ssl";
 const STORE_NAME: &str = "youtube_credentials";
-const CLIENT_STORE_NAME: &str = "youtube_client";
 
 /// A Google OAuth desktop client (id + its non-confidential secret).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,14 +57,6 @@ impl GoogleClient {
     fn is_complete(&self) -> bool {
         !self.id.trim().is_empty() && !self.secret.trim().is_empty()
     }
-}
-
-/// Where the active client came from (shown in the account row).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ClientSource {
-    Env,
-    User,
-    BuiltIn,
 }
 
 /// A logged-in YouTube session. Access tokens last ~1h, so the refresh token +
@@ -84,28 +73,21 @@ pub struct Credentials {
     pub client: GoogleClient,
 }
 
-/// The client to log in with, and where it came from — `None` when nothing is
-/// configured (no env vars, no saved client, no built-in one).
-pub fn active_client() -> Option<(GoogleClient, ClientSource)> {
+/// The client to log in with: the env override if set, else the built-in one
+/// — `None` in a build that has neither.
+pub fn active_client() -> Option<GoogleClient> {
     let env = GoogleClient {
         id: std::env::var(CLIENT_ID_ENV).unwrap_or_default(),
         secret: std::env::var(CLIENT_SECRET_ENV).unwrap_or_default(),
     };
     if env.is_complete() {
-        return Some((env, ClientSource::Env));
-    }
-    if let Ok(Some(user)) = load_client() {
-        if user.is_complete() {
-            return Some((user, ClientSource::User));
-        }
+        return Some(env);
     }
     let built_in = GoogleClient {
         id: DEFAULT_CLIENT_ID.into(),
         secret: DEFAULT_CLIENT_SECRET.into(),
     };
-    built_in
-        .is_complete()
-        .then_some((built_in, ClientSource::BuiltIn))
+    built_in.is_complete().then_some(built_in)
 }
 
 #[derive(Deserialize)]
@@ -320,19 +302,6 @@ pub fn load() -> anyhow::Result<Option<Credentials>> {
 
 pub fn clear() -> anyhow::Result<()> {
     crate::store::clear_secret(STORE_NAME)
-}
-
-/// Saves a user-supplied Google client (their own Cloud project).
-pub fn save_client(client: &GoogleClient) -> anyhow::Result<()> {
-    crate::store::save_secret(CLIENT_STORE_NAME, client)
-}
-
-pub fn load_client() -> anyhow::Result<Option<GoogleClient>> {
-    crate::store::load_secret(CLIENT_STORE_NAME)
-}
-
-pub fn clear_client() -> anyhow::Result<()> {
-    crate::store::clear_secret(CLIENT_STORE_NAME)
 }
 
 #[cfg(test)]

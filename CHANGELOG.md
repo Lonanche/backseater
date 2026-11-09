@@ -13,8 +13,7 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
   subscriber badges show the right channel's images.
 - YouTube login: log in with your Google account (Settings → Account) to send
   messages, delete messages, and time out, ban or unban users in YouTube chats
-  you own or moderate. Reading YouTube chat still needs no login. If the Log in
-  button is disabled, add your own Google OAuth client in the same place first.
+  you own or moderate. Reading YouTube chat still needs no login.
 - YouTube chat now strikes through deleted messages and the messages of users
   who were timed out or banned.
 

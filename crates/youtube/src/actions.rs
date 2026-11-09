@@ -384,8 +384,8 @@ impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let hint = match self.reason.as_str() {
             "quotaExceeded" | "dailyLimitExceeded" => {
-                " — the Google project's daily YouTube API quota is used up (resets at \
-                 midnight Pacific); a Google client of your own (Settings → Account) gets its own"
+                " — Backseater's shared daily YouTube quota is used up (it resets at \
+                 midnight Pacific time)"
             }
             "forbidden" | "insufficientPermissions" => {
                 " — YouTube won't let this account do that here (moderation needs the \

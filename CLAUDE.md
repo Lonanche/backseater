@@ -625,11 +625,13 @@ platform = implement one trait + one message builder, with zero UI changes**.
   YoutubeActions`: send 20 units, delete 20, ban/timeout/unban 200, `videos.list` chat-id lookup 1;
   default 10,000 units/day **per Google Cloud project**, shared by every user of that client).
   Login is Google's desktop **auth-code + PKCE** loopback flow (`bks_auth::youtube`, port 38277,
-  scope `youtube.force-ssl`) — desktop clients are *public*, so no broker. Client resolution:
-  `BKS_YOUTUBE_CLIENT_ID`/`_SECRET` env → a user's own client saved from Settings → Account
-  (keyring `youtube_client`, its own quota) → the built-in client, compiled in via
+  scope `youtube.force-ssl` — the narrowest scope the live-chat write methods accept, verified
+  against the docs; there is no chat-only scope) — desktop clients are *public*, so no broker.
+  Client resolution: `BKS_YOUTUBE_CLIENT_ID`/`_SECRET` runtime env (dev override; a local build
+  needs it to log in) → the built-in client, compiled in via
   `option_env!("BKS_BUILTIN_YOUTUBE_CLIENT_ID"/"_SECRET")` (CI release builds set them from the
-  `YOUTUBE_CLIENT_ID`/`YOUTUBE_CLIENT_SECRET` repo secrets; a local build has none).
+  `YOUTUBE_CLIENT_ID`/`YOUTUBE_CLIENT_SECRET` repo secrets; a local build has none). There is
+  deliberately no user-facing "bring your own Google client" setting (removed).
   The reader maps InnerTube `markChatItemAsDeletedAction` / `markChatItemsByAuthorAsDeletedAction`
   to `DeleteMessage` / `ClearChat`, so deletes and bans strike rows.
   ⚠️ Data API message ids ≠ InnerTube ids, so delete re-finds the message via
