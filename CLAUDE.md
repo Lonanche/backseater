@@ -17,8 +17,8 @@ platform = implement one trait + one message builder, with zero UI changes**.
 
 **Working and tested live (tabbed, per-tab merged feed):**
 - **Tabs**: a tab strip on top of the window; each tab is an independent channel set (its own
-  Twitch and/or Kick and/or YouTube channel, feed, send target). Add (`+`) / close (`✕`) /
-  left-click to select / right-click → settings (name + Twitch/Kick/YouTube channels) or
+  Twitch and/or Kick and/or YouTube and/or TikTok channel, feed, send target). Add (`+`) /
+  close (`✕`) / left-click to select / right-click → settings (name + per-platform channels) or
   **Open in new window** (a popout: a second `ChatView` on the same shared channel model —
   `popout.rs`, a mirror, not a move). Tabs persist to
   `<config>/backseater/tabs.json` and restore on launch. Login is **app-wide** (shared by all tabs).
@@ -521,7 +521,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
   `current_exe`). The update banner has a "What's new" link to the pending release's notes, and
   the first launch after an update shows a one-time success-tinted "Updated to vX — What's new"
   banner (Velopack `on_restarted` hook → `updater::just_updated_to()`, session-only, ✕ clears).
-- **Settings** (category sidebar: Account / Appearance / Themes / Highlights / Streamer Mode) and the **usercard** open as
+- **Settings** (category sidebar: Account / Appearance / Themes / Highlights / Mod Buttons / Streamer Mode / About) and the **usercard** open as
   **separate OS windows** (`child_window.rs`: a `ChildWindow` renders a host entity's body in its own
   `cx.open_window`), draggable off the main window and freely resizable. All panel state stays on the
   host (app / tab view); the window is just a surface. ⚠️ Two rules: kit `InputState`s are
@@ -545,7 +545,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
   restored on launch, clamped in case that tab is gone.
 - **7TV / BTTV / FFZ** emotes on Twitch (all three providers registered in `bridge.rs::providers()`),
   **7TV on Kick** (`kick_providers()`) and **7TV on YouTube** (`youtube_providers()`), animated ones play.
-- **Anonymous YouTube live chat** (`bks-youtube`, read-only) interleaved in the same feed. A tab's
+- **Anonymous YouTube live chat** (`bks-youtube`) interleaved in the same feed. A tab's
   YouTube source is an `@handle` / channel URL / `/live` URL / `watch?v=` / bare video id; the connector
   resolves the *currently live* video and follows it. Reads use YouTube's private **InnerTube** web API
   (no key, no OAuth, **no quota** — the same one youtube.com uses): scrape `INNERTUBE_API_KEY`/
@@ -554,7 +554,29 @@ platform = implement one trait + one message builder, with zero UI changes**.
   (`connector.rs`). Renderers → `Message`/`Event` in `builder.rs`: text + **custom channel emojis** inline
   (`isCustomEmoji` → `Emote`; unicode emoji stay text), author name color / member-green, **membership
   badges** (custom-thumbnail), and **Super Chats / new members / gifted memberships** as highlighted event
-  rows (`Bits`/`Sub`/`Gift`). Send/moderation are **not** built (see below).
+  rows (`Bits`/`Sub`/`Gift`). Sending + moderation use a Google login (next bullet).
+- **YouTube login → send + moderation** (shipped in beta; login works, the send/delete/ban calls
+  are **not yet verified against a live stream**).
+  Reads stay on anonymous InnerTube; writes use the official **Data API v3** (`bks_youtube::
+  YoutubeActions`: send 20 units, delete 20, ban/timeout/unban 200, `videos.list` chat-id lookup 1;
+  default 10,000 units/day **per Google Cloud project**, shared by every user of that client).
+  Login is Google's desktop **auth-code + PKCE** loopback flow (`bks_auth::youtube`, port 38277,
+  scope `youtube.force-ssl` — the narrowest scope the live-chat write methods accept, verified
+  against the docs; there is no chat-only scope) — desktop clients are *public*, so no broker.
+  Client resolution: `BKS_YOUTUBE_CLIENT_ID`/`_SECRET` runtime env (dev override; a local build
+  needs it to log in) → the built-in client, compiled in via
+  `option_env!("BKS_BUILTIN_YOUTUBE_CLIENT_ID"/"_SECRET")` (CI release builds set them from the
+  `YOUTUBE_CLIENT_ID`/`YOUTUBE_CLIENT_SECRET` repo secrets; a local build has none). There is
+  deliberately no user-facing "bring your own Google client" setting (removed).
+  The reader maps InnerTube `markChatItemAsDeletedAction` / `markChatItemsByAuthorAsDeletedAction`
+  to `DeleteMessage` / `ClearChat`, so deletes and bans strike rows.
+  ⚠️ Data API message ids ≠ InnerTube ids, so delete re-finds the message via
+  `liveChatMessages.list` by author + timestamp (`bks_youtube::seen` remembers recent messages,
+  login → `UC…` id, and per-chat roles). Unban only works for bans made this session (the ban
+  resource id is only in the insert response). Mod status is inferred: owner id from the reader's
+  channel meta, else MODERATOR/OWNER icon badges on the account's own messages
+  (`bridge.rs::YoutubeModStatus`). YouTube is its own `SendTarget` (never part of Both); replies
+  send as `@name text` (no threads). An unverified Google app is capped at 100 users.
 - **Mentions + links** parsed and rendered: `@name` mentions tint/emit `MessageElement::Mention`
   (`core/mention.rs`), URLs become clickable links (`core/links.rs`) — a 7TV emote link opens an
   in-app emote popup, other links confirm-then-open.
@@ -616,31 +638,10 @@ platform = implement one trait + one message builder, with zero UI changes**.
   Validation and release dependencies have separate caches; failed validation uses a
   separate fallback cache so a partial build cannot occupy the complete cache key. Only
   unpublished main versions trigger an optimized build; obsolete PR checks are cancelled.
-- 246 passing unit tests (`cargo test`).
+- Unit tests across all crates pass (`cargo test --workspace --locked`).
 
 **Not done yet (designed for, not built):**
 - **TikTok send / moderation.** Anonymous read-only chat is implemented in `crates/tiktok`. The locally patched PirateTok source (including the Windows build fix) and update instructions are documented in [vendor/piratetok-live-rs/UPSTREAM.md](vendor/piratetok-live-rs/UPSTREAM.md).
-- **YouTube send / moderation — built, not yet verified live** (no Google client registered yet).
-  Reads stay on anonymous InnerTube; writes use the official **Data API v3** (`bks_youtube::
-  YoutubeActions`: send 20 units, delete 20, ban/timeout/unban 200, `videos.list` chat-id lookup 1;
-  default 10,000 units/day **per Google Cloud project**, shared by every user of that client).
-  Login is Google's desktop **auth-code + PKCE** loopback flow (`bks_auth::youtube`, port 38277,
-  scope `youtube.force-ssl` — the narrowest scope the live-chat write methods accept, verified
-  against the docs; there is no chat-only scope) — desktop clients are *public*, so no broker.
-  Client resolution: `BKS_YOUTUBE_CLIENT_ID`/`_SECRET` runtime env (dev override; a local build
-  needs it to log in) → the built-in client, compiled in via
-  `option_env!("BKS_BUILTIN_YOUTUBE_CLIENT_ID"/"_SECRET")` (CI release builds set them from the
-  `YOUTUBE_CLIENT_ID`/`YOUTUBE_CLIENT_SECRET` repo secrets; a local build has none). There is
-  deliberately no user-facing "bring your own Google client" setting (removed).
-  The reader maps InnerTube `markChatItemAsDeletedAction` / `markChatItemsByAuthorAsDeletedAction`
-  to `DeleteMessage` / `ClearChat`, so deletes and bans strike rows.
-  ⚠️ Data API message ids ≠ InnerTube ids, so delete re-finds the message via
-  `liveChatMessages.list` by author + timestamp (`bks_youtube::seen` remembers recent messages,
-  login → `UC…` id, and per-chat roles). Unban only works for bans made this session (the ban
-  resource id is only in the insert response). Mod status is inferred: owner id from the reader's
-  channel meta, else MODERATOR/OWNER icon badges on the account's own messages
-  (`bridge.rs::YoutubeModStatus`). YouTube is its own `SendTarget` (never part of Both); replies
-  send as `@name text` (no threads). An unverified Google app is capped at 100 users.
 - BTTV / FFZ emotes on **Kick** (Kick gets 7TV + native only; the seam supports adding them).
 
 ## Architecture
@@ -651,10 +652,11 @@ crates/
   platform/  # the expandability seam: ChatSource trait + ChatEvent (moderation is per-platform types)
   twitch/    # ChatSource impl (shared IRC via irc_manager) + Helix/EventSub/badges/history
   kick/      # ChatSource impl (anonymous Pusher WebSocket) + chat-event builder (+ tests)
-  youtube/   # anonymous InnerTube live-chat reader (read-only)
+  youtube/   # anonymous InnerTube live-chat reader + Data API actions (send/delete/ban)
+  tiktok/    # anonymous read-only TikTok LIVE chat (vendored PirateTok connector)
   emotes/    # EmoteRegistry + EmoteProvider trait (7TV / BTTV / FFZ)
   preview/   # LinkPreviewProvider trait + cache (link previews: YouTube video / Twitch+Kick clip)
-  auth/      # OAuth flows (Twitch implicit, Kick PKCE+broker) + stores (keyring for
+  auth/      # OAuth flows (Twitch implicit, Kick PKCE+broker, Google PKCE) + stores (keyring for
              #   credentials on Windows, JSON files for app data)
   app/       # GPUI binary: tokio<->GPUI bridge, flex-wrap token rendering
              #   main.rs = BackseaterApp (root view: tab strip, settings, window)
@@ -673,6 +675,10 @@ crates/
              #     cost)
              #   render.rs = token rendering (RenderCtx threads row ids + selection)
 ```
+
+Outside `crates/`: `worker/` is the Kick OAuth broker (Cloudflare Worker) and `site/` is the
+static home page + privacy policy served at backseater.trausi.dev (its own Worker, deployed
+with `npx wrangler deploy` from `site/`; the Google OAuth consent screen links to it).
 
 **The seam (read `crates/core/src/message.rs` + `crates/platform/src/lib.rs`):**
 - `Message` carries a `Vec<MessageElement>` (Text / Emote / Badge / Mention / Link). This is the
@@ -715,12 +721,13 @@ view; each tab's `ChatView` lives in `chatview.rs`. `BackseaterApp` owns a `Vec<
 (each a `TabConfig` + an `Entity<ChatView>`), an `active` index, the shared `Session`, and the
 settings-dialog input entities. The tab strip is hand-rolled (`h_flex` of clickable chips, not the
 kit's action-based `TabBar`): left-click selects, right-click opens the settings `Dialog`
-(`WindowExt::open_dialog`) with name + Twitch/Kick channel fields, `✕` closes, `+` adds. Changing a
-tab's channels rebuilds its `ChatView` on a fresh `bridge::connect`. `TabConfig {name,
-twitch_channel, kick_channel}` persists to `<config>/backseater/tabs.json` (via `bks_auth::store`).
+(`WindowExt::open_dialog`) with name + per-platform channel fields, `✕` closes, `+` adds. Changing a
+tab's channels rebuilds its `ChatView` on a fresh `bridge::connect`. `TabConfig` (name + the
+Twitch/Kick/YouTube/TikTok channels + per-tab options) persists to `<config>/backseater/tabs.json`
+(via `bks_auth::store`).
 A tab with no channel set renders a "right-click → Settings" prompt instead of an empty log.
 
-**Data flow (per-tab merged feed):** each tab calls `bridge::connect(session, twitch_ch, kick_ch)`,
+**Data flow (per-tab merged feed):** each tab calls `bridge::connect(session, twitch_ch, kick_ch, youtube_ch, tiktok_ch)`,
 which spawns **one tokio task per non-empty platform**, all feeding that tab's *own* smol channel:
 - Twitch: owned by the tab's `Controller` (`start()` → `run_twitch`), which resolves 7TV emotes (on
   `Channel`, loads providers into an `EmoteRegistry`; on `Message`, rewrites text runs) + badges. On
@@ -846,7 +853,7 @@ spike but self-clears within a lifetime window. Cold first-load of a big channel
 seconds (inherent: many large animated GIFs to download + decode); warm cache is fast.
 
 **Auth / sending / moderation — `Session` is the single source of truth AND observable**
-(`app/src/session.rs`). Login is **app-wide**: one `Session` (`Arc`-shared) owns the Twitch + Kick
+(`app/src/session.rs`). Login is **app-wide**: one `Session` (`Arc`-shared) owns the Twitch + Kick + YouTube
 credentials/actions; login state is mutated *only* through its methods (callable from a tab command
 today, a settings screen or a token-refresh task later — tabs never own or assume auth). Every change
 fans out two ways so **all tabs stay consistent no matter what caused it** (user logout, token expiry,
@@ -1059,8 +1066,9 @@ pinned server-side; secrets via `wrangler secret put`; nothing logged. The anony
 (channel/emotes/usercard/history) do **not** go through it — they run in-process via `wreq` (see the
 Kick note below).
 
-**Send target:** when logged into both platforms, a toggle by the input box cycles Twitch → Kick →
-Both. `Both` sends typed messages to both chats; mod commands are disabled in `Both`.
+**Send target:** when a tab has two or more sendable targets (`Controller::send_targets` — Twitch,
+Kick and YouTube when logged in, plus Both for Twitch + Kick), a toggle by the input box cycles
+through them. `Both` sends typed messages to Twitch and Kick; mod commands are disabled in `Both`.
 
 ## Platform notes
 
@@ -1155,7 +1163,7 @@ re-discovered:
   highest tier they meet and fills `Badge.url` directly (so the bridge keeps badges that already
   have a url and only resolves the empty standard ones).
 - YouTube live chat = **InnerTube** (YouTube's private web API), anonymous, no key/OAuth/quota
-  (implemented in `crates/youtube`, read-only). Endpoints (all `POST`, `?key=<INNERTUBE_API_KEY>`):
+  (the reader in `crates/youtube`). Endpoints (all `POST`, `?key=<INNERTUBE_API_KEY>`):
   - **Bootstrap** the session by scraping `https://www.youtube.com/embed/jNQXAC9IVRw` HTML for
     `INNERTUBE_API_KEY` / `INNERTUBE_CLIENT_VERSION` / `visitorData` (`api.rs`). Every request wraps its
     body in `{context:{client:{clientName:"WEB", clientVersion, hl, gl}}}` and sends
@@ -1193,7 +1201,6 @@ re-discovered:
 
 ## Conventions (user's global prefs)
 
-- **Commit messages: one sentence.**
 - **Branch names:** Start each new feature or fix on its own branch named `<type>/<short-description>`: `feat`, `fix`, `docs` or `chore`, then a few lowercase words joined by hyphens, under 40 characters in total (for example `feat/region-filter`). Create it from the latest `main` and push to it instead of the session's generated `claude/<random-words>` branch. Follow-up work on an open pull request stays on that pull request's branch.
 - **Comment only when code is genuinely complex** — the existing files follow this; match it.
 - **The user runs and validates the app, not Claude.** This is a live GUI chat client — Claude
