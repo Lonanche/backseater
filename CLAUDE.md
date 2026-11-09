@@ -98,7 +98,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
   chose, so a chat-only user isn't scared off by "Ban users"-style lines. The Account row's Log in
   (and, when logged in, a Permissions… button showing the granted tier via
   `ScopeChoice::summarize`) expands an **inline chooser** in the settings card — NOT a dialog,
-  child windows render no dialog layer (`main.rs::twitch_permissions_editor`, session state
+  child windows render no dialog layer (`settings_ui.rs::twitch_permissions_editor`, session state
   `twitch_perm_open`/`twitch_perm_choice`, persisted as `Settings.twitch_login_scopes`;
   first-login default **Chat only**): **Chat only** (`chat:read/edit`, `user:write:chat`,
   `user:read:emotes`), **Basic moderation** (+ `moderator:manage:banned_users`/`chat_messages` +
@@ -306,35 +306,30 @@ platform = implement one trait + one message builder, with zero UI changes**.
   *anonymous* list twitch.tv itself shows rides the web GQL `chatters` field, which is behind
   Twitch's browser-integrity check (`IntegrityCheckFailed` for any third-party client — verified
   live; same reason Chatterino's viewer list is mod-only). **Kick has no chatters API at all**, so
-  the button only appears when the tab has a Twitch channel. The window body isn't virtualized:
-  display is capped at `viewerlist::MAX_SHOWN` (500) names with an "…and N more — search to
-  narrow" footer. The search `InputState` is **window-bound** (created against the viewer-list
-  window when it opens, like the settings inputs); list state lives on `ChatView`
-  (`viewer_list`/`viewer_list_window`), module `crates/app/src/viewerlist.rs`.
+  the button only appears when the tab has a Twitch channel. The window is its own view
+  (`chatview/viewers.rs::ViewerListView`, opened via `child_window::open_owned`): it owns its
+  search input and a **virtualized** `gpui::list` of the filtered names (no display cap).
+  `crates/app/src/viewerlist.rs` holds the list data + the pure, unit-tested `filter`.
 - **Chat search (Ctrl+F — bare Ctrl/Cmd only, Shift/Alt chords pass through)**: a child OS
   window per view listing the tab's buffered chat history with a live search box
   (case-insensitive substring of the message text only — usernames deliberately not searched; matching in
   `crates/app/src/search.rs` on the shared `bks_core::contains_ci`, whose ASCII-needle path is
   allocation-free since it runs per buffered message on every rebuild — the viewer list filters
-  through it too; the normalized query is cached on `ChatView.search_query` per keystroke, not
-  re-derived per frame). Results are rendered **exactly like chat rows**
+  through it too; the normalized query is cached per keystroke, not re-derived per frame). Results are rendered **exactly like chat rows**
   (`render::render_message` on the chat-log background — badges, emotes, cosmetics via
-  `log::decorate`, strike/fade, mention tint, this view's ignore/suppress applied; throwaway
+  the shared model's `cosmetics_for`, strike/fade, mention tint, this view's ignore/suppress applied; throwaway
   selection context like the usercard list, default `RowHandlers` so the whole row is the click
   target) in **chat order, newest at the bottom**, and the list is **virtualized** like the log
-  (`search_list_state`, Bottom + Tail — a plain scroll column laid out and kept animating every
+  (Bottom + Tail — a plain scroll column laid out and kept animating every
   off-screen row, which made the window sluggish; no display cap needed, the whole matched set
-  is listed). `search_results`/`search_list_state` stay in lockstep via
-  `ChatView::sync_search_results`, keyed by `(rows_generation, query)` so the per-notify body
-  re-render is a no-op (an ignore-list edit changes membership without moving either key, so
-  `set_ignore` clears `search_synced`): a query change rebuilds wholesale + re-snaps to the bottom
-  (`set_follow_mode(Tail)` re-engages = scrolls to the end), a buffer change is mirrored as
-  end-splices when the old results survive as a contiguous run (`Arc::ptr_eq` diff — steady
-  state: front trims + back appends; Tail keeps it glued without yanking a scrolled-up reader),
-  anything else (mid-buffer backfill insert) resets wholesale. A fresh `ListState` per open
+  is listed). The window is its own view (`chatview/search_view.rs::SearchView`): it owns the
+  search input, the result list state and a `chatview/filtered.rs::FilteredMessages`, which keeps
+  one membership bit per source row so appends and front trims update the results without
+  re-scanning the buffer (a query or filter change, a generation gap, or an out-of-range index
+  rebuilds once). It follows the shared model's `ChannelEvent`s itself; `ChatView` only pushes
+  option changes (`update_search_options`, e.g. an ignore-list edit). A fresh `ListState` per open
   (`fresh_search_list_state`) starts at the bottom; images route through the app-wide
-  `LruImageCache` (`gpui::image_cache` wrap) so the sweep sees them; results are cleared on
-  window close. Clicking a result jumps the log to that message reusing the mention-jump reveal
+  `LruImageCache`. Clicking a result jumps the log to that message reusing the mention-jump reveal
   + flash (`jump_to_message` — aged-out rows get the same transient note), activates the view's
   own `parent_window` (so a popout's search brings the popout forward), and emits
   `chatview::ActivateRequested`, which the app answers by re-selecting the owning tab
@@ -415,8 +410,8 @@ platform = implement one trait + one message builder, with zero UI changes**.
   `Settings.font_family: Option<String>` (`None` = system default) and applied app-wide via
   `main.rs::apply_font` → `gpui_component::Theme.font_family` (the kit `Root` sets it on every
   window's root div, so chat inherits it — `render.rs` sets no family of its own). The
-  `ComboboxState` is window-bound like the kit inputs, so it's recreated in `rebind_settings_inputs`
-  (subscription replaced with it); a change re-measures every tab's log (`ChatView::remeasure`,
+  `ComboboxState` is window-bound like the kit inputs, so the settings window's view builds it with
+  its other inputs (`SettingsView::font_combobox`); a change re-measures every tab's log (`ChatView::remeasure`,
   glyph metrics change row heights), and `set_theme` re-asserts the font after `Theme::change`.
 - **Status notices are not shown in chat** — **errors** and **moderation notices** are. A
   connector/session error becomes `ChatEvent::Error` → a `Row::Error` rendered by `render::render_error`
@@ -444,7 +439,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
   both `IgnoreList` and `SuppressList`), global and per-tab. Nobody has to type the grammar:
   the ignore/suppress editors have a **Text / Regex / User add-mode selector** (User adds a
   **multi-select** platform-scope row — pick any combination, empty = all; Add writes one
-  `user:` entry per picked platform; `main.rs::term_add_mode_row`, session-only per-widget
+  `user:` entry per picked platform; `settings_ui.rs::term_add_mode_row`, session-only per-widget
   state `term_add_modes` keyed by `TermList::mode_key`), the input **placeholder follows the
   mode** (`term_placeholder`, re-synced on settings rebind), and `user:` entries render as
   **mono-glyph chips** (lucide `user.svg` + the platform's logo, or a mono `globe.svg` for
@@ -501,7 +496,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
   flags (`settings::apply_sound_flags`, read at play time); the streamer-mode mute lives *inside*
   `sound::play_ping` (the one gate every ping shares — call sites only layer their own
   enablement), and the setting is labeled "Mute alert sounds while active". **Event sounds**
-  reuse the same ping: per-kind bell toggles (`main.rs::bell_toggle`, shared chrome with the
+  reuse the same ping: per-kind bell toggles (`settings_ui.rs::bell_toggle`, shared chrome with the
   mention chips' bells) next to the events-panel kind checklist (tab settings → Panels;
   `TabConfig.event_sounds` — `tabs::EventSounds`, generated by the same `event_toggles!` macro as
   the `event_kinds` visibility filter but with an all-off default; opt-in, independent of the
@@ -522,24 +517,26 @@ platform = implement one trait + one message builder, with zero UI changes**.
   the first launch after an update shows a one-time success-tinted "Updated to vX — What's new"
   banner (Velopack `on_restarted` hook → `updater::just_updated_to()`, session-only, ✕ clears).
 - **Settings** (category sidebar: Account / Appearance / Themes / Highlights / Mod Buttons / Streamer Mode / About) and the **usercard** open as
-  **separate OS windows** (`child_window.rs`: a `ChildWindow` renders a host entity's body in its own
-  `cx.open_window`), draggable off the main window and freely resizable. All panel state stays on the
-  host (app / tab view); the window is just a surface. ⚠️ Two rules: kit `InputState`s are
-  **window-bound** (focus/blur/cursor subscriptions), so the settings inputs are recreated against the
-  settings window each open (`rebind_settings_inputs`) and tab rebuilds go through `main_window.update`;
-  and opening a window draws it synchronously (its render re-enters the host), so `child_window::open`
-  must run from a plain `App` context (spawned task), never inside the host's own update/listener.
-  A third rule: `child_window::open` takes the parent window's **display id** — gpui-windows
-  validates requested bounds against the creation display (primary monitor if none given) and
-  silently swaps them for that display's big `default_bounds()` when the bounds' center is
-  elsewhere, which broke opening over a chat window on a secondary monitor.
+  **separate OS windows**, draggable off the main window and freely resizable. Each window is
+  **its own view that owns its inputs and editing state** — `settings_ui.rs::SettingsView`,
+  `chatview/card.rs::UserCardView`, plus the viewer-list and search views — opened through
+  `child_window::open_owned` (`child_window.rs` also has the placement helpers). Saved
+  preferences and their live effects stay on the app; tab settings are the same window showing
+  `Panel::Tab(ix)`. Escape closes these windows. ⚠️ Rules: kit `InputState`s are **window-bound**
+  (focus/blur/cursor subscriptions), so each view creates its inputs in its own window, once;
+  opening a window draws it synchronously, so `open_owned` must run from a plain `App` context
+  (spawned task), never inside the host's own update/listener; and `open_owned` resolves the
+  parent window's **display id** (`resolve_display`) — gpui-windows validates requested bounds
+  against the creation display (primary monitor if none given) and silently swaps them for that
+  display's big default bounds when the bounds' center is elsewhere, which broke opening over a
+  chat window on a secondary monitor. Main + usercard window geometry persists
+  (`window_state.rs`, `<config>/backseater/windows.json`).
   Closing the main window quits the app (`on_window_closed` → `quit`) so child windows don't orphan.
-  The **usercard** window is bare (`open_centered_bare`): header + moderation panel stay fixed and only
+  In the **usercard** window the header + moderation panel stay fixed and only
   the recent-messages section scrolls. Its moderation panel has Chatterino-style preset timeout chips
   (1s → 2w, filtered to the platform's cap — Helix rejects > 2 weeks, Kick's ban API > 7 days;
-  `chatview.rs::max_timeout_secs`) plus a **custom-duration box** (a window-bound `InputState` like the
-  viewer-list search, created in `show_usercard_window`; Enter or its Timeout button applies, bad input /
-  over-cap shows an inline error). Durations parse via `bks_core::parse_duration` ("600", "90s",
+  `chatview/card.rs::max_timeout_secs`) plus a **custom-duration box** (Enter or its Timeout button
+  applies, bad input / over-cap shows an inline error). Durations parse via `bks_core::parse_duration` ("600", "90s",
   "1h30m", "3d", "1w"); `/timeout` accepts the same strings.
 - The **active tab is persisted** (`tabs::save_active`/`load_active`, a separate `active_tab` store) and
   restored on launch, clamped in case that tab is gone.
@@ -659,7 +656,10 @@ crates/
   auth/      # OAuth flows (Twitch implicit, Kick PKCE+broker, Google PKCE) + stores (keyring for
              #   credentials on Windows, JSON files for app data)
   app/       # GPUI binary: tokio<->GPUI bridge, flex-wrap token rendering
-             #   main.rs = BackseaterApp (root view: tab strip, settings, window)
+             #   main.rs = BackseaterApp (root view: tab strip, title bar, app state)
+             #   settings_ui.rs = SettingsView (the settings window + its editing state)
+             #   bridge.rs + source_hub.rs = shared per-(platform, channel) sources,
+             #     fanned out to each tab's feed with join replay
              #   chatview.rs = ChatView (one view's chrome/input/usercard/reply)
              #   channel_store.rs = ChannelModel (shared per-channel row buffer +
              #     connection + state; views observe + reconcile their ListState)
@@ -718,17 +718,25 @@ push it into `bridge.rs::providers()` — no other file changes.** `SeventvProvi
 
 **Tabs (`app/src/main.rs`, `chatview.rs`, `tabs.rs`).** `BackseaterApp` (in `main.rs`) is the root
 view; each tab's `ChatView` lives in `chatview.rs`. `BackseaterApp` owns a `Vec<TabEntry>`
-(each a `TabConfig` + an `Entity<ChatView>`), an `active` index, the shared `Session`, and the
-settings-dialog input entities. The tab strip is hand-rolled (`h_flex` of clickable chips, not the
-kit's action-based `TabBar`): left-click selects, right-click opens the settings `Dialog`
-(`WindowExt::open_dialog`) with name + per-platform channel fields, `✕` closes, `+` adds. Changing a
+(each a `TabConfig` + an `Entity<ChatView>`), an `active` index and the shared `Session`. The tab
+strip is hand-rolled (`h_flex` of clickable chips, not the kit's action-based `TabBar`):
+left-click selects, right-click → Settings opens the settings window on that tab
+(`show_settings_panel(Panel::Tab(ix))` — Channels / Panels / Highlights categories), `✕` closes,
+`+` adds. Changing a
 tab's channels rebuilds its `ChatView` on a fresh `bridge::connect`. `TabConfig` (name + the
 Twitch/Kick/YouTube/TikTok channels + per-tab options) persists to `<config>/backseater/tabs.json`
 (via `bks_auth::store`).
 A tab with no channel set renders a "right-click → Settings" prompt instead of an empty log.
 
 **Data flow (per-tab merged feed):** each tab calls `bridge::connect(session, twitch_ch, kick_ch, youtube_ch, tiktok_ch)`,
-which spawns **one tokio task per non-empty platform**, all feeding that tab's *own* smol channel:
+which gets **one shared source per (platform, channel)** (`bridge.rs::shared_source`, a process-wide
+registry keyed by `SourceKey`; two tabs with the same Twitch channel share one connection even when
+their other channels differ). Each source runs its platform task once and publishes processed
+events into a `source_hub.rs::SourceHub` (bounded fan-out + join replay: a new feed gets a seeded
+snapshot flagged historical, a lagging feed gets a warning and a fresh snapshot instead of blocking
+the others). `forward_source` relays each of the tab's sources into that feed's *own* smol channel.
+The source's producer `Controller` owns the connection; the feed's `Controller` shares its action
+state (`with_sources`) but keeps its own send target and notice sink. Per platform:
 - Twitch: owned by the tab's `Controller` (`start()` → `run_twitch`), which resolves 7TV emotes (on
   `Channel`, loads providers into an `EmoteRegistry`; on `Message`, rewrites text runs) + badges. On
   `Channel` it fetches emotes, badges, and the history backlog **concurrently** (`tokio::join!`) so the
@@ -791,8 +799,9 @@ images in the LRU cache; sessions got choppier as events accumulated. Views trac
 buffer by **stable sequence numbers** (`ChannelModel::events_base` + index; `event_at(seq)`),
 reconciling their per-view filtered `events_shown` list from the model's granular
 `EventAppended { seq }`/`EventsTrimmed` events (same lockstep rule as the log); a filter change or
-reconnect rebuilds it wholesale (`rebuild_events_shown`). The mentions panel is still a plain
-scroll column (bounded: it filters the `MAX_ROWS` ring).
+reconnect rebuilds it wholesale (`rebuild_events_shown`). The mentions panel is a
+virtualized list too, kept incrementally by the same `FilteredMessages` helper the search window
+uses (`ChatView::mentions_panel` + `mentions_list_state`).
 
 **Emote image cache eviction (Chatterino's `ImageExpirationPool`).** gpui's *global* asset cache
 (`window.use_asset`, the default when an `img()` has no scoped cache) **never evicts** — every distinct
@@ -801,17 +810,18 @@ multi-channel session that grows unbounded (animated emotes dominate: a ~112×11
 a power user can reach 100s of MB–GBs). gpui's bundled `RetainAllImageCache` also never evicts (its
 "LRU" doc-comment is a lie — the impl is a plain `HashMap`). So the chat log's images render through a
 **custom `LruImageCache`** (`crates/app/src/image_cache.rs`, an `ImageCache` impl, wrapped via gpui's
-`image_cache(..)` element around the list — `ChatView::image_cache`). It records each image's last-drawn
-time **inside its `load`** — which gpui calls for *every* image it actually renders each frame (both the
-layout and paint phases) — so "last accessed" is exactly "last on screen", with **no per-image-kind
-bookkeeping in the UI**. (The earlier approach stamped URLs from message data in the render closure; it
-was brittle — every image kind it forgot to enumerate, badges/icons/event-emotes, evicted while visible
-and vanished.) A timer sweep (`LruImageCache::sweep`, every `EMOTE_SWEEP_INTERVAL`=1min) frees the decoded
-frames (and GPU texture via `cx.drop_image`) of anything not drawn within `EMOTE_LIFETIME`=10min
-(both match Chatterino's `IMAGE_POOL_*`). Anything on screen was accessed that frame so it's never stale;
-an evicted off-screen image re-loads when it scrolls back in (verified: clean, no blank). The cache is
-**app-wide** (`LruImageCache::shared`, a gpui global, one sweep timer for the whole app) so an image loaded
-in one tab / the picker is reused everywhere.
+`image_cache(..)` element around the list — `ChatView::image_cache`). Each drawn image **pins** its
+entry through gpui element state (`Entry::is_visible` = the pin `Arc` has another holder), which
+survives cached-view reuse even when `load` isn't called again — so "visible" needs **no
+per-image-kind bookkeeping in the UI**. A sweep (`LruImageCache::sweep`) frees the decoded frames
+(and GPU textures) of off-screen images by two rules: **age** (not used within `EMOTE_LIFETIME`=10min,
+checked every `EMOTE_SWEEP_INTERVAL`=1min — Chatterino's `IMAGE_POOL_*` values) and a **memory
+budget** (`DECODED_CACHE_BUDGET` = 1 GiB of decoded bytes; above it the least recently used
+off-screen images go first, `trim_to_budget`). Pinned (visible) images are never evicted, so the
+budget is soft — what's on screen can exceed it. An evicted image re-loads from disk when it
+scrolls back in. Decoding is bounded per image too (`MAX_IMAGE_BYTES`, `MAX_IMAGE_DIMENSION`,
+`MAX_ANIMATION_FRAMES`, `MAX_DECODED_BYTES`). The cache is **app-wide** (`LruImageCache::shared`, a
+gpui global) so an image loaded in one tab / the picker is reused everywhere.
 
 It's also **disk-backed** like Chatterino: gpui's image loader re-downloads on every cache miss (no disk
 cache) and re-decodes, so a short eviction lifetime made emotes that scroll off and back churn the network
@@ -847,9 +857,9 @@ The scale lives in `bks-core` so every crate reads it without a new dependency.
 
 ⚠️ Do NOT `clear()` the cache wholesale: clearing
 *visible* images leaves them permanently blank, because a virtualized list repaints cached rows without
-re-running `request_layout` (so `load()` never re-fires for a row already laid out) — evict only by
-last-accessed time. Pure time-based (no hard byte/count cap) for now; a transient spam burst can still
-spike but self-clears within a lifetime window. Cold first-load of a big channel's emotes still takes a few
+re-running `request_layout` (so `load()` never re-fires for a row already laid out) — evict only
+through the sweep, which skips pinned entries. Unused disk-cache files are pruned after 14 days
+(`DISK_CACHE_MAX_AGE`). Cold first-load of a big channel's emotes still takes a few
 seconds (inherent: many large animated GIFs to download + decode); warm cache is fast.
 
 **Auth / sending / moderation — `Session` is the single source of truth AND observable**

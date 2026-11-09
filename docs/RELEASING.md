@@ -13,9 +13,9 @@ on the next launch).
 ## Cutting a release
 
 1. Bump `version` in the workspace `Cargo.toml` — e.g. `0.2.3`, or `0.2.3-beta.1` for a beta.
-   Run `cargo check --workspace` to refresh `Cargo.lock` and include it in the commit.
+   Run `cargo check --workspace` to refresh `Cargo.lock`; it ships with the version bump.
 2. Add (or extend) the `## v0.2.3` section in `CHANGELOG.md` — it becomes the release notes.
-3. Commit and push.
+3. Push to `main`.
 
 CI gates the release on formatting, Clippy, tests, **and the changelog**: a version with no matching
 `CHANGELOG.md` section fails the run instead of releasing (forgetting step 2 can't ship a
@@ -28,7 +28,7 @@ On green, the release appears at `https://github.com/Lonanche/backseater/release
 - `releases.win.json` — the feed index
 
 Once the version has been published, later pushes skip the optimized build and packaging.
-PRs only run validation, and new commits cancel obsolete runs for the same PR.
+PRs only run validation, and new pushes cancel obsolete runs for the same PR.
 Release jobs are serialized and never cancel an active publication. The version check runs
 inside that serialization slot, so a waiting job sees releases published by an earlier job.
 GitHub retains only the newest pending release job when several pushes queue up; let a
@@ -47,6 +47,17 @@ the optimized build starts.
 
 The "Download previous release" step is `continue-on-error` because a first release has nothing
 to build a delta from — that failure is expected once.
+
+## Built-in YouTube login
+
+The release build compiles in the Google OAuth client used for YouTube login, from the
+`YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET` repository secrets (Settings → Secrets and
+variables → Actions). If either is missing the release still publishes, but its YouTube Log in
+button is disabled ("Not available in this build"). Pull-request and local builds never include it.
+
+The Google consent screen links to the home page and privacy policy in `site/`. That site is a
+separate Cloudflare Worker and is not deployed by CI: run `npx wrangler deploy` from `site/`
+after changing it.
 
 ## Beta releases
 

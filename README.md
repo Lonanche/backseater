@@ -25,7 +25,9 @@ creature comforts of a mature chat client.
   pinned messages, send + ban/timeout via the public API, usercards.
 - **YouTube** — anonymous live-chat reading via InnerTube (no API key, no
   quota): messages, custom channel emojis, membership badges, Super Chats /
-  memberships / gifts as event rows.
+  memberships / gifts as event rows. Logging in with a Google account adds
+  sending messages, deleting messages, and timing out or banning users through
+  the official YouTube Data API.
 - **TikTok LIVE** — anonymous read-only chat by username or LIVE URL, native
   emote messages and badges, gifts/subscriptions/follows in the event feed,
   viewer counts and live status, automatic reconnect and offline polling.
@@ -63,12 +65,14 @@ crates/
   platform/  # the expandability seam: ChatSource trait + ChatEvent
   twitch/    # Twitch: shared IRC, Helix, EventSub, badges, history
   kick/      # Kick: Pusher WebSocket, REST, badges, history
-  youtube/   # YouTube: anonymous InnerTube live-chat reader
+  youtube/   # YouTube: anonymous InnerTube live-chat reader + Data API send/moderation
   tiktok/    # TikTok: anonymous PirateTok WebSocket reader
   emotes/    # EmoteRegistry + EmoteProvider trait (7TV / BTTV / FFZ)
-  auth/      # OAuth flows + JSON persistence
+  preview/   # LinkPreviewProvider trait + cache (YouTube video, Twitch/Kick clip previews)
+  auth/      # OAuth flows (Twitch, Kick, Google) + OS-keyring and JSON persistence
   app/       # GPUI binary: bridge, rendering, tabs, settings, windows
 worker/      # Cloudflare Worker holding the Kick OAuth client secret
+site/        # Home page + privacy policy served at backseater.trausi.dev
 ```
 
 The design goal: **adding a platform = implement one trait + one message
@@ -119,19 +123,25 @@ so you can catch failures locally:
 ./scripts/check.ps1 -Check release   # optional optimized app build
 ```
 
-The script stops at the first failure and uses the committed lockfile for all
+The script stops at the first failure and uses the checked-in lockfile for all
 dependency resolution. Run `cargo fmt` from the repository root to fix workspace
 formatting; the vendored connector is excluded. CI keeps Clippy and tests in
 one Windows job and only compiles an optimized executable when a release is needed.
 
 The workspace supports Rust **1.99** and newer. When upgrading the compiler,
 update the toolchain pin and workspace `rust-version` together, then run the full
-check script and the release build before committing. Include `Cargo.lock` when
-changing dependencies or bumping the workspace version.
+check script and the release build. `Cargo.lock` changes whenever dependencies
+or the workspace version change, and belongs with that change.
 
-Channels are set per tab (right-click a tab → Settings). `/login` starts the
-Twitch OAuth flow, `/kicklogin` the Kick one. `BKS_DEBUG=1` logs received
+Channels are set per tab (right-click a tab → Settings). Logging in to Twitch,
+Kick or YouTube is done from Settings → Account. `BKS_DEBUG=1` logs received
 messages to stderr.
+
+Twitch and Kick login work in any build. YouTube login uses a Google OAuth
+client that is compiled into release builds only, so a local build shows it as
+"Not available in this build" unless you set `BKS_YOUTUBE_CLIENT_ID` and
+`BKS_YOUTUBE_CLIENT_SECRET` (a Google Cloud "Desktop app" client with the
+YouTube Data API v3 enabled) before starting the app.
 
 Kick discovers its current Pusher app key and region on each connection, and
 confirms the live subscription before loading history. To check that connection
@@ -142,14 +152,14 @@ cargo run --locked -p bks-kick --example read_kick_chat -- goes 60
 ```
 
 To add TikTok, enter `@username` or `https://www.tiktok.com/@username/live` in
-the tab's **TikTok channel (read-only)** field and save. Leave the other channel
+the tab's TikTok field and save. Leave the other channel
 fields blank for a TikTok-only tab, or fill them to merge chats. Offline channels
 are checked every 30 seconds. TikTok sending, login, and moderation are not
 supported; private or restricted streams may be unavailable anonymously.
 
 TikTok uses a **locally patched copy** of [PirateTok/live-rs](https://github.com/PirateTok/live-rs), vendored under
 its 0BSD license. We fixed Windows build-script path handling and adjusted connection,
-error, history, and subscription event handling. The exact upstream commit and patches are documented in
+error, history, and subscription event handling. The exact upstream revision and patches are documented in
 [`vendor/piratetok-live-rs/UPSTREAM.md`](vendor/piratetok-live-rs/UPSTREAM.md).
 It relies on TikTok's unofficial protocol, so service changes can interrupt it.
 The same connector can be tested without opening the GUI:
