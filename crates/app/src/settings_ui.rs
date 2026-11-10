@@ -477,6 +477,17 @@ pub(super) struct SettingsView {
     obs_running: bool,
     settings_inputs: SettingsInputs,
     _settings_mentions_name_sub: Subscription,
+    /// Enter-to-submit (and the Channels page's unsaved-edit tracking) for
+    /// the text inputs; see [`Self::subscribe_input_submits`].
+    _settings_submit_subs: Vec<Subscription>,
+    /// The Channels page shows "Saved" until one of its fields is edited again.
+    channels_saved: bool,
+    /// "Reset to defaults" on Mod Buttons was clicked once and awaits the
+    /// confirming second click.
+    confirm_reset_mod_buttons: bool,
+    /// The custom theme whose delete button was clicked once and awaits the
+    /// confirming second click.
+    confirm_delete_theme: Option<String>,
     settings_font: Entity<FontCombobox>,
     _settings_font_sub: Subscription,
     settings_chat_modes: Entity<SettingSelect>,
@@ -526,6 +537,7 @@ impl SettingsView {
                 .update(cx, |s, cx| s.set_value(name.clone(), window, cx));
         }
         let name_sub = Self::subscribe_mentions_name(&inputs.mentions_tab_name, cx);
+        let submit_subs = Self::subscribe_input_submits(&inputs, window, cx);
         let (font, font_sub) = Self::font_combobox(settings.font_family.as_deref(), window, cx);
         let (chat_modes, streamer, mod_mode, link_preview, select_subs) =
             Self::build_setting_selects(&settings, window, cx);
@@ -560,6 +572,10 @@ impl SettingsView {
             obs_running,
             settings_inputs: inputs,
             _settings_mentions_name_sub: name_sub,
+            _settings_submit_subs: submit_subs,
+            channels_saved: false,
+            confirm_reset_mod_buttons: false,
+            confirm_delete_theme: None,
             settings_font: font,
             _settings_font_sub: font_sub,
             settings_chat_modes: chat_modes,
@@ -600,7 +616,19 @@ impl SettingsView {
             self.tab_settings_category = TabSettingsCategory::Channels;
             self.prefill_tab_settings(ix, window, cx);
         }
+        self.channels_saved = false;
+        self.reset_page_state();
         cx.notify();
+    }
+
+    /// Returns to a page's resting state when the shown category changes:
+    /// scrolled to the top, with no half-confirmed destructive action armed.
+    fn reset_page_state(&mut self) {
+        let top = gpui::point(px(0.), px(0.));
+        self.settings_scroll.set_offset(top);
+        self.tab_settings_scroll.set_offset(top);
+        self.confirm_reset_mod_buttons = false;
+        self.confirm_delete_theme = None;
     }
 
     pub(super) fn show_account(&mut self, cx: &mut Context<Self>) {
@@ -984,6 +1012,76 @@ impl SettingsView {
             }
         })
     }
+    /// Makes Enter submit in every settings text input: the Channels fields
+    /// save the tab, a term input adds its term, the mod-button editor fields
+    /// add/save the button. Editing a Channels field also clears its "Saved"
+    /// note. Created alongside the inputs in their owning settings window.
+    fn subscribe_input_submits(
+        inputs: &SettingsInputs,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Subscription> {
+        #[derive(Clone, Copy)]
+        enum Submit {
+            Channels,
+            Term(TermKind, bool),
+            ModButton,
+        }
+        let bindings = [
+            (&inputs.name, Submit::Channels),
+            (&inputs.twitch, Submit::Channels),
+            (&inputs.kick, Submit::Channels),
+            (&inputs.youtube, Submit::Channels),
+            (&inputs.tiktok, Submit::Channels),
+            (&inputs.mention, Submit::Term(TermKind::Mentions, false)),
+            (&inputs.ignore, Submit::Term(TermKind::Ignore, false)),
+            (&inputs.suppress, Submit::Term(TermKind::Suppress, false)),
+            (&inputs.tab_mention, Submit::Term(TermKind::Mentions, true)),
+            (&inputs.tab_ignore, Submit::Term(TermKind::Ignore, true)),
+            (&inputs.tab_suppress, Submit::Term(TermKind::Suppress, true)),
+            (&inputs.mod_name, Submit::ModButton),
+            (&inputs.mod_icon, Submit::ModButton),
+            (&inputs.mod_command, Submit::ModButton),
+        ];
+        bindings
+            .into_iter()
+            .map(|(input, submit)| {
+                cx.subscribe_in(
+                    input,
+                    window,
+                    move |this, _, event: &InputEvent, window, cx| match event {
+                        InputEvent::Change => {
+                            if matches!(submit, Submit::Channels) && this.channels_saved {
+                                this.channels_saved = false;
+                                cx.notify();
+                            }
+                        }
+                        InputEvent::PressEnter { .. } => match (submit, this.panel) {
+                            (Submit::Channels, Panel::Tab(ix)) => this.save_tab_channels(ix, cx),
+                            (Submit::Term(kind, false), _) => {
+                                this.add_term(TermList::global(kind), window, cx)
+                            }
+                            (Submit::Term(kind, true), Panel::Tab(ix)) => {
+                                this.add_term(TermList::tab(kind, ix), window, cx)
+                            }
+                            (Submit::ModButton, _) => this.add_mod_button(window, cx),
+                            _ => {}
+                        },
+                        _ => {}
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Applies the Channels page to tab `ix` and shows the "Saved" note. The
+    /// window stays open so the tab's other categories can be adjusted too.
+    fn save_tab_channels(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.apply_settings(ix, cx);
+        self.channels_saved = true;
+        cx.notify();
+    }
+
     /// Pre-fills the tab-settings inputs from tab `ix`'s current config.
     /// `window` must be the settings window the inputs are bound to.
     fn prefill_tab_settings(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1021,7 +1119,10 @@ impl SettingsView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
-                            this.settings_category = cat;
+                            if this.settings_category != cat {
+                                this.settings_category = cat;
+                                this.reset_page_state();
+                            }
                             cx.notify();
                         }),
                     )
@@ -1066,7 +1167,10 @@ impl SettingsView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
-                            this.tab_settings_category = cat;
+                            if this.tab_settings_category != cat {
+                                this.tab_settings_category = cat;
+                                this.reset_page_state();
+                            }
                             cx.notify();
                         }),
                     )
@@ -1101,30 +1205,81 @@ impl SettingsView {
     /// field per platform, applied by Save (unlike the live-toggling switches,
     /// a channel change reconnects the tab, so it waits for an explicit apply).
     fn tab_channels_section(&self, ix: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use bks_core::Platform;
+        // One card row: the platform's logo (blank for the tab name), a
+        // fixed-width label so the inputs line up, and the input.
+        let row = |platform: Option<Platform>, label: &str, input: &Entity<InputState>| {
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_3()
+                .px_3()
+                .py_2()
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(22.))
+                        .flex()
+                        .justify_center()
+                        .children(platform.map(|p| platform_icon(p, 18.))),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(64.))
+                        .text_size(px(13.))
+                        .child(SharedString::from(label.to_string())),
+                )
+                .child(div().flex_1().min_w_0().child(Input::new(input)))
+        };
+        let inputs = &self.settings_inputs;
         v_flex()
             .gap_2()
-            .child(field("Name", &self.settings_inputs.name))
-            .child(field("Twitch channel", &self.settings_inputs.twitch))
-            .child(field("Kick channel", &self.settings_inputs.kick))
-            .child(field("YouTube channel", &self.settings_inputs.youtube))
-            .child(field(
-                "TikTok channel (read-only)",
-                &self.settings_inputs.tiktok,
-            ))
+            .child(section_title("Tab"))
+            .child(setting_card().child(row(None, "Name", &inputs.name)))
+            .child(div().h_1())
+            .child(section_title("Channels"))
             .child(
-                h_flex().justify_end().mt_2().child(
-                    Button::new("save-tab-settings")
-                        .label("Save")
-                        .primary()
-                        .small()
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.apply_settings(ix, cx);
-                            // This button lives in the settings window; closing
-                            // is just removing the window we're dispatched in.
-                            window.remove_window();
-                            cx.notify();
-                        })),
-                ),
+                setting_card()
+                    .child(row(Some(Platform::Twitch), "Twitch", &inputs.twitch))
+                    .child(card_divider())
+                    .child(row(Some(Platform::Kick), "Kick", &inputs.kick))
+                    .child(card_divider())
+                    .child(row(Some(Platform::YouTube), "YouTube", &inputs.youtube))
+                    .child(card_divider())
+                    .child(row(Some(Platform::TikTok), "TikTok", &inputs.tiktok)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(
+                        "Leave a platform empty to skip it. TikTok chat is read-only.",
+                    )),
+            )
+            .child(
+                h_flex()
+                    .justify_end()
+                    .items_center()
+                    .gap_3()
+                    .mt_2()
+                    .when(self.channels_saved, |r| {
+                        r.child(
+                            div()
+                                .text_xs()
+                                .text_color(gpui::rgb(render::live_text()))
+                                .child(SharedString::from("✓ Saved")),
+                        )
+                    })
+                    .child(
+                        Button::new("save-tab-settings")
+                            .label("Save")
+                            .primary()
+                            .small()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.save_tab_channels(ix, cx);
+                            })),
+                    ),
             )
             .into_any_element()
     }
@@ -1728,6 +1883,7 @@ impl SettingsView {
         use gpui_component::button::Button;
 
         let active = &self.settings.theme;
+        let pending_delete = self.confirm_delete_theme.clone();
         // One selectable row for a theme: click to activate; custom rows also get
         // Edit + Delete buttons.
         let chip = |label: SharedString,
@@ -1791,6 +1947,8 @@ impl SettingsView {
                 )
                 .when_some(custom, |row, name| {
                     let edit_name = name.clone();
+                    // Deleting takes two clicks: the first arms the button.
+                    let confirming = pending_delete.as_deref() == Some(name.as_str());
                     row.child(
                         h_flex()
                             .gap_1()
@@ -1805,11 +1963,17 @@ impl SettingsView {
                             )
                             .child(
                                 Button::new(SharedString::from(format!("del-{name}")))
-                                    .label("✕")
+                                    .label(if confirming { "Delete?" } else { "✕" })
                                     .xsmall()
-                                    .ghost()
+                                    .map(|b| if confirming { b.danger() } else { b.ghost() })
                                     .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.delete_theme(&name, window, cx);
+                                        if confirming {
+                                            this.confirm_delete_theme = None;
+                                            this.delete_theme(&name, window, cx);
+                                        } else {
+                                            this.confirm_delete_theme = Some(name.clone());
+                                            cx.notify();
+                                        }
                                     })),
                             ),
                     )
@@ -1946,6 +2110,19 @@ impl SettingsView {
                     .outline()
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.with_app(cx, |app, cx| app.adjust_font_size(1.0, cx));
+                    })),
+            )
+            .child(
+                Button::new("font-reset")
+                    .label("Reset")
+                    .small()
+                    .ghost()
+                    .disabled(size == settings::DEFAULT_FONT_SIZE)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.with_app(cx, |app, cx| {
+                            let delta = settings::DEFAULT_FONT_SIZE - app.settings.font_size;
+                            app.adjust_font_size(delta, cx);
+                        });
                     })),
             );
         v_flex()
@@ -2189,6 +2366,7 @@ impl SettingsView {
     /// The Mod Buttons settings category: the strip's visibility mode and the
     /// custom-button editor (name / icon / command template / platform).
     fn mod_buttons_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let confirm_reset = self.confirm_reset_mod_buttons;
         let mode_seg = setting_dropdown(&self.settings_mod_mode, settings::ModButtonMode::LABELS);
 
         // A small glyph action on a button row (▲ ▼ ✎ ✕); disabled ones render
@@ -2409,11 +2587,26 @@ impl SettingsView {
                     .child(div().flex_1())
                     .child(
                         Button::new("reset-mod-buttons")
-                            .label("Reset to defaults")
+                            .label(if confirm_reset {
+                                "Click again to reset"
+                            } else {
+                                "Reset to defaults"
+                            })
                             .small()
-                            .outline()
+                            .map(|b| {
+                                if confirm_reset {
+                                    b.danger()
+                                } else {
+                                    b.outline()
+                                }
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.reset_mod_buttons(cx);
+                                if this.confirm_reset_mod_buttons {
+                                    this.reset_mod_buttons(cx);
+                                } else {
+                                    this.confirm_reset_mod_buttons = true;
+                                    cx.notify();
+                                }
                             })),
                     )
                     .when(editing.is_some(), |row| {
@@ -2573,6 +2766,7 @@ impl SettingsView {
             app.save_mod_buttons(cx);
         });
         self.editing_mod_button = None;
+        self.confirm_reset_mod_buttons = false;
         cx.notify();
     }
     fn streamer_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
