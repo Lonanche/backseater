@@ -25,9 +25,10 @@ use gpui::{
     div, img, px, App, Context, Entity, FollowMode, FontWeight, ListAlignment, ListState,
     MouseButton, Pixels, Point, SharedString, Window,
 };
-use gpui_component::button::Button;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex, ActiveTheme, Sizable, WindowExt};
@@ -553,6 +554,20 @@ pub(crate) struct ActivateRequested;
 
 impl gpui::EventEmitter<ActivateRequested> for ChatView {}
 
+/// Emitted by an unconfigured tab's "Choose channels" button; the app answers
+/// by opening that tab's settings window.
+pub(crate) struct SettingsRequested;
+
+impl gpui::EventEmitter<SettingsRequested> for ChatView {}
+
+/// The open right-click message menu: the kit menu entity, where it was
+/// opened (window coordinates), and the subscription that clears it on dismiss.
+struct RowMenu {
+    menu: Entity<PopupMenu>,
+    position: Point<Pixels>,
+    _dismiss: gpui::Subscription,
+}
+
 /// One tab's chat feed + input. Owns its connection via [`Controller`].
 pub(crate) struct ChatView {
     /// The shared channel model: the canonical row
@@ -758,6 +773,13 @@ pub(crate) struct ChatView {
     /// message aged out of the buffer), with the time it appeared so it fades on
     /// the same tick as the row flash. View-local (not a shared model notice).
     jump_note: Option<(SharedString, std::time::Instant)>,
+    /// Messages that arrived while this view was scrolled up off the bottom,
+    /// shown on the "jump to latest" pill. A `Cell` because the log's render
+    /// zeroes it once the view is tail-following again (a manual scroll back
+    /// down re-engages the tail with no event to hook).
+    unseen_messages: std::cell::Cell<usize>,
+    /// The right-click message menu, while open.
+    row_menu: Option<RowMenu>,
     /// Whether the pointer is over this view's chat-log region (tracked by the
     /// log wrapper's `on_hover`; the composer/input bar is outside it).
     log_hovered: bool,
@@ -1004,6 +1026,8 @@ impl ChatView {
             flash: None,
             flash_tick_pending: false,
             jump_note: None,
+            unseen_messages: std::cell::Cell::new(0),
+            row_menu: None,
             log_hovered: false,
             log_paused: false,
             paused_needs_reset: false,
@@ -1114,6 +1138,12 @@ impl ChatView {
                 self.note_new_row(msg.as_deref());
                 if let Some(m) = msg.as_deref() {
                     self.arm_inline_preview(m, cx);
+                    if !*historical
+                        && !self.list_state.is_following_tail()
+                        && !self.ignore.matches_message(m)
+                    {
+                        self.unseen_messages.set(self.unseen_messages.get() + 1);
+                    }
                 }
                 // Live activity → the app marks this tab unread if it's inactive.
                 // A historical row can also arrive via `Appended` (a backfilled
@@ -2616,6 +2646,108 @@ impl ChatView {
     }
 
     /// The transient jump note (aged-out message), while it's still showing.
+    /// Opens the right-click menu for the message `msg_id` at `position`
+    /// (window coordinates). The actions key on the message id, so one that
+    /// ages out of the buffer while the menu is up is a no-op.
+    fn open_row_menu(
+        &mut self,
+        msg_id: &str,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(msg) = self.message_by_id(msg_id, cx) else {
+            return;
+        };
+        let selected = self.selection.selected_text();
+        let can_reply = !self.config.read_only()
+            && matches!(
+                msg.platform,
+                bks_core::Platform::Twitch | bks_core::Platform::Kick
+            );
+        let view = cx.entity().downgrade();
+        let previous_focus = window.focused(cx);
+        let copy_item = |label: &'static str, text: String| {
+            PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+            })
+        };
+        let menu = PopupMenu::build(window, cx, |mut menu, _, _| {
+            menu = menu.min_w(px(180.));
+            // Closing the menu hands focus back to whatever had it (usually
+            // the composer), so typing continues uninterrupted.
+            if let Some(previous) = previous_focus {
+                menu = menu.action_context(previous);
+            }
+            if !selected.is_empty() {
+                menu = menu.item(copy_item("Copy selection", selected));
+            }
+            menu = menu
+                .item(copy_item("Copy message", msg.raw_text.clone()))
+                .item(copy_item("Copy username", msg.author.display_name.clone()))
+                .separator();
+            if can_reply {
+                let view = view.clone();
+                let id = msg.id.clone();
+                menu = menu.item(PopupMenuItem::new("Reply").on_click(move |_, window, cx| {
+                    // Deferred past the menu's own dismiss, which restores the
+                    // previous focus and would take it back off the composer.
+                    let view = view.clone();
+                    let id = id.clone();
+                    window.defer(cx, move |window, cx| {
+                        view.update(cx, |this, cx| this.start_reply(&id, window, cx))
+                            .ok();
+                    });
+                }));
+            }
+            let id = msg.id.clone();
+            menu.item(
+                PopupMenuItem::new("Open usercard").on_click(move |_, _, cx| {
+                    view.update(cx, |this, cx| {
+                        this.open_usercard(&id, cx);
+                        cx.notify();
+                    })
+                    .ok();
+                }),
+            )
+        });
+        let _dismiss = cx.subscribe(&menu, |this, _, _: &gpui::DismissEvent, cx| {
+            this.row_menu = None;
+            cx.notify();
+        });
+        self.row_menu = Some(RowMenu {
+            menu,
+            position,
+            _dismiss,
+        });
+        cx.notify();
+    }
+
+    /// The open message menu, anchored at its click position above everything
+    /// else in the view. The menu takes focus so its keys (arrows, Enter,
+    /// Escape) work and a click outside dismisses it.
+    fn render_row_menu(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let open = self.row_menu.as_ref()?;
+        let focus = gpui::Focusable::focus_handle(&open.menu, cx);
+        if !focus.contains_focused(window, cx) {
+            focus.focus(window, cx);
+        }
+        Some(
+            gpui::deferred(
+                gpui::anchored()
+                    .position(open.position)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(open.menu.clone()),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
+    }
+
     pub(crate) fn jump_note(&self) -> Option<SharedString> {
         let (text, at) = self.jump_note.as_ref()?;
         (at.elapsed() < JUMP_NOTE_DURATION).then(|| text.clone())
@@ -5205,9 +5337,12 @@ impl Render for ChatView {
                 .bg(cx.theme().background)
                 .text_color(cx.theme().muted_foreground)
                 .child(SharedString::from("This tab has no channel set."))
-                .child(SharedString::from(
-                    "Right-click the tab → Settings to choose a channel.",
-                ));
+                .child(
+                    Button::new("choose-channels")
+                        .primary()
+                        .label("Choose channels")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsRequested))),
+                );
         }
 
         // Keep the input's placeholder naming where a message will go ("Send a
@@ -5224,6 +5359,7 @@ impl Render for ChatView {
         let emote_popup_overlay = self.render_emote_popup(window, cx);
         let link_preview_overlay = self.render_link_preview(window, cx);
         let thread_panel_overlay = self.render_thread_panel(window, cx);
+        let row_menu_overlay = self.render_row_menu(window, cx);
 
         let layout_grid = self.render_layout_grid(cx);
 
@@ -5273,6 +5409,7 @@ impl Render for ChatView {
             .child(self.link_preview_probe())
             .children(link_preview_overlay)
             .children(thread_panel_overlay)
+            .children(row_menu_overlay)
     }
 }
 
@@ -5555,6 +5692,21 @@ impl Render for PanelDivider {
 /// and the message id — the chatter's identity is resolved from that message when
 /// the click fires, so a row's click target carries one cheap id, not a copy of
 /// every field.
+/// Builds a message row's right-click handler: opens the message menu at the
+/// pointer. Captures the view handle + message id, like the other row callbacks.
+fn row_menu_click_for(
+    entity: &Entity<ChatView>,
+    msg: &Message,
+) -> impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static {
+    let entity = entity.clone();
+    let msg_id = msg.id.clone();
+    move |ev, window, cx| {
+        entity.update(cx, |this, cx| {
+            this.open_row_menu(&msg_id, ev.position, window, cx);
+        });
+    }
+}
+
 fn name_click_for(entity: &Entity<ChatView>, msg: &Message) -> render::NameClick {
     let entity = entity.clone();
     let msg_id = SharedString::from(msg.id.clone());

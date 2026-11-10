@@ -1286,11 +1286,15 @@ fn name_token(
     if let Some(right_click) = right_click {
         // Right-click tags the chatter; a drag-select that ends on the name must
         // not fire it (same guard as the left click).
-        wrapper = wrapper.on_mouse_up(MouseButton::Right, move |_, window, cx| {
-            if !sel.has_selection() {
-                right_click(window, cx);
-            }
-        });
+        wrapper = wrapper
+            // The name's right-click is the tag shortcut, so keep the press
+            // from also opening the row's message menu.
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(MouseButton::Right, move |_, window, cx| {
+                if !sel.has_selection() {
+                    right_click(window, cx);
+                }
+            });
     }
     wrapper.child(inner).into_any_element()
 }

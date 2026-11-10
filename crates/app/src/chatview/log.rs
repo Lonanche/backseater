@@ -29,8 +29,8 @@ use gpui_component::{h_flex, v_flex, ActiveTheme};
 
 use super::{
     mention_click_for, mention_click_for_platform, mod_click_for, name_click_for,
-    name_right_click_for, pin_click_for, reply_click_for, thread_click_for, ChatView, EmotePopup,
-    Row,
+    name_right_click_for, pin_click_for, reply_click_for, row_menu_click_for, thread_click_for,
+    ChatView, EmotePopup, Row,
 };
 use crate::channel_store::ChannelModel;
 use crate::{render, ORDINAL_STRIDE, SCROLLBAR_WIDTH};
@@ -359,6 +359,8 @@ impl Render for LogView {
             // the "On hover" mod-button mode; the wrapper below then carries an
             // `on_hover` listener that shows/hides the strip via the view.
             let mut hover_track: Option<String> = None;
+            // Message rows open the message menu on right-click.
+            let mut row_menu_click = None;
             let inner = match row {
                 Row::Message { msg } => {
                     // This view's own filters (shared buffer, per-view display):
@@ -387,6 +389,7 @@ impl Render for LogView {
                     } else {
                         None
                     };
+                    row_menu_click = Some(row_menu_click_for(&render_entity, msg));
                     let name_click = name_click_for(&render_entity, msg);
                     let name_right_click = name_right_click_for(&render_entity, msg);
                     let reply_click = matches!(
@@ -610,6 +613,9 @@ impl Render for LogView {
                 // row's content, outside its tint/fade.
                 .when_some(trailing, |w, label| {
                     w.child(render::render_day_divider(&label, font_size))
+                })
+                .when_some(row_menu_click, |w, click| {
+                    w.on_mouse_down(MouseButton::Right, click)
                 });
             // "On hover" mod-button mode: this row shows/hides its strip by
             // hover, tracked on the view (`hover_strip_row`) so the next log
@@ -733,7 +739,7 @@ impl Render for LogView {
             )
             // When scrolled up off the bottom, show a "jump to latest" pill;
             // while hover-paused at the bottom, a "paused" pill instead.
-            .children(self.jump_to_latest(&list_state, cx))
+            .children(self.jump_to_latest(&host, &list_state, cx))
             .children(self.paused_pill(paused, &list_state, cx))
             // A transient note when a clicked mention can't be jumped to (aged
             // out of the buffer).
@@ -749,12 +755,21 @@ impl LogView {
     /// bottom edge (its container is `relative`).
     fn jump_to_latest(
         &self,
+        host: &gpui::Entity<ChatView>,
         list_state: &gpui::ListState,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
+        let unseen = &host.read(cx).unseen_messages;
         if list_state.is_following_tail() {
+            // Back at the bottom: everything has been seen.
+            unseen.set(0);
             return None;
         }
+        let label = match unseen.get() {
+            0 => SharedString::from("Jump to latest"),
+            1 => SharedString::from("1 new message"),
+            n => SharedString::from(format!("{n} new messages")),
+        };
         let list_state = list_state.clone();
         // A full-width, non-interactive overlay row pinned to the bottom that just
         // centers the pill; only the pill itself is clickable.
@@ -792,7 +807,7 @@ impl LogView {
                                 cx.notify();
                             }),
                         )
-                        .child(SharedString::from("Jump to latest"))
+                        .child(label)
                         .child(
                             // A small circular badge holding the down chevron.
                             div()

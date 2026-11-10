@@ -66,6 +66,7 @@ impl Harness {
                     settings_window: None,
                     settings_view: None,
                     main_window: window.window_handle(),
+                    focus_handle: cx.focus_handle(),
                     popouts: Vec::new(),
                     popout_views: Vec::new(),
                     mentions_window: None,

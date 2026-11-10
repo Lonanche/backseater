@@ -114,6 +114,9 @@ struct TabEntry {
     /// Keeps the [`ActivateRequested`](chatview::ActivateRequested)
     /// subscription (search-result click → re-select this tab) alive.
     _activate_sub: gpui::Subscription,
+    /// Keeps the [`SettingsRequested`](chatview::SettingsRequested)
+    /// subscription (an empty tab's "Choose channels" button) alive.
+    _settings_sub: gpui::Subscription,
 }
 
 /// Compiles mention terms into a matcher with the per-term mute flags applied
@@ -248,6 +251,10 @@ pub(crate) struct BackseaterApp {
     /// it, and tab rebuilds bind their views to it (not to the settings window
     /// the rebuild was triggered from).
     main_window: AnyWindowHandle,
+    /// Fallback focus target for the window root, so the tab shortcuts still
+    /// reach it when nothing inside is focused (an unconfigured tab has no
+    /// composer to hold focus).
+    focus_handle: gpui::FocusHandle,
     /// Open popped-out chat windows (a channel mirrored into its own OS window,
     /// see [`popout`]). Session-only: closed on shutdown so they don't orphan,
     /// and never persisted (on restart every channel reopens in the main strip).
@@ -508,6 +515,7 @@ impl BackseaterApp {
             settings_window: None,
             settings_view: None,
             main_window: window.window_handle(),
+            focus_handle: cx.focus_handle(),
             popouts: Vec::new(),
             popout_views: Vec::new(),
             mentions_window: None,
@@ -561,6 +569,7 @@ impl BackseaterApp {
         let _activity_sub = Self::subscribe_tab_activity(&view, id, cx);
         let _live_sub = Self::subscribe_tab_live(&view, id, cx);
         let _activate_sub = Self::subscribe_tab_activate(&view, id, cx);
+        let _settings_sub = Self::subscribe_tab_settings(&view, id, cx);
         TabEntry {
             id,
             config,
@@ -570,6 +579,7 @@ impl BackseaterApp {
             _activity_sub,
             _live_sub,
             _activate_sub,
+            _settings_sub,
         }
     }
 
@@ -615,6 +625,24 @@ impl BackseaterApp {
                     return;
                 };
                 this.select_tab(ix, cx);
+            },
+        )
+    }
+
+    /// Subscribes to a tab view's `SettingsRequested` (an unconfigured tab's
+    /// "Choose channels" button) and opens that tab's settings window. Same
+    /// stable-`id` keying as [`subscribe_tab_activity`].
+    fn subscribe_tab_settings(
+        view: &Entity<ChatView>,
+        id: u64,
+        cx: &mut Context<Self>,
+    ) -> gpui::Subscription {
+        cx.subscribe(
+            view,
+            move |this, _view, _ev: &chatview::SettingsRequested, cx| {
+                if let Some(ix) = this.tabs.iter().position(|t| t.id == id) {
+                    this.open_settings(ix, cx);
+                }
             },
         )
     }
@@ -849,7 +877,51 @@ impl BackseaterApp {
         self.active = self.tabs.len() - 1;
         self.mentions_tab_selected = false;
         self.persist(cx);
+        // A new tab has no channels yet, so go straight to choosing them.
+        self.open_settings(self.active, cx);
         cx.notify();
+    }
+
+    /// The window-level tab shortcuts: Ctrl+T new tab, Ctrl+Tab /
+    /// Ctrl+Shift+Tab cycle, Ctrl+1-8 select by position (Ctrl+9 = the last
+    /// tab), Ctrl+, app settings. Returns whether the keystroke was one of
+    /// them. (No close-tab shortcut on purpose: closing is never urgent.)
+    fn handle_tab_shortcut(
+        &mut self,
+        ks: &gpui::Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let m = &ks.modifiers;
+        if !(m.control || m.platform) || m.alt {
+            return false;
+        }
+        let count = self.tabs.len();
+        // The Mentions pseudo-tab isn't a numbered tab: cycling from it lands
+        // back on the tab strip's active tab.
+        let on_mentions = self.settings.mentions_tab && self.mentions_tab_selected;
+        match ks.key.as_str() {
+            "tab" if count > 0 => {
+                let next = if on_mentions {
+                    self.active
+                } else if m.shift {
+                    (self.active + count - 1) % count
+                } else {
+                    (self.active + 1) % count
+                };
+                self.select_tab(next, cx);
+            }
+            _ if m.shift => return false,
+            "t" => self.add_tab(window, cx),
+            "," => self.open_app_settings(cx),
+            "9" if count > 0 => self.select_tab(count - 1, cx),
+            key => match key.parse::<usize>() {
+                Ok(n @ 1..=8) if n <= count => self.select_tab(n - 1, cx),
+                _ => return false,
+            },
+        }
+        self.dismiss_chip_tip(cx);
+        true
     }
 
     /// Asks for confirmation before closing tab `ix`, then closes it on OK.
@@ -1271,6 +1343,7 @@ impl BackseaterApp {
             let _activity_sub = Self::subscribe_tab_activity(&view, id, cx);
             let _live_sub = Self::subscribe_tab_live(&view, id, cx);
             let _activate_sub = Self::subscribe_tab_activate(&view, id, cx);
+            let _settings_sub = Self::subscribe_tab_settings(&view, id, cx);
             self.tabs[ix] = TabEntry {
                 id,
                 config,
@@ -1280,6 +1353,7 @@ impl BackseaterApp {
                 _activity_sub,
                 _live_sub,
                 _activate_sub,
+                _settings_sub,
             };
         } else {
             self.tabs[ix].config = config;
@@ -2670,6 +2744,9 @@ impl BackseaterApp {
                                     .text_color(cx.theme().foreground)
                             })
                             .child(SharedString::from("+"))
+                            .tooltip(|window, cx| {
+                                Tooltip::new("New tab (Ctrl+T)").build(window, cx)
+                            })
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _, window, cx| this.add_tab(window, cx)),
@@ -2834,8 +2911,20 @@ impl Render for BackseaterApp {
         // must render the dialog layer itself for `open_dialog` to appear.
         let dialog_layer = Root::render_dialog_layer(window, cx);
 
+        // Keys dispatch along the focus path, so with nothing focused the
+        // shortcuts below would never fire; park focus on the root then.
+        if window.focused(cx).is_none() {
+            self.focus_handle.focus(window, cx);
+        }
+
         v_flex()
             .size_full()
+            .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
+                if this.handle_tab_shortcut(&ev.keystroke, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .bg(cx.theme().background)
             .child(self.render_title_bar(cx))
             .child(self.tab_strip(cx))
