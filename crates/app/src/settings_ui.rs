@@ -1206,8 +1206,10 @@ impl SettingsView {
     /// a channel change reconnects the tab, so it waits for an explicit apply).
     fn tab_channels_section(&self, ix: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         use bks_core::Platform;
-        // One card row: the platform's logo (blank for the tab name), a
-        // fixed-width label so the inputs line up, and the input.
+        // One card row: the platform's logo, a fixed-width label so the
+        // inputs line up, and the input. The tab name has no logo, so its
+        // label starts at the card edge and spans the logo column too
+        // (22 logo + 12 gap + 64 label) — no empty gutter, same input x.
         let row = |platform: Option<Platform>, label: &str, input: &Entity<InputState>| {
             h_flex()
                 .w_full()
@@ -1215,18 +1217,18 @@ impl SettingsView {
                 .gap_3()
                 .px_3()
                 .py_2()
-                .child(
+                .children(platform.map(|p| {
                     div()
                         .flex_none()
                         .w(px(22.))
                         .flex()
                         .justify_center()
-                        .children(platform.map(|p| platform_icon(p, 18.))),
-                )
+                        .child(platform_icon(p, 18.))
+                }))
                 .child(
                     div()
                         .flex_none()
-                        .w(px(64.))
+                        .w(px(if platform.is_some() { 64. } else { 98. }))
                         .text_size(px(13.))
                         .child(SharedString::from(label.to_string())),
                 )
