@@ -407,6 +407,28 @@ pub fn accent() -> u32 {
     palette().default_name
 }
 
+/// The kit's primary-control colors derived from [`accent`]: `(base, hover,
+/// active, foreground)`. Switches, checkboxes and primary buttons take these so
+/// an "on"/"selected" state reads in the app's accent rather than the kit's
+/// plain white; the foreground flips to black on a light accent (a custom
+/// theme can pick any name color).
+pub fn primary_colors() -> (u32, u32, u32, u32) {
+    let base = accent();
+    let (r, g, b) = (
+        (base >> 16 & 0xff) as f32,
+        (base >> 8 & 0xff) as f32,
+        (base & 0xff) as f32,
+    );
+    let luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
+    let foreground = if luminance > 0.62 { 0x000000 } else { 0xffffff };
+    (
+        base,
+        blend(base, 0xffffff, 0.12),
+        blend(base, 0x000000, 0.14),
+        foreground,
+    )
+}
+
 /// The `(background tint, accent bar)` color pairs for the log's highlighted
 /// rows. The chat log paints these on its full-width row wrapper (so the tint
 /// bleeds edge-to-edge); panel contexts use the same pairs for their

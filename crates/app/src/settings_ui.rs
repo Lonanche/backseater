@@ -1367,8 +1367,11 @@ impl SettingsView {
         let kinds = EventKind::ALL.into_iter().map(|kind| {
             h_flex()
                 .justify_between()
+                .items_center()
+                .py_0p5()
                 .child(if show {
                     Checkbox::new(SharedString::from(format!("event-kind-{}", kind.label())))
+                        .small()
                         .label(kind.label())
                         .checked(filter.enabled(kind))
                         .on_click(cx.listener(move |this, checked: &bool, _, cx| {
@@ -1387,6 +1390,9 @@ impl SettingsView {
                 .gap_1()
                 .px_3()
                 .py_2()
+                // The settings label size: without it the checklist inherits
+                // the window's (larger) base size and its rows crowd together.
+                .text_size(px(13.))
                 .child(div().text_xs().text_color(muted_fg).child(if show {
                     "The bell also plays a sound when that event happens."
                 } else {
@@ -1507,7 +1513,7 @@ impl SettingsView {
                     Button::new("logout-Twitch")
                         .label("Log out")
                         .small()
-                        .danger()
+                        .outline()
                         .on_click(cx.listener(|this, _, _, cx| {
                             if let Some(c) = this.active_controller(cx) {
                                 c.twitch_logout();
@@ -1549,7 +1555,7 @@ impl SettingsView {
             Button::new("logout-YouTube")
                 .label("Log out")
                 .small()
-                .danger()
+                .outline()
                 .on_click(cx.listener(|this, _, _, cx| {
                     if let Some(c) = this.active_controller(cx) {
                         c.youtube_logout();
@@ -1857,7 +1863,7 @@ impl SettingsView {
             Button::new(SharedString::from(format!("logout-{label}")))
                 .label("Log out")
                 .small()
-                .danger()
+                .outline()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(c) = this.active_controller(cx) {
                         logout(&c);
@@ -1891,6 +1897,7 @@ impl SettingsView {
         let chip = |label: SharedString,
                     selected: bool,
                     swatch: u32,
+                    name_color: u32,
                     choice: settings::ThemeChoice,
                     custom: Option<String>,
                     cx: &mut Context<Self>| {
@@ -1930,14 +1937,35 @@ impl SettingsView {
                         .items_center()
                         .gap_2()
                         .child(
-                            // A ring around the swatch so a near-black Dark
-                            // swatch stays visible against a dark card.
-                            div()
-                                .size(px(16.))
+                            // A miniature chat line (name + text) on the
+                            // theme's chat background. A bare square swatch read
+                            // as an unticked checkbox; the ring keeps a
+                            // near-black Dark preview visible on a dark card.
+                            h_flex()
+                                .flex_none()
+                                .w(px(34.))
+                                .h(px(18.))
+                                .px(px(5.))
+                                .gap(px(3.))
+                                .items_center()
                                 .rounded_sm()
                                 .border_1()
                                 .border_color(cx.theme().muted_foreground.opacity(0.6))
-                                .bg(gpui::rgb(swatch)),
+                                .bg(gpui::rgb(swatch))
+                                .child(
+                                    div()
+                                        .w(px(9.))
+                                        .h(px(3.))
+                                        .rounded_full()
+                                        .bg(gpui::rgb(name_color)),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(11.))
+                                        .h(px(3.))
+                                        .rounded_full()
+                                        .bg(gpui::rgb(0x808088)),
+                                ),
                         )
                         .child(
                             div()
@@ -1945,7 +1973,14 @@ impl SettingsView {
                                     s.font_weight(FontWeight::MEDIUM).text_color(accent)
                                 })
                                 .child(label),
-                        ),
+                        )
+                        .when(selected, |group| {
+                            group.child(
+                                gpui_component::Icon::new(IconName::Check)
+                                    .size(px(14.))
+                                    .text_color(accent),
+                            )
+                        }),
                 )
                 .when_some(custom, |row, name| {
                     let edit_name = name.clone();
@@ -1988,6 +2023,7 @@ impl SettingsView {
                 SharedString::from("Dark"),
                 *active == settings::ThemeChoice::Dark,
                 0x1a1a1d,
+                0xa06bff,
                 settings::ThemeChoice::Dark,
                 None,
                 cx,
@@ -1996,6 +2032,7 @@ impl SettingsView {
                 SharedString::from("Light"),
                 *active == settings::ThemeChoice::Light,
                 0xf7f7f8,
+                0x7c3aed,
                 settings::ThemeChoice::Light,
                 None,
                 cx,
@@ -2005,6 +2042,7 @@ impl SettingsView {
                 SharedString::from(theme.name.clone()),
                 active.custom_name() == Some(theme.name.as_str()),
                 theme.chat_bg,
+                theme.default_name,
                 settings::ThemeChoice::Custom(theme.name.clone()),
                 Some(theme.name.clone()),
                 cx,
@@ -2556,12 +2594,10 @@ impl SettingsView {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(SharedString::from(
-                        "In strip order - reorder, edit, or remove any of them (the stock \
-                         three included). A button runs any slash command or chat text on \
-                         the message's platform, targeting it automatically - \
-                         \"/timeout 1h spam\" times out the author, \"/delete\" deletes \
-                         the message. For custom placement or plain text, {user} is the \
-                         author's name and {msg-id} the message id, e.g. \"!so {user}\".",
+                        "Shown in this order. A button runs a slash command or chat text \
+                         on the message's platform and targets its author or message \
+                         automatically. Use {user} or {msg-id} to place them yourself, \
+                         e.g. \"!so {user}\".",
                     )),
             )
             .child(if button_rows.is_empty() {
@@ -2575,42 +2611,67 @@ impl SettingsView {
             } else {
                 setting_card().children(button_rows).into_any_element()
             })
-            .child(field("Name", &self.settings_inputs.mod_name))
-            .child(field("Command", &self.settings_inputs.mod_command))
-            .child(field("Icon", &self.settings_inputs.mod_icon))
-            .child(h_flex().flex_wrap().gap_1().children(icon_presets))
+            .child(
+                h_flex().w_full().justify_end().child(
+                    Button::new("reset-mod-buttons")
+                        .label(if confirm_reset {
+                            "Click again to reset"
+                        } else {
+                            "Reset to defaults"
+                        })
+                        .small()
+                        .map(|b| {
+                            if confirm_reset {
+                                b.danger()
+                            } else {
+                                b.outline()
+                            }
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this.confirm_reset_mod_buttons {
+                                this.reset_mod_buttons(cx);
+                            } else {
+                                this.confirm_reset_mod_buttons = true;
+                                cx.notify();
+                            }
+                        })),
+                ),
+            )
+            .child(div().h_1())
+            .child(section_title(if editing.is_some() {
+                "Edit button"
+            } else {
+                "Add a button"
+            }))
+            .child(
+                setting_card()
+                    .child(editor_row(
+                        "Name",
+                        Input::new(&self.settings_inputs.mod_name).into_any_element(),
+                    ))
+                    .child(card_divider())
+                    .child(editor_row(
+                        "Command",
+                        Input::new(&self.settings_inputs.mod_command).into_any_element(),
+                    ))
+                    .child(card_divider())
+                    .child(editor_row(
+                        "Icon",
+                        v_flex()
+                            .gap_1p5()
+                            .child(Input::new(&self.settings_inputs.mod_icon))
+                            .child(h_flex().flex_wrap().gap_1().children(icon_presets))
+                            .into_any_element(),
+                    ))
+                    .child(card_divider())
+                    .child(editor_row("Platform", platform_seg)),
+            )
             .child(
                 h_flex()
                     .w_full()
-                    .flex_wrap()
                     .gap_2()
                     .items_center()
-                    .child(platform_seg)
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("reset-mod-buttons")
-                            .label(if confirm_reset {
-                                "Click again to reset"
-                            } else {
-                                "Reset to defaults"
-                            })
-                            .small()
-                            .map(|b| {
-                                if confirm_reset {
-                                    b.danger()
-                                } else {
-                                    b.outline()
-                                }
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if this.confirm_reset_mod_buttons {
-                                    this.reset_mod_buttons(cx);
-                                } else {
-                                    this.confirm_reset_mod_buttons = true;
-                                    cx.notify();
-                                }
-                            })),
-                    )
+                    .justify_end()
                     .when(editing.is_some(), |row| {
                         row.child(
                             Button::new("cancel-mod-edit")
@@ -3899,14 +3960,23 @@ fn setting_row(label: &str, desc: Option<&str>, control: gpui::AnyElement) -> gp
         .into_any_element()
 }
 
-/// A labelled input row for the settings dialog.
-fn field(label: &str, input: &Entity<InputState>) -> impl IntoElement {
-    v_flex()
-        .gap_1()
+/// One row of the mod-button editor card: a fixed-width label and its control
+/// (top-aligned, since the Icon row's control is two lines tall).
+fn editor_row(label: &str, control: gpui::AnyElement) -> gpui::AnyElement {
+    h_flex()
+        .w_full()
+        .items_start()
+        .gap_3()
+        .px_3()
+        .py_2()
         .child(
             div()
+                .flex_none()
+                .w(px(72.))
+                .pt_1p5()
                 .text_size(px(13.))
                 .child(SharedString::from(label.to_string())),
         )
-        .child(Input::new(input))
+        .child(div().flex_1().min_w_0().child(control))
+        .into_any_element()
 }

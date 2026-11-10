@@ -432,9 +432,11 @@ impl UserCardView {
                 };
                 let command = b.command.clone();
                 let to_login = login.clone();
+                // A custom ban button is as destructive as the built-in one.
+                let destructive = b.command.trim_start().starts_with("/ban");
                 Button::new(SharedString::from(format!("usercard-custom-{i}")))
                     .label(SharedString::from(label))
-                    .outline()
+                    .when(destructive, |b| b.danger())
                     .xsmall()
                     .compact()
                     .on_click(cx.listener(move |this, _, _, _| {
@@ -481,7 +483,6 @@ impl UserCardView {
                     let to_login = login.clone();
                     Button::new(SharedString::from(format!("usercard-to-{label}")))
                         .label(*label)
-                        .outline()
                         .xsmall()
                         .compact()
                         .on_click(cx.listener(move |this, _, _, _| {
@@ -505,7 +506,6 @@ impl UserCardView {
             .child(
                 Button::new("usercard-to-custom")
                     .label("Timeout")
-                    .outline()
                     .small()
                     .compact()
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -536,7 +536,6 @@ impl UserCardView {
                 .child(
                     Button::new("usercard-warn")
                         .label("Warn")
-                        .outline()
                         .small()
                         .compact()
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -564,7 +563,6 @@ impl UserCardView {
         let unban_login = login.clone();
         let unban = Button::new("usercard-unban")
             .label("Unban")
-            .outline()
             .xsmall()
             .compact()
             .on_click(cx.listener(move |this, _, _, _| {
@@ -582,7 +580,6 @@ impl UserCardView {
                             login: SharedString| {
                 Button::new(id)
                     .label(label)
-                    .outline()
                     .xsmall()
                     .compact()
                     .on_click(cx.listener(move |this, _, _, _| {
@@ -642,8 +639,13 @@ impl UserCardView {
             .w_full()
             .gap_2()
             .p_3()
-            .rounded_md()
-            .bg(cx.theme().secondary)
+            .rounded_lg()
+            // A lifted card (like the settings cards) rather than the recessed
+            // `secondary` tone, which is also the buttons' own fill: on it
+            // the action buttons had no visible shape.
+            .border_1()
+            .border_color(gpui::rgb(render::panel_border()))
+            .bg(render::row_hover())
             .when(show_ban_timeout, |col| {
                 col.child(
                     v_flex()
@@ -796,17 +798,22 @@ impl Render for UserCardView {
         let header = self.card.header(reveal, cx);
         let actions = self.usercard_actions(cx);
         let messages = self.message_list(cx);
-        gpui::image_cache(self.image_cache.clone()).child(
-            v_flex()
-                .size_full()
-                .p_4()
-                .gap_3()
-                .bg(gpui::rgb(render::panel_bg()))
-                .text_color(cx.theme().foreground)
-                .child(header)
-                .child(actions)
-                .child(messages),
-        )
+        // `size_full` on the cache wrapper too: without it the column below
+        // only got its content height, leaving the rest of the window as a
+        // bare, darker block under the card.
+        gpui::image_cache(self.image_cache.clone())
+            .size_full()
+            .child(
+                v_flex()
+                    .size_full()
+                    .p_4()
+                    .gap_3()
+                    .bg(gpui::rgb(render::panel_bg()))
+                    .text_color(cx.theme().foreground)
+                    .child(header)
+                    .child(actions)
+                    .child(messages),
+            )
     }
 }
 

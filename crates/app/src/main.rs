@@ -2840,6 +2840,37 @@ fn apply_theme_surfaces(settings: &settings::Settings, cx: &mut App) {
     theme.tokens.title_bar = bar.into();
     theme.tokens.tab_bar = bar.into();
 
+    // The kit's primary color is plain white in dark mode (black in light), so
+    // switches, checkboxes and primary buttons had no accent and an "on" state
+    // was hard to tell from "off". Point them at the app's accent instead.
+    let (primary, primary_hover, primary_active, primary_fg) = render::primary_colors();
+    let (primary, primary_hover, primary_active, primary_fg) = (
+        hsla(primary),
+        hsla(primary_hover),
+        hsla(primary_active),
+        hsla(primary_fg),
+    );
+    theme.primary = primary;
+    theme.primary_hover = primary_hover;
+    theme.primary_active = primary_active;
+    theme.primary_foreground = primary_fg;
+    theme.button_primary = primary;
+    theme.button_primary_hover = primary_hover;
+    theme.button_primary_active = primary_active;
+    theme.button_primary_foreground = primary_fg;
+    theme.ring = primary;
+    theme.switch_thumb = hsla(0xffffff);
+    theme.tokens.primary = primary.into();
+    theme.tokens.primary_hover = primary_hover.into();
+    theme.tokens.primary_active = primary_active.into();
+    theme.tokens.primary_foreground = primary_fg.into();
+    theme.tokens.button_primary = primary.into();
+    theme.tokens.button_primary_hover = primary_hover.into();
+    theme.tokens.button_primary_active = primary_active.into();
+    theme.tokens.button_primary_foreground = primary_fg.into();
+    theme.tokens.ring = primary.into();
+    theme.tokens.switch_thumb = hsla(0xffffff).into();
+
     // Re-assert the scrollbar preference so a theme switch doesn't revert it:
     // visible only while scrolling (fades out when idle) — the log keeps a
     // right gutter for the thumb, so nothing shifts when it appears.
