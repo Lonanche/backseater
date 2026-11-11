@@ -440,7 +440,8 @@ impl TabConfig {
     }
 
     /// Name to use when the user hasn't set one: the Twitch channel, else the
-    /// Kick channel, else the YouTube source, else a generic placeholder.
+    /// Kick channel, else the YouTube source (shortened to its handle, channel
+    /// or video id), else the TikTok username, else a generic placeholder.
     pub fn default_name(&self) -> String {
         let twitch = self.twitch_channel.trim();
         let kick = self.kick_channel.trim();
@@ -451,12 +452,53 @@ impl TabConfig {
         } else if !kick.is_empty() {
             kick.to_string()
         } else if !youtube.is_empty() {
-            youtube.to_string()
+            youtube_label(youtube)
         } else if !tiktok.is_empty() {
             bks_core::normalize_tiktok_channel(tiktok).unwrap_or_else(|| tiktok.to_string())
         } else {
             "New Tab".to_string()
         }
+    }
+}
+
+/// A readable tab label for a YouTube source as typed: the handle from an
+/// `@handle` or channel URL, the name from a `/channel/`, `/c/` or `/user/`
+/// URL, the video id from a video link, else the text unchanged.
+fn youtube_label(source: &str) -> String {
+    let source = source.trim();
+    let without_scheme = source.split_once("://").map_or(source, |(_, rest)| rest);
+    let Some((host, rest)) = without_scheme.split_once('/') else {
+        return source.trim_start_matches('@').to_string();
+    };
+    let host = host.to_ascii_lowercase();
+    if !(host.ends_with("youtube.com") || host.ends_with("youtu.be")) {
+        return source.to_string();
+    }
+    let rest = rest.split('#').next().unwrap_or_default();
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let mut segments = path.split('/').filter(|s| !s.is_empty());
+    let first = segments.next().unwrap_or_default();
+    let label = if host.ends_with("youtu.be") {
+        first
+    } else if let Some(handle) = first.strip_prefix('@') {
+        handle
+    } else if matches!(
+        first,
+        "channel" | "c" | "user" | "live" | "shorts" | "embed"
+    ) {
+        segments.next().unwrap_or_default()
+    } else if first == "watch" {
+        query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("v="))
+            .unwrap_or_default()
+    } else {
+        ""
+    };
+    if label.is_empty() {
+        source.to_string()
+    } else {
+        label.to_string()
     }
 }
 
@@ -526,6 +568,32 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn youtube_tab_labels_use_the_handle_channel_or_video() {
+        let cases = [
+            ("@Posty", "Posty"),
+            ("posty", "posty"),
+            ("https://www.youtube.com/@Posty/live", "Posty"),
+            ("youtube.com/@Posty", "Posty"),
+            ("https://m.youtube.com/@Posty/streams?x=1", "Posty"),
+            ("https://www.youtube.com/channel/UCabc123", "UCabc123"),
+            ("https://www.youtube.com/c/SomeName", "SomeName"),
+            (
+                "https://www.youtube.com/watch?v=AbCdEfGhI01&t=2",
+                "AbCdEfGhI01",
+            ),
+            ("https://youtu.be/AbCdEfGhI01?t=2", "AbCdEfGhI01"),
+            ("https://www.youtube.com/live/AbCdEfGhI01", "AbCdEfGhI01"),
+            ("https://www.youtube.com/", "https://www.youtube.com/"),
+        ];
+        for (source, label) in cases {
+            assert_eq!(youtube_label(source), label, "{source}");
+        }
+        let mut config = TabConfig::empty();
+        config.youtube_channel = "https://www.youtube.com/@Posty/live".into();
+        assert_eq!(config.display_name(), "Posty");
+    }
 
     fn kinds(layout: &Layout) -> Vec<Vec<PanelKind>> {
         layout
