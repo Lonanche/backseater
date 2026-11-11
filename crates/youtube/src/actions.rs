@@ -127,11 +127,42 @@ impl YoutubeActions {
         .await
     }
 
-    /// Deletes the message the reader saw as `message_id` (an InnerTube id).
+    /// Reads `source`'s live chat from the official API into `tx` until the
+    /// chat ends (`Ok(true)`), `tx` closes (`Ok(false)`), or an error that
+    /// retrying won't fix. Lines at or before `cutoff` are skipped.
+    pub async fn stream_chat(
+        &self,
+        source: &str,
+        tx: &bks_platform::ChatSink,
+        cutoff: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> anyhow::Result<bool> {
+        let chat_id = self.live_chat_id(source).await?;
+        let stopped = crate::official::stream_chat(self, source, &chat_id, tx, cutoff).await?;
+        Ok(matches!(stopped, crate::official::Stopped::ChatEnded))
+    }
+
+    /// Deletes a chat message. One shown by the official feed carries the Data
+    /// API's id and is deleted directly; one from the InnerTube reader is first
+    /// re-found in `liveChatMessages.list` by author + time (the two id
+    /// schemes differ).
     pub async fn delete_message(&self, source: &str, message_id: &str) -> anyhow::Result<()> {
         let seen = crate::seen::message(message_id).context(
             "that message is no longer known — only messages seen this session can be deleted",
         )?;
+        if seen.official {
+            return self
+                .with_chat(source, |_| async move {
+                    self.call(
+                        reqwest::Method::DELETE,
+                        "liveChat/messages",
+                        &[("id", message_id)],
+                        None,
+                    )
+                    .await
+                    .map(drop)
+                })
+                .await;
+        }
         self.with_chat(source, |chat_id| {
             let seen = seen.clone();
             async move {
@@ -240,7 +271,7 @@ impl YoutubeActions {
         }
     }
 
-    async fn live_chat_id(&self, source: &str) -> anyhow::Result<String> {
+    pub(crate) async fn live_chat_id(&self, source: &str) -> anyhow::Result<String> {
         let reader_video = crate::seen::live_video(source);
         if let Some((video, chat, at)) = self.chat_ids.lock().unwrap().get(source) {
             let same_video = reader_video.as_deref().is_none_or(|v| v == video);
@@ -311,7 +342,7 @@ impl YoutubeActions {
         unreachable!("the loop returns on its second attempt")
     }
 
-    async fn fresh_token(&self) -> anyhow::Result<String> {
+    pub(crate) async fn fresh_token(&self) -> anyhow::Result<String> {
         let (token, expires_at) = {
             let t = self.tokens.lock().await;
             (t.access_token.clone(), t.expires_at)
@@ -320,6 +351,11 @@ impl YoutubeActions {
             return Ok(token);
         }
         self.refresh(&token).await
+    }
+
+    /// Refreshes after a rejected token (unless already replaced meanwhile).
+    pub(crate) async fn force_refresh(&self, stale: &str) -> anyhow::Result<String> {
+        self.refresh(stale).await
     }
 
     /// Refreshes unless another caller already replaced `stale` meanwhile.
@@ -481,6 +517,7 @@ mod tests {
             author_channel_id: "UCauthor".into(),
             timestamp: bks_core::parse_rfc3339(at).unwrap(),
             text: text.into(),
+            official: false,
         }
     }
 

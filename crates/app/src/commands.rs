@@ -449,6 +449,20 @@ fn def_for(name: &str) -> Option<&'static CommandDef> {
         .find(|c| c.name == name || c.aliases.contains(&name.as_str()))
 }
 
+/// What a mod-button template does on YouTube when that differs from its
+/// name: a YouTube "ban" hides the user rather than removing them, and an
+/// unban only works for hides Backseater made this session.
+pub fn youtube_note(template: &str) -> Option<&'static str> {
+    match def_for(leading_command(template)?)?.name {
+        "ban" => Some(
+            "On YouTube this hides the user: they can still watch and type, but nobody \
+             else sees their messages, and YouTube doesn't tell them",
+        ),
+        "unban" => Some("On YouTube this only unhides users hidden from Backseater this session"),
+        _ => None,
+    }
+}
+
 /// The leading `/command` name of a template, if it starts with one.
 fn leading_command(template: &str) -> Option<&str> {
     template
@@ -604,6 +618,15 @@ mod tests {
         assert!(!targets_user("/delete {msg-id}"));
         assert!(!targets_user("/announce hi"));
         assert!(!targets_user("plain chat text"));
+    }
+
+    #[test]
+    fn youtube_note_explains_ban_and_unban_only() {
+        assert!(youtube_note("/ban").is_some());
+        assert!(youtube_note("/ban {user} spam").is_some());
+        assert!(youtube_note("/untimeout").is_some());
+        assert!(youtube_note("/timeout 600").is_none());
+        assert!(youtube_note("!so {user}").is_none());
     }
 
     #[test]

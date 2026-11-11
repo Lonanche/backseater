@@ -134,8 +134,9 @@ check script and the release build. `Cargo.lock` changes whenever dependencies
 or the workspace version change, and belongs with that change.
 
 Channels are set per tab (right-click a tab → Settings). Logging in to Twitch,
-Kick or YouTube is done from Settings → Account. `BKS_DEBUG=1` logs received
-messages to stderr.
+Kick or YouTube is done from Settings → Account. Logs are written to
+`%LOCALAPPDATA%\backseater-cache\backseater.log` (overwritten each launch) and to the
+terminal that started the app; set `BKS_DEBUG=1` for debug output.
 
 Twitch and Kick login work in any build. YouTube login uses a Google OAuth
 client that is compiled into release builds only, so a local build shows it as

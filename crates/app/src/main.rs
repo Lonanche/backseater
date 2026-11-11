@@ -6,7 +6,7 @@
 //! saved to `<config>/backseater/tabs.json` and restored on launch.
 
 // Release builds are GUI-subsystem so Windows doesn't spawn a console window;
-// debug builds keep it (BKS_DEBUG/tracing output lands there).
+// debug builds keep it. Logs also go to a file (see `init_logging`).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod animated_img;
@@ -2984,16 +2984,47 @@ impl Render for BackseaterApp {
     }
 }
 
+/// Logs to `<cache>/backseater-cache/backseater.log` (overwritten each launch)
+/// and to the console. A release build has no console of its own, so it
+/// attaches to the terminal that started it, if any. The level comes from
+/// `RUST_LOG`; `BKS_DEBUG=1` turns on debug output for the app's own crates.
+fn init_logging() {
+    use tracing_subscriber::fmt::writer::MakeWriterExt as _;
+
+    #[cfg(all(windows, not(debug_assertions)))]
+    unsafe {
+        use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        if std::env::var_os("BKS_DEBUG").is_some() {
+            "info,backseater=debug,bks_auth=debug,bks_emotes=debug,bks_kick=debug,\
+             bks_preview=debug,bks_tiktok=debug,bks_twitch=debug,bks_youtube=debug"
+                .into()
+        } else {
+            "info".into()
+        }
+    });
+    let file = bks_auth::store::log_file_path()
+        .and_then(|path| Ok(std::fs::File::create(path)?))
+        .ok();
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(false);
+    match file {
+        Some(file) => builder
+            .with_writer(std::io::stderr.and(std::sync::Mutex::new(file)))
+            .init(),
+        None => builder.init(),
+    }
+}
+
 fn main() {
     // Velopack first: its install/update hooks may restart or exit the process
     // before the app proper starts.
     updater::startup();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    init_logging();
 
     let app = gpui_platform::application().with_assets(assets::Assets);
 

@@ -6,7 +6,10 @@
 //!   differ from InnerTube's — a delete re-finds the message in
 //!   `liveChatMessages.list` by author + time;
 //! - chatter login → channel id (bans key on the `UC…` id), and each author's
-//!   moderator/owner role (the app's YouTube mod-status signal).
+//!   moderator/owner role (the app's YouTube mod-status signal);
+//! - which sources currently read chat from the official API (the InnerTube
+//!   reader then keeps polling for live status and viewers but shows no chat),
+//!   and the newest chat line InnerTube showed (where the official feed picks up).
 //!
 //! Bounded: the oldest messages fall out past [`MAX_MESSAGES`].
 
@@ -24,6 +27,8 @@ pub struct SeenMessage {
     pub author_channel_id: String,
     pub timestamp: DateTime<Utc>,
     pub text: String,
+    /// Came from the official API, so its id is the Data API's own.
+    pub official: bool,
 }
 
 /// A chat author's standing in one channel's chat.
@@ -44,6 +49,8 @@ struct Seen {
     names: HashMap<String, String>,
     /// Keyed by (source, author channel id): a mod in one chat isn't in another.
     roles: HashMap<(String, String), AuthorRoles>,
+    official_chat: std::collections::HashSet<String>,
+    last_chat: HashMap<String, DateTime<Utc>>,
 }
 
 static SEEN: Lazy<Mutex<Seen>> = Lazy::new(Mutex::default);
@@ -61,7 +68,44 @@ pub fn live_video(source: &str) -> Option<String> {
     SEEN.lock().unwrap().live_videos.get(source).cloned()
 }
 
+/// Turns official-API chat on or off for `source`; while on, the InnerTube
+/// reader stops emitting chat items.
+pub fn set_official_chat(source: &str, on: bool) {
+    let mut seen = SEEN.lock().unwrap();
+    if on {
+        seen.official_chat.insert(source.to_string());
+    } else {
+        seen.official_chat.remove(source);
+    }
+}
+
+pub(crate) fn official_chat(source: &str) -> bool {
+    SEEN.lock().unwrap().official_chat.contains(source)
+}
+
+/// The publish time of the newest chat line the InnerTube reader showed for
+/// `source` (the official feed drops anything at or before it).
+pub fn last_chat_time(source: &str) -> Option<DateTime<Utc>> {
+    SEEN.lock().unwrap().last_chat.get(source).copied()
+}
+
+pub(crate) fn note_shown(source: &str, at: DateTime<Utc>) {
+    let mut seen = SEEN.lock().unwrap();
+    let entry = seen.last_chat.entry(source.to_string()).or_insert(at);
+    if at > *entry {
+        *entry = at;
+    }
+}
+
 pub(crate) fn record(msg: &bks_core::Message, roles: AuthorRoles) {
+    insert(msg, roles, false);
+}
+
+pub(crate) fn record_official(msg: &bks_core::Message, roles: AuthorRoles) {
+    insert(msg, roles, true);
+}
+
+fn insert(msg: &bks_core::Message, roles: AuthorRoles, official: bool) {
     if msg.id.is_empty() || msg.author.user_id.is_empty() {
         return;
     }
@@ -78,6 +122,7 @@ pub(crate) fn record(msg: &bks_core::Message, roles: AuthorRoles) {
         author_channel_id: msg.author.user_id.clone(),
         timestamp: msg.timestamp,
         text: msg.raw_text.clone(),
+        official,
     };
     if seen.messages.insert(msg.id.clone(), entry).is_none() {
         seen.order.push_back(msg.id.clone());
@@ -108,7 +153,7 @@ pub fn channel_id_for(user: &str) -> Option<String> {
 }
 
 /// The login of a chatter we've seen, by channel id.
-pub(crate) fn login_for(channel_id: &str) -> Option<String> {
+pub fn login_for(channel_id: &str) -> Option<String> {
     SEEN.lock().unwrap().names.get(channel_id).cloned()
 }
 

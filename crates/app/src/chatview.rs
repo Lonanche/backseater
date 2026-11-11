@@ -3105,7 +3105,7 @@ impl ChatView {
         // A relayed shared-chat message carries the chatter's roles in the
         // *source* channel, not this one.
         if msg.source.is_none() {
-            card.set_roles_from_badges(&msg.author.badges);
+            card.set_roles(&msg);
         }
         self.show_usercard(card, cx);
     }
@@ -3852,17 +3852,28 @@ impl ChatView {
                                 )
                                 .child(SharedString::from(e.name.clone()))
                                 .into_any_element(),
-                            PopupItem::Command(m) => v_flex()
-                                .child(SharedString::from(m.usage()))
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .when(!selected, |d| {
-                                            d.text_color(cx.theme().muted_foreground)
-                                        })
-                                        .child(SharedString::from(m.def.description)),
-                                )
-                                .into_any_element(),
+                            PopupItem::Command(m) => {
+                                // YouTube's ban is a "hide"; say so where it applies.
+                                let note = (self.target_platforms().first()
+                                    == Some(&bks_core::Platform::YouTube))
+                                .then(|| crate::commands::youtube_note(&format!("/{}", m.name)))
+                                .flatten();
+                                let description = match note {
+                                    Some(note) => format!("{}. {note}", m.def.description),
+                                    None => m.def.description.to_string(),
+                                };
+                                v_flex()
+                                    .child(SharedString::from(m.usage()))
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .when(!selected, |d| {
+                                                d.text_color(cx.theme().muted_foreground)
+                                            })
+                                            .child(SharedString::from(description)),
+                                    )
+                                    .into_any_element()
+                            }
                         };
                         div()
                             .id(("popup-item", ix))

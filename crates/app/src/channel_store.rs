@@ -985,6 +985,9 @@ impl ChannelModel {
                 // live, Kick always — seeded at construction). A historical clear is silent.
                 if !historical && !self.rich_mod_feed.contains(&platform) {
                     let note = match &user {
+                        Some(u) if platform == Platform::YouTube => {
+                            format!("{u} was hidden or timed out")
+                        }
                         Some(u) => format!("{u} was timed out / banned"),
                         None => "chat was cleared".to_string(),
                     };

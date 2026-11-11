@@ -9,6 +9,7 @@ mod actions;
 mod api;
 mod builder;
 mod connector;
+mod official;
 mod preview;
 mod resolve;
 mod seen;
@@ -17,7 +18,10 @@ mod streams;
 pub use actions::{AuthExpired, OnRefreshed, YoutubeActions, MAX_MESSAGE_CHARS};
 pub use connector::YouTubeSource;
 pub use preview::YoutubePreviewProvider;
-pub use seen::{author_roles, channel_id_for, AuthorRoles};
+pub use seen::{
+    author_roles, channel_id_for, last_chat_time, live_video, login_for, set_official_chat,
+    AuthorRoles,
+};
 
 // Re-exported for unit testing the resolver + renderer parser in isolation.
 pub use builder::build_item;
