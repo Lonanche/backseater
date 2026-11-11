@@ -1224,6 +1224,8 @@ async fn run_youtube(source: Arc<YouTubeSource>, channel: String, tx: Sink, sess
     let mut yt_emotes: Vec<bks_core::Emote> = Vec::new();
     let mut seen_emote_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    let mut official = OfficialChat::default();
+
     let mut stream = match source.join(&channel).await {
         Ok(stream) => stream,
         Err(err) => {
@@ -1240,16 +1242,27 @@ async fn run_youtube(source: Arc<YouTubeSource>, channel: String, tx: Sink, sess
                 Some(event) => event,
                 None => break,
             },
+            event = official.next() => match event {
+                Some(event) => event,
+                None => {
+                    official.finished(&channel, &tx).await;
+                    continue;
+                }
+            },
             changed = login.changed() => {
                 if changed.is_err() {
                     break;
                 }
                 let me = login.borrow_and_update().youtube_channel_id.clone();
+                // A different (or no) account: drop the feed bound to the old one.
+                official.stop(&channel, &tx).await;
+                official.reset();
                 if let Some(status) = mod_status.login_changed(me) {
                     if tx.send(status).await.is_err() {
                         break;
                     }
                 }
+                official.reconcile(&channel, &session, &mod_status, &tx).await;
                 continue;
             }
         };
@@ -1258,6 +1271,9 @@ async fn run_youtube(source: Arc<YouTubeSource>, channel: String, tx: Sink, sess
                 if !registry.is_empty() {
                     msg.elements = registry.resolve_elements(&msg.channel, msg.elements);
                 }
+                // The official feed spells custom channel emojis as their
+                // `:shortcut:` text; show the images InnerTube already taught us.
+                msg.elements = resolve_youtube_emojis(msg.elements, &yt_emotes);
                 if harvest_emotes(&msg, &mut yt_emotes, &mut seen_emote_names) {
                     emit_emotes(bks_core::Platform::YouTube, &yt_emotes, &tx).await;
                 }
@@ -1281,6 +1297,9 @@ async fn run_youtube(source: Arc<YouTubeSource>, channel: String, tx: Sink, sess
                     }
                 }
                 emit_emotes(bks_core::Platform::YouTube, &yt_emotes, &tx).await;
+                official
+                    .reconcile(&channel, &session, &mod_status, &tx)
+                    .await;
                 continue;
             }
             other => other,
@@ -1288,13 +1307,193 @@ async fn run_youtube(source: Arc<YouTubeSource>, channel: String, tx: Sink, sess
         if tx.send(forward).await.is_err() {
             break;
         }
+        official
+            .reconcile(&channel, &session, &mod_status, &tx)
+            .await;
+    }
+    official.stop(&channel, &tx).await;
+}
+
+/// Reading YouTube chat through the official API is switched off: measured
+/// live, `streamList` calls end every ~10 s and each is billed 5 units, about
+/// 1,400 units an hour per open tab against the project's shared 10,000 a day.
+/// The feed below stays wired so it can be re-enabled if Google raises the
+/// quota; until then the InnerTube reader shows all chat.
+const OFFICIAL_CHAT_ENABLED: bool = false;
+
+/// The official-API chat feed for one YouTube source (exact message ids for
+/// delete, real ban/timeout events), used while logged in to YouTube when
+/// [`OFFICIAL_CHAT_ENABLED`]. Otherwise the InnerTube reader shows chat; while
+/// this runs, InnerTube keeps polling for live status and viewers but shows no
+/// chat (`bks_youtube::set_official_chat`).
+#[derive(Default)]
+struct OfficialChat {
+    task: Option<tokio::task::JoinHandle<anyhow::Result<bool>>>,
+    rx: Option<bks_platform::ChatStream>,
+    /// Set after an error retrying can't fix (quota, permission); cleared by
+    /// the next login change so a fixed login can try again.
+    disabled: bool,
+    /// The live video whose chat the feed reported ended — not restarted for
+    /// it, so a premature "ended" can't loop reconnects (each costs quota).
+    ended_video: Option<String>,
+}
+
+impl OfficialChat {
+    async fn next(&mut self) -> Option<ChatEvent> {
+        match self.rx.as_mut() {
+            Some(rx) => rx.recv().await,
+            None => std::future::pending().await,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.disabled = false;
+        self.ended_video = None;
+    }
+
+    /// Starts or stops the feed to match: logged in, the stream live, and not
+    /// given up on.
+    async fn reconcile(
+        &mut self,
+        channel: &str,
+        session: &Session,
+        mod_status: &YoutubeModStatus,
+        tx: &Sink,
+    ) {
+        let video = bks_youtube::live_video(channel);
+        let want = OFFICIAL_CHAT_ENABLED
+            && session.login_state().youtube_channel_id.is_some()
+            && mod_status.is_mod()
+            && video.is_some()
+            && video != self.ended_video
+            && !self.disabled;
+        let running = self.rx.is_some();
+        if want && !running {
+            let Some(actions) = session.youtube_actions().await else {
+                return;
+            };
+            let cutoff = bks_youtube::last_chat_time(channel);
+            bks_youtube::set_official_chat(channel, true);
+            let (feed, rx) = bks_platform::chat_channel();
+            let source = channel.to_string();
+            self.task = Some(
+                runtime().spawn(async move { actions.stream_chat(&source, &feed, cutoff).await }),
+            );
+            self.rx = Some(rx);
+            tracing::info!("reading YouTube chat for {channel} through the official API");
+            let _ = tx
+                .send(ChatEvent::ModFeed {
+                    platform: bks_core::Platform::YouTube,
+                    active: true,
+                })
+                .await;
+        } else if !want && running {
+            self.stop(channel, tx).await;
+        }
+    }
+
+    /// The feed's channel drained after its task returned: hand chat back to
+    /// InnerTube and remember why it stopped.
+    async fn finished(&mut self, channel: &str, tx: &Sink) {
+        self.rx = None;
+        let result = match self.task.take() {
+            Some(task) => task.await,
+            None => return,
+        };
+        self.hand_back(channel, tx).await;
+        match result {
+            Ok(Ok(true)) => self.ended_video = bks_youtube::live_video(channel),
+            Ok(Ok(false)) => {}
+            Ok(Err(err)) => {
+                self.disabled = true;
+                tracing::warn!("youtube official chat for {channel} stopped: {err:#}");
+                let _ = tx
+                    .send(ChatEvent::Error(format!(
+                        "YouTube moderator chat stopped, showing the regular chat instead: {err:#}"
+                    )))
+                    .await;
+            }
+            Err(err) => {
+                self.disabled = true;
+                tracing::warn!("youtube official chat task for {channel} failed: {err}");
+            }
+        }
+    }
+
+    async fn stop(&mut self, channel: &str, tx: &Sink) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        if self.rx.take().is_some() {
+            self.hand_back(channel, tx).await;
+        }
+    }
+
+    async fn hand_back(&self, channel: &str, tx: &Sink) {
+        bks_youtube::set_official_chat(channel, false);
+        let _ = tx
+            .send(ChatEvent::ModFeed {
+                platform: bks_core::Platform::YouTube,
+                active: false,
+            })
+            .await;
     }
 }
 
-/// Whether the YouTube login moderates this chat. YouTube exposes no "am I a
-/// mod here" read, so it's inferred: the owner channel id (from the reader's
-/// channel meta) says broadcaster; otherwise the role badges on the account's
-/// own chat messages say moderator (until then: not a mod).
+/// Replaces `:shortcut:` words with the matching custom channel emoji images
+/// (learned from InnerTube messages). Only colon-wrapped names, so ordinary
+/// words never turn into images.
+fn resolve_youtube_emojis(
+    elements: Vec<bks_core::MessageElement>,
+    emotes: &[bks_core::Emote],
+) -> Vec<bks_core::MessageElement> {
+    use bks_core::MessageElement;
+    let is_shortcut = |word: &str| word.len() > 2 && word.starts_with(':') && word.ends_with(':');
+    let has_any = elements.iter().any(
+        |el| matches!(el, MessageElement::Text { text, .. } if text.split(' ').any(is_shortcut)),
+    );
+    if emotes.is_empty() || !has_any {
+        return elements;
+    }
+    let mut out = Vec::with_capacity(elements.len());
+    for element in elements {
+        let MessageElement::Text { text, color } = element else {
+            out.push(element);
+            continue;
+        };
+        let mut buf = String::new();
+        for (i, word) in text.split(' ').enumerate() {
+            if i > 0 {
+                buf.push(' ');
+            }
+            let emote = is_shortcut(word)
+                .then(|| emotes.iter().find(|e| e.name == word))
+                .flatten();
+            match emote {
+                Some(emote) => {
+                    if !buf.is_empty() {
+                        out.push(MessageElement::Text {
+                            text: std::mem::take(&mut buf),
+                            color,
+                        });
+                    }
+                    out.push(MessageElement::Emote(Arc::new(emote.clone())));
+                }
+                None => buf.push_str(word),
+            }
+        }
+        if !buf.is_empty() {
+            out.push(MessageElement::Text { text: buf, color });
+        }
+    }
+    out
+}
+
+/// The YouTube login's moderation state for this chat. YouTube has no way to
+/// ask "do I moderate this chat?", so every logged-in account gets the
+/// moderation controls (a non-moderator's action fails with YouTube's own
+/// permission error). Broadcaster is real: the owner channel id from the
+/// reader's channel meta, or the owner role on the account's own messages.
 #[derive(Default)]
 struct YoutubeModStatus {
     owner: Option<String>,
@@ -1303,6 +1502,10 @@ struct YoutubeModStatus {
 }
 
 impl YoutubeModStatus {
+    fn is_mod(&self) -> bool {
+        self.reported.is_some_and(|(is_mod, _)| is_mod)
+    }
+
     fn owner_known(&mut self, me: Option<String>, owner: String) -> Option<ChatEvent> {
         self.owner = (!owner.is_empty()).then_some(owner);
         self.recompute(me, None)
@@ -1330,13 +1533,8 @@ impl YoutubeModStatus {
         let owner = me.is_some() && me == self.owner;
         let (is_mod, is_broadcaster) = match (me, roles) {
             (None, _) => (false, false),
-            (Some(_), Some(r)) => (owner || r.owner || r.moderator, owner || r.owner),
-            // No message seen yet: keep a known mod flag (a reconnect re-sends
-            // the owner meta) rather than flapping it off.
-            (Some(_), None) => {
-                let was_mod = self.reported.is_some_and(|(m, _)| m);
-                (owner || was_mod, owner)
-            }
+            (Some(_), Some(r)) => (true, owner || r.owner),
+            (Some(_), None) => (true, owner),
         };
         if self.reported == Some((is_mod, is_broadcaster)) {
             return None;

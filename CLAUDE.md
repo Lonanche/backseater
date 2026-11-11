@@ -554,7 +554,34 @@ platform = implement one trait + one message builder, with zero UI changes**.
   rows (`Bits`/`Sub`/`Gift`). Sending + moderation use a Google login (next bullet).
 - **YouTube login → send + moderation** (shipped in beta; login works, the send/delete/ban calls
   are **not yet verified against a live stream**).
-  Reads stay on anonymous InnerTube; writes use the official **Data API v3** (`bks_youtube::
+  **Reading stays on anonymous InnerTube for every chat.** An official
+  **`liveChatMessages.streamList`** feed (`youtube/src/official.rs`, exact message ids + ban/
+  timeout events with the acting moderator) is built and was verified live, but is **switched
+  off** (`bridge.rs::OFFICIAL_CHAT_ENABLED = false`): YouTube ends each `streamList` call
+  cleanly after ~10 s (gRPC status 0 + a resume token) and expects an immediate re-call, and each
+  call is billed 5 units — **measured ~23 units/min ≈ 1,400/hour per open tab** against the
+  project's shared 10,000/day. Re-enable only after a quota increase. How the feed works:
+  ⚠️ `streamList` is documented only as **gRPC**; it's spoken by hand over `reqwest`
+  HTTP/2 (`use_rustls_tls` + `http2_prior_knowledge` — in the full app another dependency makes
+  reqwest's native-tls the default, which here never offers ALPN "h2", so Google answered
+  HTTP/1.1 and h2 failed with "frame with invalid size"; POST `youtube.googleapis.com/youtube.api.v3.
+  V3DataLiveChatMessageService/StreamList`, 5-byte length-prefixed protobuf frames) with
+  hand-written `prost` structs copied from Google's `stream_list.proto` field numbers (odd ones
+  like `next_page_token = 100602` and `channel_id = 10101` are real) — no tonic/protoc. The
+  gRPC status arrives in the response headers (trailers-only error) or the HTTP/2 trailers
+  (read via `reqwest::Body` + `http_body_util::BodyExt::frame`); status 0 = rotate (`Pumped::
+  Rotated`, re-call at once from the last `next_page_token`), no status = dropped (backoff, give
+  up after 6). The switch lives in `bridge.rs::OfficialChat` (when enabled: logged in + the reader
+  has a live video, one stream per open tab); while on, `bks_youtube::set_official_chat` makes the InnerTube connector keep
+  polling (live status, viewers, ids) but emit no chat; the official feed drops lines at or
+  before `last_chat_time` (the newest line InnerTube showed) so the hand-off neither doubles nor
+  gaps. A fatal error (quota, permission, endpoint) hands chat back to InnerTube with one error
+  row and disables the feed until the next login change; a chat that ends isn't restarted for
+  the same video (`ended_video`, so a premature end can't loop reconnects). Official lines are
+  plain text (no emoji images, badges or name colors; members get member green) — custom
+  `:shortcut:` emojis are re-imaged from what InnerTube harvested (`resolve_youtube_emojis`).
+  The official feed has no "message deleted" event, so the controller strikes a row itself after
+  a successful delete. Writes use the official **Data API v3** (`bks_youtube::
   YoutubeActions`: send 20 units, delete 20, ban/timeout/unban 200, `videos.list` chat-id lookup 1;
   default 10,000 units/day **per Google Cloud project**, shared by every user of that client).
   Login is Google's desktop **auth-code + PKCE** loopback flow (`bks_auth::youtube`, port 38277,
@@ -567,13 +594,24 @@ platform = implement one trait + one message builder, with zero UI changes**.
   deliberately no user-facing "bring your own Google client" setting (removed).
   The reader maps InnerTube `markChatItemAsDeletedAction` / `markChatItemsByAuthorAsDeletedAction`
   to `DeleteMessage` / `ClearChat`, so deletes and bans strike rows.
-  ⚠️ Data API message ids ≠ InnerTube ids, so delete re-finds the message via
+  ⚠️ Data API message ids ≠ InnerTube ids: a row from the official feed is deleted directly by
+  its id (`SeenMessage.official`), an InnerTube row is re-found via
   `liveChatMessages.list` by author + timestamp (`bks_youtube::seen` remembers recent messages,
   login → `UC…` id, and per-chat roles). Unban only works for bans made this session (the ban
-  resource id is only in the insert response). Mod status is inferred: owner id from the reader's
-  channel meta, else MODERATOR/OWNER icon badges on the account's own messages
-  (`bridge.rs::YoutubeModStatus`). YouTube is its own `SendTarget` (never part of Both); replies
-  send as `@name text` (no threads). An unverified Google app is capped at 100 users.
+  resource id is only in the insert response). ⚠️ YouTube has **no API for "do I moderate this
+  chat"** (`liveChatModerators.list` is owner-only, message author flags describe the author,
+  `liveBroadcasts.list mine` is owned broadcasts only), so **every logged-in account gets the
+  YouTube mod controls** (`bridge.rs::YoutubeModStatus` reports `is_mod` = logged in) and a
+  non-moderator's action fails with YouTube's 403, shown via the `ApiError` hint. Broadcaster
+  is still real (owner id from the reader's channel meta, or the OWNER role on the account's own
+  messages). The usercard reads each *target's* recorded roles via `UserCard::set_roles` (YouTube
+  rows carry no role badges) to hide ban buttons on owners/mods. YouTube is its own
+  `SendTarget` (never part of Both); replies send as `@name text` (no threads). ⚠️ A YouTube
+  **permanent ban is a "hide"**: the user can still watch and type, nobody else sees their
+  messages, and they aren't told — so the UI says "Hide user"/"Unhide" on YouTube usercards,
+  mod-strip tooltips and the command popup add the explanation (`commands::youtube_note`), and
+  the generic notice reads "X was hidden or timed out". An unverified Google app is capped at
+  100 users.
 - **Mentions + links** parsed and rendered: `@name` mentions tint/emit `MessageElement::Mention`
   (`core/mention.rs`), URLs become clickable links (`core/links.rs`) — a 7TV emote link opens an
   in-app emote popup, other links confirm-then-open.
@@ -1031,8 +1069,10 @@ PowerShell for the same formatting, Clippy, and test checks as CI. Use
 pin and workspace minimum together when upgrading Rust.
 
 Channels are set per tab (right-click a tab → Settings); tabs persist to
-`<config>/backseater/tabs.json`. `BKS_DEBUG=1` env var logs received messages to stderr (handy
-when you can't see the window).
+`<config>/backseater/tabs.json`. Logs go to `<cache>/backseater-cache/backseater.log`
+(overwritten each launch, `main.rs::init_logging`) and to the console; a release build is a
+windowed app with no console of its own, so it attaches to the terminal that started it. The
+level is `RUST_LOG`, or `BKS_DEBUG=1` for debug output from the app's own crates.
 
 **Releasing:** bump the workspace `version` in `Cargo.toml` (+ a CHANGELOG section) and push —
 CI auto-publishes the installer + update feed to GitHub Releases (`docs/RELEASING.md`).

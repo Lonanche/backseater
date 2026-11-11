@@ -113,6 +113,20 @@ impl UserCard {
     /// opened the card. Twitch badge ids are `set-id/version` (e.g. `moderator/1`);
     /// Kick uses the bare type (`moderator`) — matching the set-id prefix covers
     /// both. The broadcaster and moderator flags gate which mod buttons show.
+    /// Sets the roles from the message that opened the card: badges on Twitch
+    /// and Kick; on YouTube (whose rows carry no role badges) the roles the
+    /// reader recorded for this author in `source`'s chat.
+    pub fn set_roles(&mut self, msg: &bks_core::Message) {
+        if self.platform == Platform::YouTube {
+            if let Some(roles) = bks_youtube::author_roles(&msg.channel, &msg.author.user_id) {
+                self.is_broadcaster = roles.owner;
+                self.is_moderator = roles.moderator;
+            }
+        } else {
+            self.set_roles_from_badges(&msg.author.badges);
+        }
+    }
+
     pub fn set_roles_from_badges(&mut self, badges: &[bks_core::Badge]) {
         for b in badges {
             match b.id.split('/').next().unwrap_or("") {

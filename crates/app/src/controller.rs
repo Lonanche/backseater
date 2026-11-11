@@ -868,6 +868,35 @@ impl Controller {
         self.spawn_kick_mod(ModAction::Unban { user });
     }
 
+    /// Hides `user` (a login or `UC…` channel id) from this tab's YouTube chat
+    /// — YouTube's permanent ban (usercard Hide button).
+    pub fn hide_youtube(&self, user: String) {
+        self.spawn_youtube_mod(ModAction::Ban { user, reason: None });
+    }
+
+    /// Times `user` out of this tab's YouTube chat for `secs` seconds.
+    pub fn timeout_youtube(&self, user: String, secs: u32) {
+        self.spawn_youtube_mod(ModAction::Timeout {
+            user,
+            secs,
+            reason: None,
+        });
+    }
+
+    /// Lifts a hide/timeout this session placed on `user` in YouTube chat.
+    pub fn unhide_youtube(&self, user: String) {
+        self.spawn_youtube_mod(ModAction::Unban { user });
+    }
+
+    fn spawn_youtube_mod(&self, action: ModAction) {
+        let this = self.clone();
+        self.rt.spawn(async move {
+            if let Some(a) = this.youtube_actions_or_hint().await {
+                this.moderate_youtube(&a, action).await;
+            }
+        });
+    }
+
     /// Default pin duration (seconds) — the web clients' usual 20 minutes
     /// (Twitch allows 30–1800s, Kick sends 1200). The pin dialog's chips and
     /// `/pin`'s leading duration override it.
@@ -1474,8 +1503,16 @@ impl Controller {
         let source = &self.youtube_channel;
         let user = match &action {
             ModAction::Delete { message_id } => {
-                if let Err(err) = actions.delete_message(source, message_id).await {
-                    self.report_youtube_error(&err);
+                match actions.delete_message(source, message_id).await {
+                    // The official feed has no "message deleted" event, so strike
+                    // the line ourselves.
+                    Ok(()) => {
+                        let _ = self.events.try_send(ChatEvent::DeleteMessage {
+                            platform: bks_core::Platform::YouTube,
+                            message_id: message_id.clone(),
+                        });
+                    }
+                    Err(err) => self.report_youtube_error(&err),
                 }
                 return;
             }
@@ -1488,15 +1525,22 @@ impl Controller {
                 "haven't seen '{user}' in YouTube chat yet — can't resolve their channel"
             ));
         };
-        // YouTube bans carry no reason field.
+        // YouTube bans carry no reason field. An unhide has no chat event to
+        // show it worked, so it confirms itself.
+        let unhide = matches!(action, ModAction::Unban { .. });
         let result = match action {
             ModAction::Ban { .. } => actions.ban(source, &channel_id, None).await,
             ModAction::Timeout { secs, .. } => actions.ban(source, &channel_id, Some(secs)).await,
             ModAction::Unban { .. } => actions.unban(source, &channel_id).await,
             ModAction::Delete { .. } => unreachable!("handled above"),
         };
-        if let Err(err) = result {
-            self.report_youtube_error(&err);
+        match result {
+            Ok(()) if unhide => {
+                let name = bks_youtube::login_for(&channel_id).unwrap_or(user);
+                self.confirm(format!("{name} can chat again"));
+            }
+            Ok(()) => {}
+            Err(err) => self.report_youtube_error(&err),
         }
     }
 

@@ -2252,7 +2252,14 @@ fn mod_button_strip(msg: &Message, ids: &RowIds, scale: Scale, ctx: ModStrip) ->
                     && crate::session::twitch_scope_missing(
                         crate::commands::twitch_scopes_for_template(&b.command),
                     ));
-            mod_button_chip(ids.mod_button(i), b, scale, ctx.click.clone(), !real)
+            mod_button_chip(
+                ids.mod_button(i),
+                b,
+                msg.platform,
+                scale,
+                ctx.click.clone(),
+                !real,
+            )
         })
         .collect();
     // An emptied list leaves no box behind — an empty line box + margin would
@@ -2283,16 +2290,24 @@ fn mod_button_size(scale: Scale) -> f32 {
 fn mod_button_chip(
     id: (SharedString, usize),
     button: &crate::settings::ModButton,
+    platform: Platform,
     scale: Scale,
     cb: ModClick,
     ghost: bool,
 ) -> gpui::AnyElement {
     let size = mod_button_size(scale);
     let command = SharedString::from(button.command.clone());
-    let tip = SharedString::from(if button.name.is_empty() {
+    let name = if button.name.is_empty() {
         button.command.clone()
     } else {
         button.name.clone()
+    };
+    let note = (platform == Platform::YouTube)
+        .then(|| crate::commands::youtube_note(&button.command))
+        .flatten();
+    let tip = SharedString::from(match note {
+        Some(note) => format!("{name}\n{note}"),
+        None => name,
     });
     let face = match crate::assets::mod_icon_path(&button.icon) {
         // gpui's `svg()` paints only when the svg element ITSELF has a text

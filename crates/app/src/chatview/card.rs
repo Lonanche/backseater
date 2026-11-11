@@ -191,7 +191,7 @@ impl UserCardView {
             // A relayed shared-chat message carries the chatter's roles in the
             // *source* channel, not this one.
             if message.source.is_none() {
-                self.card.set_roles_from_badges(&message.author.badges);
+                self.card.set_roles(message);
             }
         }
         self.timeout_error = None;
@@ -551,10 +551,12 @@ impl UserCardView {
                 .child(SharedString::from(err.clone()))
         });
 
-        // Ban + Unban, always present for both platforms.
+        // Ban + Unban on every platform; YouTube calls its ban "hide" because
+        // that's what it does (the user isn't removed, nobody sees them).
+        let youtube = platform == bks_core::Platform::YouTube;
         let ban_login = login.clone();
         let ban = Button::new("usercard-ban")
-            .label("Ban")
+            .label(if youtube { "Hide user" } else { "Ban" })
             .danger()
             .xsmall()
             .compact()
@@ -563,7 +565,7 @@ impl UserCardView {
             }));
         let unban_login = login.clone();
         let unban = Button::new("usercard-unban")
-            .label("Unban")
+            .label(if youtube { "Unhide" } else { "Unban" })
             .outline()
             .xsmall()
             .compact()
@@ -662,6 +664,19 @@ impl UserCardView {
                         .child(ban)
                         .child(unban),
                 )
+                .when(youtube, |col| {
+                    col.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(
+                                "Hide: they can still watch and type, but nobody else sees \
+                                 their messages, and YouTube doesn't tell them. Timeout: \
+                                 they can't chat until it ends. Unhide only works for users \
+                                 hidden from Backseater this session.",
+                            )),
+                    )
+                })
                 .when_some(warn_row, |col, row| {
                     col.child(
                         v_flex()
@@ -707,6 +722,18 @@ impl UserCardView {
             (bks_core::Platform::Kick, Mod::Ban) => c.ban_kick(login),
             (bks_core::Platform::Kick, Mod::Timeout(s)) => c.timeout_kick(login, s),
             (bks_core::Platform::Kick, Mod::Unban) => c.unban_kick(login),
+            (bks_core::Platform::YouTube, action) => {
+                let target = if self.card.user_id.is_empty() {
+                    login
+                } else {
+                    self.card.user_id.clone()
+                };
+                match action {
+                    Mod::Ban => c.hide_youtube(target),
+                    Mod::Timeout(s) => c.timeout_youtube(target, s),
+                    Mod::Unban => c.unhide_youtube(target),
+                }
+            }
             _ => {}
         }
     }

@@ -35,6 +35,16 @@ fn path(name: &str) -> anyhow::Result<PathBuf> {
 /// so that path is (case-insensitively) the Velopack install root
 /// (`%LocalAppData%\Backseater`) — anything kept there is wiped by
 /// uninstall/repair and clutters the install directory.
+/// The log file a run writes (overwritten each launch): next to the image
+/// cache, outside Velopack's install folder.
+pub fn log_file_path() -> anyhow::Result<PathBuf> {
+    let dir = dirs::cache_dir()
+        .context("no OS cache dir")?
+        .join("backseater-cache");
+    std::fs::create_dir_all(&dir).context("creating cache dir")?;
+    Ok(dir.join("backseater.log"))
+}
+
 pub fn image_cache_dir() -> anyhow::Result<PathBuf> {
     let dir = dirs::cache_dir()
         .context("no OS cache dir")?

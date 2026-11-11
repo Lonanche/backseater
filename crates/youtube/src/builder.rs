@@ -26,7 +26,7 @@ use serde_json::Value;
 
 /// The green YouTube uses for a channel member's name when they carry a
 /// membership badge but no explicit name color.
-const MEMBER_NAME_COLOR: Color = Color::rgb(43, 166, 64);
+pub(crate) const MEMBER_NAME_COLOR: Color = Color::rgb(43, 166, 64);
 
 /// The result of parsing one chat item: a chat message, a highlighted event, or
 /// nothing (an item kind we don't render).

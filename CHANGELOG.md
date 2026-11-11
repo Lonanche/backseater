@@ -12,10 +12,17 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
   like on twitch.tv. Their badges are the chatter's badges in that channel, so
   subscriber badges show the right channel's images.
 - YouTube login: log in with your Google account (Settings → Account) to send
-  messages, delete messages, and time out, ban or unban users in YouTube chats
+  messages, delete messages, and time out, hide or unhide users in YouTube chats
   you own or moderate. Reading YouTube chat still needs no login.
 - YouTube chat now strikes through deleted messages and the messages of users
-  who were timed out or banned.
+  who were timed out or banned, and a message you delete is struck through right
+  away.
+- While logged in to YouTube, the moderation buttons always show in YouTube
+  chats, because YouTube offers no way to check whether you moderate a chat. In
+  a chat you don't moderate, using them shows YouTube's permission error.
+- YouTube usercards: the moderation buttons now work, are labelled "Hide user"
+  and "Unhide" (which is what YouTube's ban does), explain what each does, and
+  no longer appear for the channel owner or moderators, who can't be banned.
 
 ## v0.7.5
 

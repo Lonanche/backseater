@@ -234,7 +234,16 @@ async fn poll_live_chat(
         }
 
         if !skip_backlog {
+            // In chats read through the official API, keep polling (live status,
+            // viewers) and keep recording ids, but show no chat from here.
+            let suppressed = crate::seen::official_chat(source);
             for action in live_chat["actions"].as_array().into_iter().flatten() {
+                if suppressed {
+                    if let Some(id) = item_id(&action["addChatItemAction"]["item"]) {
+                        seen.insert(id);
+                    }
+                    continue;
+                }
                 if let Some(event) = moderation_event(action) {
                     if tx.send(event).await.is_err() {
                         return Ok(Outcome::Stopped);
@@ -252,6 +261,7 @@ async fn poll_live_chat(
                 if let Some(event) = item_to_event(source, item) {
                     if let ChatEvent::Message(msg) = &event {
                         crate::seen::record(msg, crate::builder::item_author_roles(item));
+                        crate::seen::note_shown(source, msg.timestamp);
                     }
                     if tx.send(event).await.is_err() {
                         return Ok(Outcome::Stopped);
