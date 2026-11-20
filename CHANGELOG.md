@@ -23,6 +23,35 @@ Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 - YouTube usercards: the moderation buttons now work, are labelled "Hide user"
   and "Unhide" (which is what YouTube's ban does), explain what each does, and
   no longer appear for the channel owner or moderators, who can't be banned.
+- The title bar shows your logged-in YouTube account next to Twitch and Kick.
+- Tab keyboard shortcuts: Ctrl+T opens a new tab, Ctrl+Tab and Ctrl+Shift+Tab
+  cycle tabs, Ctrl+1–8 jump to a tab by position (Ctrl+9 to the last), and
+  Ctrl+, opens settings.
+- Right-click a chat message to copy the message, the username or your
+  selection.
+- The "jump to newest" pill shows how many new messages arrived while you were
+  scrolled up.
+- A new tab opens straight into choosing its channels.
+- YouTube tabs without a name now show the channel handle, name or video id
+  instead of the full link.
+
+### Improvements
+
+- Kick chat now connects over Kick's new realtime service (the one kick.com
+  itself switched to), falling back to the old connection if needed.
+- The settings window is easier to use: Enter submits fields, pages open at
+  the top, deleting asks for confirmation, the Channels page uses cards, and the
+  font size has a reset button.
+- Buttons and controls use the purple accent, with tidier Panels, theme,
+  usercard, Log out and mod-button settings.
+
+### Fixes
+
+- Large Kick gift bombs now show as one gift event with the full count, instead
+  of several partial events.
+- Kick subscriptions now show the subscriber's message when they attach one.
+- Messages attached to Kick events (shared resubs, Kicks gifts) now show the
+  chatter's badges and 7TV emotes like normal chat.
 
 ## v0.7.5
 
