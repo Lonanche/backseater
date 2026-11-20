@@ -3,6 +3,13 @@
 Each `## vX.Y.Z` section becomes the GitHub release notes for that version
 (extracted by `.github/workflows/ci.yml` when it auto-publishes a release).
 
+## v0.7.7
+
+### Fixes
+
+- Fixed quiet Kick chats repeatedly showing "Kick realtime went silent" and
+  reconnecting when no messages arrived for a minute.
+
 ## v0.7.6
 
 ### Features

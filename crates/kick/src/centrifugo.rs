@@ -12,6 +12,7 @@
 //!   where the inner `data` is usually a JSON string, like Pusher's.
 
 use std::collections::{HashMap, VecDeque};
+use std::time::Duration;
 
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
@@ -27,7 +28,13 @@ pub(crate) struct Session<S> {
     next_id: u64,
     /// Subscribe command ids awaiting a reply, by channel.
     subscribing: HashMap<u64, String>,
+    /// How long the socket may stay without any frame before it counts as dead.
+    silence: Duration,
 }
+
+/// Kick pings every 25 s; this long with no frame at all means the
+/// connection died without closing.
+const SILENCE: Duration = Duration::from_secs(60);
 
 /// What the connect reply said about the token's lifetime.
 pub(crate) struct Connected {
@@ -41,11 +48,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         socket: WebSocketStream<S>,
         token: &str,
     ) -> anyhow::Result<(Self, Connected)> {
+        Self::connect_with_silence(socket, token, SILENCE).await
+    }
+
+    async fn connect_with_silence(
+        socket: WebSocketStream<S>,
+        token: &str,
+        silence: Duration,
+    ) -> anyhow::Result<(Self, Connected)> {
         let mut session = Self {
             socket,
             lines: VecDeque::new(),
             next_id: 1,
             subscribing: HashMap::new(),
+            silence,
         };
         let id = session
             .command(
@@ -190,7 +206,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
                 }
                 return Ok(Some(value));
             }
-            let Some(frame) = self.socket.next().await else {
+            // Any frame counts, pings included: a quiet chat can go minutes
+            // without an event while the socket is healthy.
+            let Some(frame) = tokio::time::timeout(self.silence, self.socket.next())
+                .await
+                .map_err(|_| anyhow::anyhow!("Kick realtime went silent"))?
+            else {
                 return Ok(None);
             };
             match frame.context("Kick realtime websocket error")? {
@@ -352,6 +373,42 @@ mod tests {
         };
         let ((), result) = tokio::join!(server_task, client_task);
         assert!(result.unwrap_err().to_string().contains("limit exceeded"));
+    }
+
+    #[tokio::test]
+    async fn pings_keep_a_quiet_chat_alive_and_silence_ends_it() {
+        let silence = Duration::from_millis(300);
+        let (client, mut server) = sockets().await;
+        let server_task = async {
+            recv(&mut server).await;
+            send(&mut server, r#"{"id":1,"connect":{}}"#).await;
+            // Pings only, for longer than the silence window, then an event.
+            for _ in 0..8 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                send(&mut server, "{}").await;
+                assert_eq!(recv(&mut server).await, "{}");
+            }
+            send(
+                &mut server,
+                r#"{"push":{"channel":"c","pub":{"data":{"event":"E","data":"{}"}}}}"#,
+            )
+            .await;
+            // Then nothing at all; keep the socket open while the client waits.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        };
+        let client_task = async {
+            let (mut session, _) = Session::connect_with_silence(client, "tok", silence)
+                .await
+                .unwrap();
+            let frame = session.next_frame().await.unwrap().unwrap();
+            assert_eq!(frame.event, "E");
+            session.next_frame().await
+        };
+        let (result, ()) = tokio::select! {
+            result = client_task => (result, ()),
+            () = server_task => panic!("client never gave up on a silent socket"),
+        };
+        assert!(result.unwrap_err().to_string().contains("went silent"));
     }
 
     #[tokio::test]

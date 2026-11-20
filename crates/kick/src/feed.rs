@@ -17,9 +17,6 @@ use crate::pusher::{self, PusherFrame};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// Centrifugo pings every 25 s; this long without any frame means the
-/// connection died without closing.
-const CENTRIFUGO_SILENCE: Duration = Duration::from_secs(60);
 /// How long before expiry the Centrifugo token is renewed.
 const REFRESH_LEAD: Duration = Duration::from_secs(120);
 /// Delay before retrying a failed token renewal.
@@ -104,9 +101,7 @@ impl Feed {
                     }
                 };
                 tokio::select! {
-                    frame = tokio::time::timeout(CENTRIFUGO_SILENCE, session.next_frame()) => {
-                        return frame.map_err(|_| anyhow::anyhow!("Kick realtime went silent"))?;
-                    }
+                    frame = session.next_frame() => return frame,
                     () = refresh => {
                         // A failed renewal retries; if the token runs out first, the
                         // server disconnects and the caller reconnects.
