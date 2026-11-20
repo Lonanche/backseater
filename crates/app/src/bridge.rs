@@ -1203,6 +1203,30 @@ async fn run_kick(source: Arc<KickSource>, channel: String, tx: Sink, controller
                     ends_at,
                 }
             }
+            // A shared resub or a Kicks gift carries the chatter's line, which
+            // renders under the event like chat and needs the same resolution.
+            ChatEvent::Event {
+                platform,
+                kind,
+                text,
+                timestamp,
+                message,
+                details,
+            } => ChatEvent::Event {
+                platform,
+                kind,
+                text,
+                timestamp,
+                message: message.map(|mut message| {
+                    if !registry.is_empty() {
+                        message.elements =
+                            registry.resolve_elements(&message.channel, message.elements);
+                    }
+                    resolve_kick_badges(&mut message);
+                    message
+                }),
+                details,
+            },
             other => other,
         };
         if tx.send(forward).await.is_err() {

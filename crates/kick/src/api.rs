@@ -1,6 +1,6 @@
 //! Kick channel resolution.
 //!
-//! Kick chat runs over Pusher, but you can only subscribe once you know the
+//! Kick chat runs over Centrifugo or Pusher, but you can only subscribe once you know the
 //! channel's *chatroom id*. That id comes from `kick.com/api/v2/channels/{slug}`
 //! — which sits behind Cloudflare. Cloudflare fingerprints the TLS ClientHello
 //! and 403s every *plain* in-process Rust HTTP client (rustls *and* native-tls
@@ -61,10 +61,17 @@ struct RealtimeConfig {
 #[derive(Deserialize)]
 #[serde(tag = "provider")]
 enum RealtimeConnection {
+    #[serde(rename = "centrifugo")]
+    Centrifugo { credentials: CentrifugoCredentials },
     #[serde(rename = "pusher")]
     Pusher { credentials: PusherCredentials },
     #[serde(other)]
     Other,
+}
+
+#[derive(Deserialize)]
+struct CentrifugoCredentials {
+    url: String,
 }
 
 #[derive(Deserialize)]
@@ -73,75 +80,148 @@ struct PusherCredentials {
     cluster: String,
 }
 
+/// The realtime transport Kick assigned a chat, with the URL to open.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Realtime {
+    Centrifugo { url: String },
+    Pusher { url: String },
+}
+
 impl RealtimeConfig {
-    fn pusher_url(self) -> anyhow::Result<String> {
+    /// The first connection Kick offered that we can use, in its order.
+    fn realtime(self) -> anyhow::Result<Realtime> {
         anyhow::ensure!(
             self.mode == "websocket",
             "Kick did not offer WebSocket chat"
         );
-        let credentials = self.connections.into_iter().find_map(|connection| {
-            if let RealtimeConnection::Pusher { credentials } = connection {
-                Some(credentials)
-            } else {
-                None
+        let mut problem = None;
+        for connection in self.connections {
+            let result = match connection {
+                RealtimeConnection::Centrifugo { credentials } => centrifugo_url(credentials),
+                RealtimeConnection::Pusher { credentials } => pusher_url(credentials),
+                RealtimeConnection::Other => continue,
+            };
+            match result {
+                Ok(realtime) => return Ok(realtime),
+                Err(err) => problem = Some(err),
             }
-        });
-        let PusherCredentials { app_key, cluster } =
-            credentials.context("Kick did not offer a Pusher connection")?;
-        anyhow::ensure!(
-            !app_key.is_empty() && app_key.bytes().all(|b| b.is_ascii_alphanumeric()),
-            "Kick returned an invalid Pusher app key"
-        );
-        anyhow::ensure!(
-            !cluster.is_empty()
-                && cluster
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
-            "Kick returned an invalid Pusher cluster"
-        );
-        Ok(format!(
-            "wss://ws-{cluster}.pusher.com/app/{app_key}?protocol=7&client=js&version=8.4.0&flash=false"
-        ))
+        }
+        Err(problem.unwrap_or_else(|| anyhow::anyhow!("Kick offered no supported chat connection")))
     }
 }
 
-fn pusher_connection_request() -> serde_json::Value {
-    serde_json::json!({
-        "client": { "id": uuid::Uuid::new_v4().to_string(), "type": "web" },
-        "capabilities": { "accepted_providers": [{ "provider": "pusher" }] }
+fn centrifugo_url(
+    CentrifugoCredentials { url }: CentrifugoCredentials,
+) -> anyhow::Result<Realtime> {
+    let host = url
+        .strip_prefix("wss://")
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or_default();
+    anyhow::ensure!(
+        host == "kick.com" || host.ends_with(".kick.com"),
+        "Kick returned an unexpected realtime URL"
+    );
+    Ok(Realtime::Centrifugo { url })
+}
+
+fn pusher_url(
+    PusherCredentials { app_key, cluster }: PusherCredentials,
+) -> anyhow::Result<Realtime> {
+    anyhow::ensure!(
+        !app_key.is_empty() && app_key.bytes().all(|b| b.is_ascii_alphanumeric()),
+        "Kick returned an invalid Pusher app key"
+    );
+    anyhow::ensure!(
+        !cluster.is_empty()
+            && cluster
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+        "Kick returned an invalid Pusher cluster"
+    );
+    Ok(Realtime::Pusher {
+        url: format!(
+            "wss://ws-{cluster}.pusher.com/app/{app_key}?protocol=7&client=js&version=8.4.0&flash=false"
+        ),
     })
 }
 
-/// Ask for only the protocol we implement. Kick otherwise prefers Centrifugo,
-/// and its Pusher app key can change, so resolve it again on every reconnect.
-pub(crate) async fn fetch_pusher_url(channel_id: u64) -> anyhow::Result<String> {
-    anyhow::ensure!(
-        channel_id != 0,
-        "Kick channel lookup returned no channel id"
-    );
+fn realtime_connection_request(client_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "client": { "id": client_id, "type": "web" },
+        "capabilities": {
+            "accepted_providers": [{ "provider": "centrifugo" }, { "provider": "pusher" }]
+        }
+    })
+}
+
+/// POSTs a realtime endpoint the way kick.com does (it answers only that origin).
+async fn realtime_post(url: &str, body: &serde_json::Value) -> anyhow::Result<wreq::Response> {
     let response = CLIENT
-        .post(format!(
-            "https://web.kick.com/api/v1/realtime/channels/{channel_id}/chat/connection"
-        ))
+        .post(url)
         .header("accept", "application/json")
         .header("referer", "https://kick.com/")
         .header("origin", "https://kick.com")
         .header("x-app-platform", "web")
-        .json(&pusher_connection_request())
+        .json(body)
         .send()
         .await
-        .context("resolving Kick Pusher connection")?;
+        .with_context(|| format!("requesting {url}"))?;
     anyhow::ensure!(
         response.status().is_success(),
-        "Kick Pusher connection lookup returned {}",
+        "{url} returned {}",
         response.status()
     );
-    response
-        .json::<RealtimeResponse>()
-        .await
-        .context("parsing Kick Pusher connection")?
-        .data
-        .pusher_url()
+    Ok(response)
+}
+
+/// Asks which transport carries this channel's chat, offering both we speak
+/// (kick.com offers both too). Kick has served Centrifugo since October 2026;
+/// a Pusher answer still works. Resolved on every reconnect: the server or
+/// app key can change.
+pub(crate) async fn fetch_realtime(channel_id: u64, client_id: &str) -> anyhow::Result<Realtime> {
+    anyhow::ensure!(
+        channel_id != 0,
+        "Kick channel lookup returned no channel id"
+    );
+    realtime_post(
+        &format!("https://web.kick.com/api/v1/realtime/channels/{channel_id}/chat/connection"),
+        &realtime_connection_request(client_id),
+    )
+    .await
+    .context("resolving Kick chat connection")?
+    .json::<RealtimeResponse>()
+    .await
+    .context("parsing Kick chat connection")?
+    .data
+    .realtime()
+}
+
+#[derive(Deserialize)]
+struct TokenResponse {
+    data: TokenData,
+}
+
+#[derive(Deserialize)]
+struct TokenData {
+    token: String,
+}
+
+/// A Centrifugo guest token for `client_id` (a JWT lasting 45 minutes). A
+/// refresh must use the same client id.
+pub(crate) async fn fetch_realtime_token(client_id: &str) -> anyhow::Result<String> {
+    let token = realtime_post(
+        "https://web.kick.com/api/v1/realtime/auth/connection",
+        &serde_json::json!({ "client_id": client_id }),
+    )
+    .await
+    .context("requesting a Kick chat token")?
+    .json::<TokenResponse>()
+    .await
+    .context("parsing the Kick chat token")?
+    .data
+    .token;
+    anyhow::ensure!(!token.is_empty(), "Kick returned an empty chat token");
+    Ok(token)
 }
 
 /// Fetches and parses the Cloudflare-fronted v2 channel endpoint for `slug` into
@@ -674,40 +754,74 @@ mod tests {
     use chrono::{Datelike, Timelike};
 
     #[test]
-    fn pusher_discovery_advertises_only_the_supported_protocol() {
-        let request = pusher_connection_request();
+    fn discovery_offers_both_transports() {
+        let request = realtime_connection_request("abc");
+        assert_eq!(request["client"]["id"], "abc");
         assert_eq!(request["client"]["type"], "web");
-        assert!(uuid::Uuid::parse_str(request["client"]["id"].as_str().unwrap()).is_ok());
         assert_eq!(
             request["capabilities"]["accepted_providers"],
-            serde_json::json!([{ "provider": "pusher" }])
+            serde_json::json!([{ "provider": "centrifugo" }, { "provider": "pusher" }])
         );
     }
 
+    fn config(connections: serde_json::Value) -> RealtimeConfig {
+        serde_json::from_value(serde_json::json!({"mode":"websocket","connections":connections}))
+            .unwrap()
+    }
+
     #[test]
-    fn pusher_discovery_uses_the_advertised_key_and_cluster() {
+    fn discovery_uses_the_first_usable_offer() {
         let response: RealtimeResponse = serde_json::from_str(
             r#"{"data":{"mode":"websocket","connections":[
-                {"provider":"centrifugo","credentials":{"url":"wss://example.invalid"}},
+                {"provider":"centrifugo","credentials":{"url":"wss://realtime.us-east-1.platform.kick.com/connection/websocket"}},
                 {"provider":"pusher","credentials":{"app_key":"rotated123","cluster":"eu"}}
             ]},"message":"success"}"#,
         )
         .unwrap();
         assert_eq!(
-            response.data.pusher_url().unwrap(),
-            "wss://ws-eu.pusher.com/app/rotated123?protocol=7&client=js&version=8.4.0&flash=false"
+            response.data.realtime().unwrap(),
+            Realtime::Centrifugo {
+                url: "wss://realtime.us-east-1.platform.kick.com/connection/websocket".into()
+            }
         );
+        let pusher = config(serde_json::json!([
+            {"provider":"somethingnew"},
+            {"provider":"pusher","credentials":{"app_key":"rotated123","cluster":"eu"}}
+        ]));
+        assert_eq!(
+            pusher.realtime().unwrap(),
+            Realtime::Pusher {
+                url: "wss://ws-eu.pusher.com/app/rotated123?protocol=7&client=js&version=8.4.0&flash=false".into()
+            }
+        );
+        // A bad first offer falls through to a good one.
+        let fallback = config(serde_json::json!([
+            {"provider":"centrifugo","credentials":{"url":"wss://evil.example/ws"}},
+            {"provider":"pusher","credentials":{"app_key":"k","cluster":"us2"}}
+        ]));
+        assert!(matches!(
+            fallback.realtime().unwrap(),
+            Realtime::Pusher { .. }
+        ));
     }
 
     #[test]
-    fn pusher_discovery_rejects_unsupported_or_invalid_connections() {
-        for data in [
-            serde_json::json!({"mode":"polling","connections":[]}),
-            serde_json::json!({"mode":"websocket","connections":[]}),
-            serde_json::json!({"mode":"websocket","connections":[{"provider":"centrifugo"}]}),
+    fn discovery_rejects_unsupported_or_invalid_connections() {
+        let polling: RealtimeConfig =
+            serde_json::from_value(serde_json::json!({"mode":"polling","connections":[]})).unwrap();
+        assert!(polling.realtime().is_err());
+        assert!(config(serde_json::json!([])).realtime().is_err());
+        assert!(config(serde_json::json!([{"provider":"other"}]))
+            .realtime()
+            .is_err());
+        for url in [
+            "ws://realtime.platform.kick.com/connection/websocket",
+            "wss://kick.com.evil.example/x",
+            "https://realtime.platform.kick.com/x",
         ] {
-            let config: RealtimeConfig = serde_json::from_value(data).unwrap();
-            assert!(config.pusher_url().is_err());
+            let offer =
+                config(serde_json::json!([{"provider":"centrifugo","credentials":{"url":url}}]));
+            assert!(offer.realtime().is_err(), "accepted {url}");
         }
         for (app_key, cluster) in [
             ("", "us2"),
@@ -715,12 +829,11 @@ mod tests {
             ("key", ""),
             ("key", "us2/other"),
         ] {
-            let config: RealtimeConfig = serde_json::from_value(serde_json::json!({
-                "mode":"websocket",
-                "connections":[{"provider":"pusher","credentials":{"app_key":app_key,"cluster":cluster}}]
-            })).unwrap();
+            let offer = config(serde_json::json!([
+                {"provider":"pusher","credentials":{"app_key":app_key,"cluster":cluster}}
+            ]));
             assert!(
-                config.pusher_url().is_err(),
+                offer.realtime().is_err(),
                 "accepted {app_key:?}, {cluster:?}"
             );
         }

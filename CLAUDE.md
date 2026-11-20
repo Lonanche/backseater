@@ -29,7 +29,7 @@ platform = implement one trait + one message builder, with zero UI changes**.
 - **Shared Twitch IRC** (`twitch/src/irc_manager.rs`): one read + one write IRC connection for
   the whole app regardless of tab count; `TwitchSource` is a thin handle that registers its
   channel onto the shared sockets. JOINs go through a leaky-bucket limiter (18/12.5s).
-- Anonymous **Twitch** chat (tmi IRC) + anonymous **Kick** chat (Pusher WebSocket), interleaved
+- Anonymous **Twitch** chat (tmi IRC) + anonymous **Kick** chat (Centrifugo WebSocket, Pusher fallback), interleaved
   in one log per tab, each message tagged by its platform.
 - **Native Twitch emotes** + **inline Kick emotes** (`[emote:id:name]`) rendered inline.
 - **7TV emotes** on Twitch (global + per-channel), animated ones play (WEBP variant; see render notes).
@@ -686,7 +686,7 @@ crates/
   core/      # platform-agnostic domain model. NO gui, NO networking.
   platform/  # the expandability seam: ChatSource trait + ChatEvent (moderation is per-platform types)
   twitch/    # ChatSource impl (shared IRC via irc_manager) + Helix/EventSub/badges/history
-  kick/      # ChatSource impl (anonymous Pusher WebSocket) + chat-event builder (+ tests)
+  kick/      # ChatSource impl (anonymous Centrifugo/Pusher WebSocket) + chat-event builder (+ tests)
   youtube/   # anonymous InnerTube live-chat reader + Data API actions (send/delete/ban)
   tiktok/    # anonymous read-only TikTok LIVE chat (vendored PirateTok connector)
   emotes/    # EmoteRegistry + EmoteProvider trait (7TV / BTTV / FFZ)
@@ -1148,16 +1148,37 @@ through them. `Both` sends typed messages to Twitch and Kick; mod commands are d
 
 Hard-won protocol details and JSON event shapes, kept here so they don't have to be
 re-discovered:
-- Kick chat = **Pusher WebSocket** (implemented in `crates/kick`):
-  - Discover the app key + cluster on every connection via anonymous POST to
-    `https://web.kick.com/api/v1/realtime/channels/{channel_id}/chat/connection`,
-    advertising only `pusher` under `capabilities.accepted_providers` (see `api.rs`).
-    Kick otherwise prefers Centrifugo. Never hard-code an app key: the old one was retired.
-    Build `wss://ws-{cluster}.pusher.com/app/{app_key}?protocol=7&client=js&version=8.4.0&flash=false`.
+- Kick chat = **Centrifugo WebSocket** (since Oct 2026; Pusher before, still supported as a
+  fallback) — `crates/kick/src/feed.rs` picks the transport, `centrifugo.rs` / `pusher.rs` frame it,
+  both yield the same `{event, channel, data}` frames, so the connector's event arms don't care:
+  - Discover the transport on every connection via anonymous POST to
+    `https://web.kick.com/api/v1/realtime/channels/{channel_id}/chat/connection` with
+    `{client:{id:<uuid>,type:"web"}, capabilities:{accepted_providers:[{provider:"centrifugo"},
+    {provider:"pusher"}]}}` (what kick.com sends; `api.rs::fetch_realtime`). Kick answers
+    Centrifugo only (`credentials.url` = `wss://realtime.<region>.platform.kick.com/connection/websocket`)
+    when offered both; asked for Pusher alone it still hands out an app key (verified 2026-11-20,
+    Pusher still carried every event). Never hard-code a server or app key.
+  - **Centrifugo** (JSON protocol, server "6.9.7 PRO"): guest token from POST
+    `web.kick.com/api/v1/realtime/auth/connection` `{client_id}` → `data.token` (JWT,
+    `sub:"guest:<client_id>"`, 45 min). The WS upgrade needs `Origin: https://kick.com` (403
+    otherwise). Send `{"id":1,"connect":{"token":…,"name":"js"}}` → reply `{expires,ttl:2700,ping:25}`;
+    renew with `{"id":n,"refresh":{"token":<new token, same client_id>}}` before `ttl` ends.
+    `{}` from the server is a ping → answer `{}`. Subscribe `{"id":n,"subscribe":{"channel":…}}`;
+    several replies can share one WS frame (newline-separated). Events:
+    `{"push":{"channel":…,"pub":{"data":{"event":"App\\Events\\…","data":<JSON string or object>}}}}`.
+    ⚠️ A connection holds **128 subscriptions max** (error 106 "limit exceeded" past that — fine
+    for one chat's 7). A refused alias channel is logged and skipped; only the primary
+    `chatrooms.X.v2` refusal fails the join.
+  - **Pusher** (fallback): build
+    `wss://ws-{cluster}.pusher.com/app/{app_key}?protocol=7&client=js&version=8.4.0&flash=false`.
+    Pusher `data` may be a string **or object**.
   - Wait for connection establishment and the primary chat subscription acknowledgement
-    before announcing success or fetching history. Pusher `data` may be a string **or object**;
-    rejected connections must surface their error/close reason instead of silently gap-filling.
-  - Subscribe: `{"event":"pusher:subscribe","data":{"auth":"","channel":"chatrooms.{chatroom_id}.v2"}}`.
+    before announcing success or fetching history; rejected connections must surface their
+    error/close reason instead of silently gap-filling.
+  - Channels (same names on both transports; kick.com's bundle binds the same split):
+    `chatrooms.{chatroom_id}.v2` (chat, deletes, bans, `SubscriptionEvent`, pins, polls),
+    `chatroom_{chatroom_id}` (`GiftedSubscriptionsEvent`, rewards), `chatrooms.{chatroom_id}` (hosts),
+    `channel.{channel_id}` (live/offline), `channel_{channel_id}` (Kicks, goals, leaderboards).
   - Chat frames: event `App\Events\ChatMessageEvent`; the Pusher `data` field is a JSON *string*
     (parse twice) → `{id, content, created_at, sender:{username, identity:{color}}}`.
   - **Reply frames**: `type:"reply"` adds `metadata:{original_sender:{id,username},
@@ -1167,7 +1188,8 @@ re-discovered:
     a client send-ref, ignored. The `/history` endpoint serializes `metadata` as a JSON *string*
     (dropped — backlog carries no reply context). See `crates/kick/src/builder.rs`.
   - Inline emotes: `[emote:{id}:{name}]` in `content`; CDN `https://files.kick.com/emotes/{id}/fullsize`.
-  - Respond to `pusher:ping` with `{"event":"pusher:pong","data":{}}` to stay connected.
+  - Pusher: respond to `pusher:ping` with `{"event":"pusher:pong","data":{}}` to stay connected.
+    Centrifugo: answer `{}` pings; 60 s of silence (pings are 25 s) = a dead socket → reconnect.
   - ⚠️ **Cloudflare fronts the read endpoints** (`kick.com/api/v2/channels/{slug}`, `kick.com/emotes/
     {slug}`, the per-channel users endpoint, and `web.kick.com/.../history`): it fingerprints the TLS
     ClientHello and 403s *every plain* in-process Rust client (rustls AND native-tls return "Request
@@ -1176,8 +1198,9 @@ re-discovered:
     process-wide `Client` with `Emulation::Chrome*` + browser-looking headers (`crates/kick/src/api.rs`,
     `kick_get`). These were previously proxied through the broker Worker's edge `fetch`; that's gone —
     the **broker is OAuth-only** now. ⚠️ `wreq` builds BoringSSL from source, so on Windows it needs
-    **NASM + LLVM/libclang** at build time (see the build-prerequisites note). The Pusher WS itself is
-    NOT behind Cloudflare and works with plain rustls — but the dep tree has both `ring` and `aws-lc-rs`,
+    **NASM + LLVM/libclang** at build time (see the build-prerequisites note). The realtime WS (Centrifugo
+    or Pusher) is NOT behind Cloudflare and works with plain rustls (the realtime POSTs go through
+    `wreq` anyway) — but the dep tree has both `ring` and `aws-lc-rs`,
     so the connector calls `ring::install_default()` once or TLS panics.
   - **Channel lookup**: `fetch_channel_info(channel)` → `{chatroom_id, user_id, channel_id,
     subscriber_badges, is_live, …}` (one call per channel join, not per message). Yields per-tier

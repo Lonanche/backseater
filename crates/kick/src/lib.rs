@@ -1,10 +1,12 @@
-//! Kick connector: anonymous Pusher WebSocket chat ([`KickSource`]) for reading,
+//! Kick connector: anonymous realtime (Centrifugo/Pusher) chat ([`KickSource`]) for reading,
 //! plus authenticated REST actions ([`KickActions`]) for sending + moderation.
 
 mod actions;
 mod api;
 mod builder;
+mod centrifugo;
 mod connector;
+mod feed;
 mod history;
 mod preview;
 mod pusher;

@@ -20,7 +20,7 @@ creature comforts of a mature chat client.
   moderator feed (rich mod notices + AutoMod allow/deny), pinned messages,
   viewer list (mod-only, per Twitch's API rules), and usercards with follow/sub
   age.
-- **Kick** — chat over its Pusher WebSocket, inline + subscriber badges, public
+- **Kick** — chat over its realtime (Centrifugo) WebSocket, inline + subscriber badges, public
   events (subs, gifts, hosts, kicks, reward redemptions), history backlog,
   pinned messages, send + ban/timeout via the public API, usercards.
 - **YouTube** — anonymous live-chat reading via InnerTube (no API key, no
@@ -64,7 +64,7 @@ crates/
   core/      # platform-agnostic domain model (Message, MessageElement, ...)
   platform/  # the expandability seam: ChatSource trait + ChatEvent
   twitch/    # Twitch: shared IRC, Helix, EventSub, badges, history
-  kick/      # Kick: Pusher WebSocket, REST, badges, history
+  kick/      # Kick: realtime WebSocket (Centrifugo/Pusher), REST, badges, history
   youtube/   # YouTube: anonymous InnerTube live-chat reader + Data API send/moderation
   tiktok/    # TikTok: anonymous PirateTok WebSocket reader
   emotes/    # EmoteRegistry + EmoteProvider trait (7TV / BTTV / FFZ)

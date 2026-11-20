@@ -1,10 +1,11 @@
-//! Anonymous Kick chat connector over Pusher WebSocket.
+//! Anonymous Kick chat connector.
 //!
-//! Kick chat is a Pusher app. We resolve the channel's chatroom id via the REST
-//! API ([`crate::api`]), discover the current Pusher app, subscribe to
-//! `chatrooms.{id}.v2`, and translate `App\Events\ChatMessageEvent` frames into
-//! [`Message`]s. Pusher wraps each event as `{event, channel, data}` where
-//! `data` is itself a JSON *string* that we parse a second time.
+//! We resolve the channel's chatroom id via the REST API ([`crate::api`]), ask
+//! Kick which realtime transport carries its chat (Centrifugo since October
+//! 2026, Pusher before; see [`crate::feed`]), subscribe to `chatrooms.{id}.v2`
+//! and its sibling channels, and translate `App\Events\ChatMessageEvent` frames
+//! into [`Message`]s. Both transports wrap each event as `{event, channel, data}`
+//! where `data` is usually itself a JSON *string* that we parse a second time.
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -16,10 +17,10 @@ use serde::Deserialize;
 
 use crate::api::{self, parse_kick_time, PinnedInfo, SubscriberBadge};
 use crate::builder::{build_message, renewal_months, KickChatMessage};
-use crate::pusher;
+use crate::feed::Feed;
 
 /// Anonymous Kick connector. Each `join` resolves the channel and runs its own
-/// Pusher socket; events cross to the UI only through the returned stream.
+/// realtime socket; events cross to the UI only through the returned stream.
 /// Channel resolution + history hit Kick's Cloudflare-fronted endpoints directly
 /// via the emulated client (see [`crate::api`]) — no broker needed for reads.
 #[derive(Default)]
@@ -37,7 +38,7 @@ impl ChatSource for KickSource {
         let channel = api::slugify(channel);
         let (tx, rx) = bks_platform::chat_channel();
 
-        // A failed connection (network drop, Pusher hiccup) is retried with
+        // A failed connection (network drop, server hiccup) is retried with
         // capped exponential backoff instead of leaving the tab dead. The task
         // ends when the UI drops the receiver. The first attempt fetches the
         // full history backlog; reconnects gap-fill just the disconnect window
@@ -135,6 +136,9 @@ struct SubscriptionEvent {
     username: String,
     #[serde(default)]
     months: u64,
+    /// The subscriber's message, which kick.com renders under the sub line.
+    #[serde(default)]
+    custom_message: Option<String>,
 }
 
 /// `ChatMessageSentEvent` data: the sibling frame Kick fires alongside a
@@ -182,7 +186,9 @@ const PENDING_SUB_WINDOW: std::time::Duration = std::time::Duration::from_secs(6
 
 /// `GiftedSubscriptionsEvent` data: `gifter_username` gifted to
 /// `gifted_usernames`, having gifted `gifter_total` in the channel overall.
-#[derive(Deserialize)]
+/// A large batch arrives split into chunks (see [`GiftChunks`]), each listing
+/// part of the recipients; `gifted_total` is the whole batch's size.
+#[derive(Deserialize, Default)]
 struct GiftedSubscriptionsEvent {
     #[serde(default)]
     gifter_username: Option<String>,
@@ -190,6 +196,111 @@ struct GiftedSubscriptionsEvent {
     gifted_usernames: Vec<String>,
     #[serde(default)]
     gifter_total: u64,
+    #[serde(default)]
+    gifted_total: u64,
+    #[serde(default)]
+    chunk_details: Option<GiftChunk>,
+}
+
+impl GiftedSubscriptionsEvent {
+    /// How many subs the batch gifted.
+    fn count(&self) -> usize {
+        (self.gifted_total as usize).max(self.gifted_usernames.len())
+    }
+}
+
+/// `chunk_details` of one piece of a split gift batch (kick.com's own client
+/// shows the batch's header once per `correlation_id`).
+#[derive(Deserialize, Clone)]
+struct GiftChunk {
+    correlation_id: String,
+    total_chunks: u32,
+}
+
+/// How long a partial gift batch waits for its remaining chunks before it is
+/// shown with the recipients that did arrive.
+const GIFT_CHUNK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Reassembles split gift batches so a gift bomb is one event, not one per chunk.
+#[derive(Default)]
+struct GiftChunks {
+    pending: std::collections::HashMap<String, PendingGift>,
+}
+
+struct PendingGift {
+    event: GiftedSubscriptionsEvent,
+    chunks: u32,
+    total: u32,
+    since: tokio::time::Instant,
+}
+
+impl GiftChunks {
+    /// The batch to show once complete; `None` while chunks are outstanding.
+    fn add(&mut self, mut ev: GiftedSubscriptionsEvent) -> Option<GiftedSubscriptionsEvent> {
+        let Some(chunk) = ev.chunk_details.take().filter(|c| c.total_chunks > 1) else {
+            return Some(ev);
+        };
+        let entry = self
+            .pending
+            .entry(chunk.correlation_id.clone())
+            .or_insert_with(|| PendingGift {
+                event: GiftedSubscriptionsEvent {
+                    gifter_username: ev.gifter_username.take(),
+                    ..Default::default()
+                },
+                chunks: 0,
+                total: chunk.total_chunks,
+                since: tokio::time::Instant::now(),
+            });
+        let merged = &mut entry.event;
+        merged.gifted_usernames.append(&mut ev.gifted_usernames);
+        merged.gifted_total = merged.gifted_total.max(ev.gifted_total);
+        merged.gifter_total = merged.gifter_total.max(ev.gifter_total);
+        entry.chunks += 1;
+        if entry.chunks < entry.total {
+            return None;
+        }
+        self.pending
+            .remove(&chunk.correlation_id)
+            .map(|pending| pending.event)
+    }
+
+    /// When the oldest partial batch stops waiting.
+    fn deadline(&self) -> Option<tokio::time::Instant> {
+        self.pending
+            .values()
+            .map(|p| p.since + GIFT_CHUNK_WAIT)
+            .min()
+    }
+
+    /// Partial batches whose wait is over.
+    fn take_stale(&mut self, now: tokio::time::Instant) -> Vec<GiftedSubscriptionsEvent> {
+        let stale: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(_, p)| p.since + GIFT_CHUNK_WAIT <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        stale
+            .into_iter()
+            .filter_map(|id| self.pending.remove(&id).map(|p| p.event))
+            .collect()
+    }
+}
+
+async fn send_gift(tx: &ChatSink, ev: GiftedSubscriptionsEvent) {
+    if let Some(text) = gift_event_text(&ev) {
+        let _ = tx
+            .send(ChatEvent::Event {
+                platform: Platform::Kick,
+                kind: EventKind::Gift,
+                text,
+                timestamp: chrono::Utc::now(),
+                message: None,
+                details: gift_event_details(&ev),
+            })
+            .await;
+    }
 }
 
 /// `StreamHostEvent` data: another channel hosting this one (Kick's "raid").
@@ -344,7 +455,7 @@ fn ensure_crypto_provider() {
     });
 }
 
-/// One connection attempt: resolve the channel, subscribe over Pusher, pump
+/// One connection attempt: resolve the channel, subscribe to its feed, pump
 /// events until the socket dies (`Err`, retried by the caller) or closes/the
 /// tab is gone (`Ok`). The first successful join (`first_attempt`) fetches the full
 /// history backlog (faded, `historical`); reconnects instead gap-fill the
@@ -362,32 +473,21 @@ async fn run_client(
         .await
         .with_context(|| format!("resolving kick channel {channel}"))?;
 
-    let url = api::fetch_pusher_url(info.channel_id).await?;
     let chatroom = format!("chatrooms.{}.v2", info.chatroom_id);
-    let (mut ws, mut pending) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        let (mut ws, _) = tokio_tungstenite::connect_async(url)
-            .await
-            .context("connecting to Kick Pusher")?;
-        let pending = pusher::handshake(&mut ws, &chatroom).await?;
-        Ok::<_, anyhow::Error>((ws, pending))
-    })
-    .await
-    .context("Kick Pusher connection/subscription timed out")??;
-
-    // Kick spreads its (undocumented) Pusher feed across several channels with
-    // *inconsistent* routing and naming: chat + bans arrive on `chatrooms.X.v2`,
-    // but other public events (subs/gifts/hosts/kicks/rewards) can land on the
-    // legacy `chatroom_X` / `chatrooms.X` channels or the broadcaster's
-    // `channel.X` / `channel_X` — observed live (e.g. RewardRedeemedEvent on
-    // `chatroom_X`). So we subscribe to all of them; Pusher
-    // silently ignores any that don't exist.
+    // Kick spreads its (undocumented) realtime feed across several channels with
+    // *inconsistent* routing and naming: chat + bans + subs arrive on
+    // `chatrooms.X.v2`, but other public events (gifts/hosts/kicks/rewards) land
+    // on the legacy `chatroom_X` / `chatrooms.X` channels or the broadcaster's
+    // `channel.X` / `channel_X` (kick.com's own bundle binds the same split). So
+    // we subscribe to all of them; the server ignores or refuses any that don't
+    // exist without affecting the rest.
     //
     // The broadcaster `channel.X` form is keyed by the v2 `chatroom.channel_id`
     // (== `info.channel_id`), NOT the `user_id` — confirmed live: `StreamerIsLive`
     // arrives on `channel.{channel_id}`. That event lands *only* there, so this id
     // must be right or live-status (now push-based, no poll) silently never fires.
     // We keep the `user_id` variants too, since other events were observed on them.
-    let subscribed = [
+    let aliases = [
         format!("chatrooms.{}", info.chatroom_id),
         format!("chatroom_{}", info.chatroom_id),
         format!("channel.{}", info.channel_id),
@@ -395,9 +495,12 @@ async fn run_client(
         format!("channel.{}", info.user_id),
         format!("channel_{}", info.user_id),
     ];
-    for channel_name in &subscribed {
-        pusher::subscribe(&mut ws, channel_name).await?;
-    }
+    let (mut feed, mut pending) = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        Feed::open(info.channel_id, &chatroom, &aliases),
+    )
+    .await
+    .context("Kick chat connection/subscription timed out")??;
 
     let _ = tx
         .send(ChatEvent::System(format!("connected to kick #{channel}")))
@@ -454,7 +557,7 @@ async fn run_client(
     // created/removed while connected arrives live as `PinnedMessageCreated/
     // DeletedEvent`.
 
-    // Kick's Pusher feed sends no backlog, so fetch recent history (direct from
+    // Kick's realtime feed sends no backlog, so fetch recent history (direct from
     // Kick) and replay it as faded messages — or, on a reconnect, gap-fill just
     // the disconnect window as *live* messages. Run it in its own task so the
     // round-trip doesn't delay the live read loop below — the UI sorts `historical`
@@ -498,6 +601,7 @@ async fn run_client(
     // sub line, Twitch-style). Keyed by lowercased username, cleared on use.
     let mut pending_sub_messages: std::collections::HashMap<String, PendingSubMessage> =
         std::collections::HashMap::new();
+    let mut gift_chunks = GiftChunks::default();
 
     loop {
         // The UI dropped the receiver (tab closed): only the chat-message send
@@ -508,7 +612,19 @@ async fn run_client(
         let envelope = match pending.pop_front() {
             Some(frame) => frame,
             None => {
-                let Some(frame) = pusher::next_frame(&mut ws).await? else {
+                let next = match gift_chunks.deadline() {
+                    Some(at) => match tokio::time::timeout_at(at, feed.next_frame()).await {
+                        Ok(next) => next,
+                        Err(_) => {
+                            for ev in gift_chunks.take_stale(tokio::time::Instant::now()) {
+                                send_gift(&tx, ev).await;
+                            }
+                            continue;
+                        }
+                    },
+                    None => feed.next_frame().await,
+                };
+                let Some(frame) = next? else {
                     break;
                 };
                 frame
@@ -611,6 +727,15 @@ async fn run_client(
                     // text, the same way Twitch resubs render.
                     let message = pending_sub_messages
                         .remove(&ev.username.to_lowercase())
+                        .or_else(|| {
+                            let text = ev.custom_message.clone()?;
+                            (!text.trim().is_empty()).then(|| PendingSubMessage {
+                                user_id: 0,
+                                username: ev.username.clone(),
+                                text,
+                                at: std::time::Instant::now(),
+                            })
+                        })
                         .map(|pending| {
                             Box::new(sub_message(&channel, &info.subscriber_badges, pending))
                         });
@@ -628,17 +753,8 @@ async fn run_client(
             }
             "GiftedSubscriptionsEvent" => {
                 if let Ok(ev) = serde_json::from_str::<GiftedSubscriptionsEvent>(&envelope.data) {
-                    if let Some(text) = gift_event_text(&ev) {
-                        let _ = tx
-                            .send(ChatEvent::Event {
-                                platform: Platform::Kick,
-                                kind: EventKind::Gift,
-                                text,
-                                timestamp: chrono::Utc::now(),
-                                message: None,
-                                details: gift_event_details(&ev),
-                            })
-                            .await;
+                    if let Some(ev) = gift_chunks.add(ev) {
+                        send_gift(&tx, ev).await;
                     }
                 }
             }
@@ -937,9 +1053,10 @@ fn gift_event_details(ev: &GiftedSubscriptionsEvent) -> EventDetails {
             .clone()
             .unwrap_or_else(|| "An anonymous user".to_string()),
     );
+    let n = ev.count();
     let mut compact = match ev.gifted_usernames.as_slice() {
-        [single] => format!("gifted a sub to {single}"),
-        many => format!("gifted {} subs", many.len()),
+        [single] if n == 1 => format!("gifted a sub to {single}"),
+        _ => format!("gifted {n} subs"),
     };
     // The gifter's channel-lifetime gift count rides the same event.
     if ev.gifter_total > 0 {
@@ -949,7 +1066,7 @@ fn gift_event_details(ev: &GiftedSubscriptionsEvent) -> EventDetails {
         ));
     }
     match ev.gifted_usernames.as_slice() {
-        [_] => EventDetails {
+        [_] if n == 1 => EventDetails {
             actor,
             compact: Some(compact),
             ..Default::default()
@@ -957,7 +1074,7 @@ fn gift_event_details(ev: &GiftedSubscriptionsEvent) -> EventDetails {
         many => EventDetails {
             actor,
             compact: Some(compact),
-            gift_count: Some(many.len() as u32),
+            gift_count: Some(n as u32),
             recipients: many.to_vec(),
             ..Default::default()
         },
@@ -1030,6 +1147,7 @@ pub(crate) fn sub_celebration_event(
     let ev = SubscriptionEvent {
         username: bks_core::normalize_username(&chat.sender.username).to_string(),
         months,
+        custom_message: None,
     };
     let mut message = build_message(channel, sub_badges, chat);
     message.historical = historical;
@@ -1084,18 +1202,20 @@ fn gift_event_text(ev: &GiftedSubscriptionsEvent) -> Option<String> {
         return None;
     }
     let gifter = ev.gifter_username.as_deref().unwrap_or("An anonymous user");
-    let n = ev.gifted_usernames.len();
+    let n = ev.count();
+    let listed = ev.gifted_usernames.len();
     let subs = plural(n as u64, "subscription", "subscriptions");
     // A gift bomb would otherwise put every recipient in one chat row (Kick
     // sends the whole batch as one event) — name a few, count the rest. The
     // events panel's collapsed row still reveals the full list.
-    let recipients = if n <= 3 {
+    let recipients = if n <= 3 && listed == n {
         join_names(&ev.gifted_usernames)
     } else {
+        let named = listed.min(3);
         format!(
             "{}, and {} others",
-            ev.gifted_usernames[..3].join(", "),
-            n - 3
+            ev.gifted_usernames[..named].join(", "),
+            n - named
         )
     };
     let mut text = format!("{gifter} gifted {n} {subs} to {recipients}.");
@@ -1231,11 +1351,13 @@ mod tests {
         let one = SubscriptionEvent {
             username: "alice".into(),
             months: 1,
+            custom_message: None,
         };
         assert_eq!(sub_event_text(&one), "alice subscribed for 1 month.");
         let many = SubscriptionEvent {
             username: "alice".into(),
             months: 6,
+            custom_message: None,
         };
         assert_eq!(sub_event_text(&many), "alice subscribed for 6 months.");
     }
@@ -1324,6 +1446,7 @@ mod tests {
             gifter_username: Some("gifter".into()),
             gifted_usernames: vec!["a".into(), "b".into(), "c".into()],
             gifter_total: 10,
+            ..Default::default()
         };
         assert_eq!(
             gift_event_text(&ev).unwrap(),
@@ -1337,6 +1460,7 @@ mod tests {
             gifter_username: None,
             gifted_usernames: vec!["a".into()],
             gifter_total: 0,
+            ..Default::default()
         };
         assert_eq!(
             gift_event_text(&ev).unwrap(),
@@ -1350,6 +1474,7 @@ mod tests {
             gifter_username: Some("gifter".into()),
             gifted_usernames: vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()],
             gifter_total: 0,
+            ..Default::default()
         };
         assert_eq!(
             gift_event_text(&ev).unwrap(),
@@ -1363,6 +1488,7 @@ mod tests {
             gifter_username: Some("gifter".into()),
             gifted_usernames: vec!["a".into(), "b".into(), "c".into()],
             gifter_total: 10,
+            ..Default::default()
         };
         let details = gift_event_details(&ev);
         assert_eq!(details.actor.as_deref(), Some("gifter"));
@@ -1374,6 +1500,7 @@ mod tests {
             gifter_username: None,
             gifted_usernames: vec!["a".into()],
             gifter_total: 0,
+            ..Default::default()
         };
         let details = gift_event_details(&single);
         assert_eq!(details.actor.as_deref(), Some("An anonymous user"));
@@ -1382,12 +1509,82 @@ mod tests {
         assert!(details.recipients.is_empty());
     }
 
+    fn gift_chunk(names: &[&str], index: u32) -> GiftedSubscriptionsEvent {
+        serde_json::from_value(serde_json::json!({
+            "gifter_username": "bomber",
+            "gifted_usernames": names,
+            "gifted_total": 5,
+            "gifter_total": 40,
+            "chunk_details": {"correlation_id": "c1", "chunk_index": index, "total_chunks": 2}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn chunked_gift_batch_is_one_event() {
+        let mut chunks = GiftChunks::default();
+        assert!(chunks.add(gift_chunk(&["a", "b", "c"], 0)).is_none());
+        assert!(chunks.deadline().is_some());
+        let ev = chunks.add(gift_chunk(&["d", "e"], 1)).unwrap();
+        assert!(chunks.deadline().is_none());
+        assert_eq!(ev.gifted_usernames, ["a", "b", "c", "d", "e"]);
+        assert_eq!(
+            gift_event_text(&ev).unwrap(),
+            "bomber gifted 5 subscriptions to a, b, c, and 2 others. They've gifted 40 subs in total."
+        );
+        assert_eq!(gift_event_details(&ev).gift_count, Some(5));
+    }
+
+    #[test]
+    fn unchunked_gift_passes_straight_through() {
+        // Live shape: a single gift carries `chunk_details: null`.
+        let ev: GiftedSubscriptionsEvent = serde_json::from_str(
+            r#"{"chatroom_id":1,"correlation_id":"x","gifted_usernames":["OwenUnU21"],"gifter_username":"Haziel_rmz6","gifted_total":1,"gifter_total":1,"chunk_details":null}"#,
+        )
+        .unwrap();
+        let ev = GiftChunks::default().add(ev).unwrap();
+        assert_eq!(
+            gift_event_text(&ev).unwrap(),
+            "Haziel_rmz6 gifted 1 subscription to OwenUnU21. They've gifted 1 sub in total."
+        );
+    }
+
+    #[test]
+    fn incomplete_gift_batch_is_shown_after_the_wait() {
+        let mut chunks = GiftChunks::default();
+        assert!(chunks.add(gift_chunk(&["a", "b", "c"], 0)).is_none());
+        let now = tokio::time::Instant::now();
+        assert!(chunks.take_stale(now).is_empty());
+        let stale = chunks.take_stale(now + GIFT_CHUNK_WAIT);
+        assert_eq!(stale.len(), 1);
+        // The total still counts the chunk that never came.
+        assert_eq!(
+            gift_event_text(&stale[0]).unwrap(),
+            "bomber gifted 5 subscriptions to a, b, c, and 2 others. They've gifted 40 subs in total."
+        );
+    }
+
+    #[test]
+    fn subscription_custom_message_is_parsed() {
+        let ev: SubscriptionEvent = serde_json::from_str(
+            r#"{"chatroom_id":5389830,"username":"MoneyLoveTone","months":1}"#,
+        )
+        .unwrap();
+        assert_eq!(ev.custom_message, None);
+        let ev: SubscriptionEvent = serde_json::from_str(
+            r#"{"chatroom_id":1,"username":"a","months":3,"custom_message":"hi [emote:1:x]"}"#,
+        )
+        .unwrap();
+        assert_eq!(ev.custom_message.as_deref(), Some("hi [emote:1:x]"));
+    }
+
     #[test]
     fn gift_text_empty_is_none() {
         let ev = GiftedSubscriptionsEvent {
             gifter_username: Some("g".into()),
             gifted_usernames: vec![],
             gifter_total: 5,
+            ..Default::default()
         };
         assert_eq!(gift_event_text(&ev), None);
     }

@@ -1,7 +1,9 @@
-# Kick Pusher events — what we handle and what we ignore
+# Kick realtime events — what we handle and what we ignore
 
-Reference captured from a full live session (2026-07-07). Every event below arrives on the
-Pusher WebSocket as `App\Events\<Name>` (prefixed) or bare `<Name>`; the connector strips the
+Reference captured from a full live session (2026-07-07), re-checked 2026-11-20. Every event below
+arrives on the realtime WebSocket (Centrifugo since October 2026, Pusher before — same channel and
+event names on both, see the transport note at the end) as `App\Events\<Name>` (prefixed) or bare
+`<Name>`; the connector strips the
 `App\Events\` prefix and matches on the bare name (`crates/kick/src/connector.rs`). Run with
 `RUST_LOG=bks_kick=debug` to log every event (name + raw payload); plain `ChatMessageEvent`s are
 excluded from that log to avoid flooding it.
@@ -14,8 +16,8 @@ its real payload shape and know why it was skipped.
 | Event | What we do | Payload notes |
 |---|---|---|
 | `ChatMessageEvent` | `Message` (or `Event{Sub}`) | Normal chat line. `content`, `sender.identity.{color,badges,badges_v2}`. `type` is `message`/`reply`/`celebration`; a `celebration` with `metadata.celebration.type:"subscription_renewed"` is a shared resub → `Event{Sub}` — see the celebration note below. |
-| `SubscriptionEvent` | `Event{Sub}` | `{chatroom_id, username, months}`. **No message field** — see resub note below. |
-| `GiftedSubscriptionsEvent` | `Event{Gift}` | `{gifter_username, gifted_usernames[], gifter_total}`. `gifter_username:"Anonymous"` for anon gifts. |
+| `SubscriptionEvent` | `Event{Sub}` | `{chatroom_id, username, months, custom_message?}`. Seen live only for new subs (`months:1`); kick.com's own client drops it when `months > 1` (resubs show via the celebration message instead). kick.com renders `custom_message` under the sub line; so do we. |
+| `GiftedSubscriptionsEvent` | `Event{Gift}` | `{chatroom_id, correlation_id, gifter_username, gifted_usernames[], gifted_total, gifter_total, chunk_details}`. `gifter_username:"Anonymous"` for anon gifts. A large batch is **split into chunks**, see the gift-chunk note. |
 | `StreamHostEvent` | `Event{Raid}` | Kick's host (its "raid" equivalent). `{host_username, number_viewers}`. |
 | `KicksGifted` | `Event{Bits}` | Kick's bits/cheer. `{gift_transaction_id, sender:{id, username, username_color}, gift:{name, amount, type, tier, character_limit, pinned_time}, message?, created_at, expires_at?}`. Higher tiers (e.g. Rage Quit, `LEVEL_UP`, 150 chars) carry a `message` that kick.com pins in chat until `expires_at` (~10 min); we attach it as the event's chat line (no badges in the frame). |
 | `RewardRedeemedEvent` | `Event{Reward}` | Channel-point redemption. `{reward_title, username, user_input}`. |
@@ -26,7 +28,7 @@ its real payload shape and know why it was skipped.
 | `PinnedMessageDeletedEvent` | `UnpinMessage` | Payload is `[]`. |
 | `StreamerIsLive` | `Live{live:true}` | `{livestream:{session_title, created_at}}`. |
 | `StopStreamBroadcast` | `Live{live:false}` | `{livestream:{id, channel:{id}}}`. |
-| `ChatMessageSentEvent` | (buffered) | Carries a resub's `optional_message`; buffered by username and attached to the paired `SubscriptionEvent` as its chat line. See resub note. |
+| `ChatMessageSentEvent` | (buffered) | Carries a resub's `optional_message`; buffered by username and attached to the paired `SubscriptionEvent` as its chat line. See resub note. Not seen at all in the 2026-11-20 capture. |
 
 ## Ignored (fall through `_ => {}`) — captured shapes for future use
 
@@ -91,8 +93,29 @@ celebration types (none seen yet) stay plain chat messages. A renewal also sends
 `ChannelSubscriptionEvent` + `NewSubscriberUpdatedEvent` + `NewActivityFeedEvent` with no
 `SubscriptionEvent` at billing time (seen once); those stay ignored.
 
+## Gift chunks (from kick.com's bundle, 2026-11-20)
+
+A big gift bomb arrives as several `GiftedSubscriptionsEvent` frames on `chatroom_X`, each listing
+part of the recipients, with `chunk_details:{correlation_id, chunk_index, total_chunks}` and the
+batch's full size in `gifted_total`. kick.com shows the header only for the first chunk of a
+`correlation_id`. A single gift sends `chunk_details:null`. The connector reassembles chunks
+(`GiftChunks` in `connector.rs`) into one `Event{Gift}`, emitted when the last chunk lands or 5 s
+after the first (`GIFT_CHUNK_WAIT`), counting `gifted_total` even if a chunk never came. Before
+this, each chunk became its own gift row with only that chunk's count.
+
 ## Chattiness warning
 
 `PollUpdateEvent` (~1/sec per active poll), `GiftsLeaderboardUpdated`, and `KicksLeaderboardUpdated`
 are the highest-volume ignored events. If any are ever handled, throttle/dedupe them — a live poll
 alone produces 100+ frames.
+
+## Transport note (2026-11-20)
+
+kick.com's web client now connects over **Centrifugo**
+(`wss://realtime.<region>.platform.kick.com/connection/websocket`, guest JWT from
+`/api/v1/realtime/auth/connection`); the protocol details are in CLAUDE.md's Kick notes. A
+25-minute side-by-side capture of the same channels over both transports showed the **same events
+with the same payloads** (subs, celebrations, gifts, Kicks, bans, deletes, pins, rewards), so
+nothing about sub handling depends on the transport. Pusher is still served when asked for alone,
+but Kick offers only Centrifugo when a client accepts both, and community clients report the
+Pusher key being withdrawn, so the connector prefers Centrifugo and keeps Pusher as a fallback.
